@@ -964,10 +964,17 @@ void GLContext::setClipPlaneCompat(GLenum plane, const GLdouble* equation) {
         return;
     }
     auto& dst = impl_->clipPlanes[static_cast<std::size_t>(plane - GL_CLIP_PLANE0)];
-    dst[0] = equation[0];
-    dst[1] = equation[1];
-    dst[2] = equation[2];
-    dst[3] = equation[3];
+    const Matrix4 inverseModelView = impl_->matrixState.modelViewInverse();
+    // OpenGL stores legacy clip equations in eye coordinates at call time:
+    // row-vector equation * inverse(current modelview).
+    for (std::size_t col = 0; col < 4; ++col) {
+        double transformed = 0.0;
+        for (std::size_t row = 0; row < 4; ++row) {
+            transformed += equation[row] *
+                static_cast<double>(inverseModelView.m[col * 4 + row]);
+        }
+        dst[col] = transformed;
+    }
 }
 
 void GLContext::setTexEnvFloatCompat(GLenum target, GLenum pname, const GLfloat* params) {
@@ -4198,6 +4205,47 @@ void GLContext::endImmediate() {
         return;
     }
 
+    // A translated immediate draw must land after any queued clear just like
+    // the fixed-function path below.
+    impl_->ensureDefaultDrawableForViewportExtent();
+    impl_->encodePendingWork();
+
+    const GLuint immediateProgramName = impl_->state->currentProgram();
+    GLProgramObject* immediateProgram = immediateProgramName != 0
+        ? impl_->objects->programs().get(immediateProgramName)
+        : nullptr;
+    const auto& immediateRaster = impl_->state->rasterState();
+    const bool immediateProgramUsesVertexID = [&]() {
+        if (immediateProgram == nullptr) {
+            return false;
+        }
+        for (GLuint shaderName : immediateProgram->attachedShaders) {
+            const GLShaderObject* shader =
+                impl_->objects->shaders().get(shaderName);
+            if (shader != nullptr &&
+                shader->source.find("gl_VertexID") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }();
+    const bool preserveLogicalVertexIDs =
+        immediateProgram != nullptr &&
+        immediateProgram->linked &&
+        immediateProgram->hasTranslatedPipeline &&
+        !immediateProgram->hasTessellation &&
+        !immediateProgram->gsPresent &&
+        immediateProgramUsesVertexID &&
+        immediateRaster.polygonModeFront == GL_FILL &&
+        immediateRaster.polygonModeBack == GL_FILL;
+    if (preserveLogicalVertexIDs &&
+        impl_->encodeImmediateTranslatedProgramDraw(
+            mode, captured.data(), captured.size(),
+            sizeof(Impl::ImmediateModeVertex),
+            "glEnd-immediate-logical-vertex-id")) {
+        return;
+    }
+
     std::vector<Impl::ImmediateModeVertex> expanded;
     std::vector<Impl::ImmediateModeVertex> screenExpanded;
     std::vector<Impl::ImmediateModeVertex> lineStippleSource;
@@ -4500,17 +4548,26 @@ void GLContext::endImmediate() {
             break;
     }
     std::vector<Impl::ImmediateModeVertex> fixedFunctionVertices;
+    const Matrix4 compatClipModelView = impl_->matrixState.modelView();
     auto compatClipRejects = [&](const Impl::ImmediateModeVertex& v) {
+        double eyePosition[4] = {};
+        for (std::size_t row = 0; row < 4; ++row) {
+            for (std::size_t col = 0; col < 4; ++col) {
+                eyePosition[row] +=
+                    static_cast<double>(compatClipModelView.m[col * 4 + row]) *
+                    static_cast<double>(v.position[col]);
+            }
+        }
         for (GLenum plane = GL_CLIP_PLANE0; plane <= GL_CLIP_PLANE7; ++plane) {
             if (!impl_->state->isEnabled(plane)) {
                 continue;
             }
             const auto& eq = impl_->clipPlanes[static_cast<std::size_t>(plane - GL_CLIP_PLANE0)];
             const double d =
-                eq[0] * static_cast<double>(v.position[0]) +
-                eq[1] * static_cast<double>(v.position[1]) +
-                eq[2] * static_cast<double>(v.position[2]) +
-                eq[3] * static_cast<double>(v.position[3]);
+                eq[0] * eyePosition[0] +
+                eq[1] * eyePosition[1] +
+                eq[2] * eyePosition[2] +
+                eq[3] * eyePosition[3];
             if (d < 0.0) {
                 return true;
             }
@@ -4861,10 +4918,6 @@ void GLContext::endImmediate() {
     if (drawCount == 0) {
         return;
     }
-
-    // Ensure any pending clear is flushed before the encode.
-    impl_->ensureDefaultDrawableForViewportExtent();
-    impl_->encodePendingWork();
 
     auto paintLogicOpLinesToShadow = [&]() -> bool {
         if (logicOpLineSource.empty() ||

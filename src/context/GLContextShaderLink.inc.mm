@@ -1199,6 +1199,8 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kFogEnd);
         programObject->synthesizedMatrixSlots.fogScale =
             findLocByName(SUN::kFogScale);
+        programObject->synthesizedMatrixSlots.legacyClipPlanes =
+            findLocByName(SUN::kLegacyClipPlanes);
         programObject->shaderDrawIDUniformLocation =
             findLocByName("_appgl_DrawID");
         programObject->shaderBaseVertexUniformLocation =
@@ -1238,6 +1240,13 @@ bool GLContext::linkProgram(GLuint program) {
             : (tessEvalShader ? tessEvalShader
                               : (vertexShader ? vertexShader
                                               : (programObject->separable ? tessControlShader : nullptr)));
+        const std::vector<GLShaderObject*>* xfbStageObjects = geometryShader
+            ? &geometryShaderObjects
+            : (tessEvalShader ? &tessEvalShaderObjects
+                              : (vertexShader ? &vertexShaderObjects
+                                              : (programObject->separable
+                                                     ? &tessControlShaderObjects
+                                                     : nullptr)));
         if (xfbStage == nullptr) {
             programObject->linkLog = "transform feedback varyings specified but no vertex/geometry shader";
             Runtime::shared().recordShaderTranslation({
@@ -1302,14 +1311,22 @@ bool GLContext::linkProgram(GLuint program) {
             return info;
         };
         std::unordered_map<std::string, OutputInfo> outputTypeMap;
-        for (const auto& decl : xfbStage->declaredOutputs) {
-            if (decl.type == 0) {
-                continue;
+        if (xfbStageObjects != nullptr) {
+            for (const GLShaderObject* stageObject : *xfbStageObjects) {
+                if (stageObject == nullptr) {
+                    continue;
+                }
+                for (const auto& decl : stageObject->declaredOutputs) {
+                    if (decl.type == 0) {
+                        continue;
+                    }
+                    const GLint arraySize = decl.arraySize > 0
+                        ? decl.arraySize : 1;
+                    outputTypeMap[decl.name] = makeOutputInfo(
+                        decl.type, arraySize, decl.isArray, decl.name, 0,
+                        glTypeComponents(decl.type) * arraySize);
+                }
             }
-            const GLint arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
-            outputTypeMap[decl.name] = makeOutputInfo(
-                decl.type, arraySize, decl.isArray, decl.name, 0,
-                glTypeComponents(decl.type) * arraySize);
         }
         // Built-in outputs that are always available for capture.
         outputTypeMap["gl_Position"] = makeOutputInfo(
@@ -1335,7 +1352,18 @@ bool GLContext::linkProgram(GLuint program) {
         // lookup entries for those leaves and record the flat scalar slice
         // that draw-time transform feedback needs to pack.
         {
-            const std::string& src = xfbStage->source;
+            std::string combinedStageSource;
+            if (xfbStageObjects != nullptr) {
+                for (const GLShaderObject* stageObject : *xfbStageObjects) {
+                    if (stageObject == nullptr) {
+                        continue;
+                    }
+                    combinedStageSource += stageObject->source;
+                    combinedStageSource.push_back('\n');
+                }
+            }
+            const std::string& src = combinedStageSource.empty()
+                ? xfbStage->source : combinedStageSource;
             auto typeFromKeyword = [](const std::string& k) -> GLenum {
                 if (k == "float") return GL_FLOAT;
                 if (k == "vec2")  return GL_FLOAT_VEC2;

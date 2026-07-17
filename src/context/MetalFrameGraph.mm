@@ -22997,12 +22997,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     }
 
     // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: dispatch VS-as-
-    // compute kernel + capture per-vertex output bytes (no
-    // MTLStageInputOutputDescriptor — attributeless VS only). See
-    // public-API doc on `MetalFrameGraph::encodeVsTfComputeDraw`.
+    // compute kernel + capture per-vertex output bytes. See public-API
+    // doc on `MetalFrameGraph::encodeVsTfComputeDraw`.
     bool encodeVsTfComputeDraw(void* vsComputePSO,
                                std::uint32_t vertexCount,
                                std::size_t perVertexBytes,
+                               const std::vector<MetalTessVertexBufferBinding>&
+                                   vertexBufferBindings,
+                               const void* clientVertexBytes,
+                               std::size_t clientVertexLength,
+                               std::uint32_t clientVertexSlot,
                                const void* uniformBytes,
                                std::size_t uniformLength,
                                std::uint8_t* outBytes)
@@ -23039,6 +23043,26 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         id<MTLComputePipelineState> pso =
             (__bridge id<MTLComputePipelineState>)vsComputePSO;
         [enc setComputePipelineState:pso];
+        for (const auto& binding : vertexBufferBindings) {
+            if (binding.metalBuffer == nullptr || binding.metalSlot >= 16) {
+                [enc endEncoding];
+                return false;
+            }
+            id<MTLBuffer> vertexBuffer =
+                (__bridge id<MTLBuffer>)binding.metalBuffer;
+            [enc setBuffer:vertexBuffer
+                    offset:static_cast<NSUInteger>(binding.offset)
+                   atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+        }
+        if (clientVertexBytes != nullptr && clientVertexLength > 0) {
+            if (clientVertexLength > 4096 || clientVertexSlot >= 16) {
+                [enc endEncoding];
+                return false;
+            }
+            [enc setBytes:clientVertexBytes
+                   length:clientVertexLength
+                  atIndex:static_cast<NSUInteger>(clientVertexSlot)];
+        }
         // Per-vertex output buffer at [[buffer(28)]] (matches SPIRV-
         // Cross's default `shader_output_buffer_index`).
         [enc setBuffer:outBuf offset:0 atIndex:28];
@@ -30878,12 +30902,19 @@ void* MetalFrameGraph::compileMSLFunction(const std::string& msl, std::string* o
 bool MetalFrameGraph::encodeVsTfComputeDraw(void* vsComputePSO,
                                             std::uint32_t vertexCount,
                                             std::size_t perVertexBytes,
+                                            const std::vector<MetalTessVertexBufferBinding>&
+                                                vertexBufferBindings,
+                                            const void* clientVertexBytes,
+                                            std::size_t clientVertexLength,
+                                            std::uint32_t clientVertexSlot,
                                             const void* uniformBytes,
                                             std::size_t uniformLength,
                                             std::uint8_t* outBytes)
 {
     return impl_->encodeVsTfComputeDraw(vsComputePSO, vertexCount,
-                                        perVertexBytes, uniformBytes,
+                                        perVertexBytes, vertexBufferBindings,
+                                        clientVertexBytes, clientVertexLength,
+                                        clientVertexSlot, uniformBytes,
                                         uniformLength, outBytes);
 }
 

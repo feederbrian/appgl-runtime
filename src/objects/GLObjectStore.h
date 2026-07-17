@@ -973,6 +973,7 @@ struct GLSynthesizedMatrixSlots {
     GLint fogStart = -1;
     GLint fogEnd = -1;
     GLint fogScale = -1;
+    GLint legacyClipPlanes = -1;
 
     bool hasAny() const {
         return modelView >= 0 || projection >= 0 || modelViewProjection >= 0 ||
@@ -980,7 +981,7 @@ struct GLSynthesizedMatrixSlots {
                modelViewProjectionInverse >= 0 || normal >= 0 || texture >= 0 ||
                textureEnvColor >= 0 || lightModelAmbient >= 0 ||
                fogColor >= 0 || fogDensity >= 0 || fogStart >= 0 ||
-               fogEnd >= 0 || fogScale >= 0;
+               fogEnd >= 0 || fogScale >= 0 || legacyClipPlanes >= 0;
     }
 };
 

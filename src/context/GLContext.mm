@@ -32090,7 +32090,16 @@ struct GLContext::Impl {
                                               const void* vertices,
                                               std::size_t vertexCount,
                                               std::size_t vertexStride,
-                                              const char* label);
+                                              const char* label,
+                                              const void* indices = nullptr,
+                                              GLsizei indexCount = 0,
+                                              GLenum indexType = 0);
+    bool encodeLegacyClientArrayTranslatedProgramDraw(
+        GLenum mode,
+        const void* indices,
+        GLsizei indexCount,
+        GLenum indexType,
+        const char* label);
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — wrapper around
     // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
@@ -45024,7 +45033,9 @@ static bool pushSynthesizedMatrixUniforms(
     const GLfloat* fogColor = nullptr,
     GLfloat fogDensity = 1.0f,
     GLfloat fogStart = 0.0f,
-    GLfloat fogEnd = 1.0f)
+    GLfloat fogEnd = 1.0f,
+    const std::array<std::array<double, 4>, 8>* legacyClipPlanes = nullptr,
+    std::uint8_t legacyClipPlaneMask = 0)
 {
     bool changed = false;
     if (program.shaderDrawIDUniformLocation >= 0) {
@@ -45117,6 +45128,29 @@ static bool pushSynthesizedMatrixUniforms(
             value,
             GL_FLOAT_MAT4,
             static_cast<GLint>(kSynthesizedTextureMatrixCount),
+            packed.data(),
+            packed.size());
+    }
+    if (slots.legacyClipPlanes >= 0) {
+        std::array<GLfloat, kSynthesizedLegacyClipPlaneCount * 4> packed = {};
+        if (legacyClipPlanes != nullptr) {
+            for (unsigned int i = 0;
+                 i < kSynthesizedLegacyClipPlaneCount;
+                 ++i) {
+                if ((legacyClipPlaneMask & (1u << i)) == 0) {
+                    continue;
+                }
+                for (unsigned int component = 0; component < 4; ++component) {
+                    packed[i * 4 + component] = static_cast<GLfloat>(
+                        (*legacyClipPlanes)[i][component]);
+                }
+            }
+        }
+        auto& value = program.uniformValues[slots.legacyClipPlanes];
+        changed |= assignSynthesizedUniformFloats(
+            value,
+            GL_FLOAT_VEC4,
+            static_cast<GLint>(kSynthesizedLegacyClipPlaneCount),
             packed.data(),
             packed.size());
     }
@@ -45289,6 +45323,8 @@ static void prepareTranslatedDrawUniformBuffers(
     GLfloat fogDensity,
     GLfloat fogStart,
     GLfloat fogEnd,
+    const std::array<std::array<double, 4>, 8>* legacyClipPlanes,
+    std::uint8_t legacyClipPlaneMask,
     GLuint drawID,
     TranslatedDrawInfo& tdi,
     const char* path)
@@ -45306,7 +45342,8 @@ static void prepareTranslatedDrawUniformBuffers(
             program, matrixState, drawID,
             tdi.shaderBaseVertex, tdi.baseInstance,
             textureEnvColor, lightModelAmbient,
-            fogColor, fogDensity, fogStart, fogEnd)) {
+            fogColor, fogDensity, fogStart, fogEnd,
+            legacyClipPlanes, legacyClipPlaneMask)) {
         program.markUniformsDirty();
     }
 
@@ -48914,10 +48951,17 @@ double GLContext::Impl::prepareBindingConstructionUniformBuffers(
     const auto start = bindingConstructionSizingProfile.enabled
         ? glDrawProfileNow()
         : GLDrawProfileTimePoint{};
+    std::uint8_t legacyClipPlaneMask = 0;
+    for (unsigned int i = 0; i < clipPlanes.size(); ++i) {
+        if (state->isEnabled(GL_CLIP_PLANE0 + i)) {
+            legacyClipPlaneMask |= static_cast<std::uint8_t>(1u << i);
+        }
+    }
     prepareTranslatedDrawUniformBuffers(
         program, programName, matrixState,
         texEnv.color, lighting.modelAmbient,
         fog.color, fog.density, fog.start, fog.end,
+        &clipPlanes, legacyClipPlaneMask,
         drawID, info, label);
     return bindingConstructionSizingProfile.enabled
         ? glDrawProfileElapsedUs(start, glDrawProfileNow())
@@ -49011,7 +49055,10 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     const void* vertices,
     std::size_t vertexCount,
     std::size_t vertexStride,
-    const char* label)
+    const char* label,
+    const void* indices,
+    GLsizei indexCount,
+    GLenum indexType)
 {
     if (!appglCompatProfileEnabled() ||
         frameGraph == nullptr ||
@@ -49021,6 +49068,11 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         vertices == nullptr ||
         vertexCount == 0 ||
         vertexStride == 0 ||
+        indexCount < 0 ||
+        ((indices == nullptr) != (indexCount == 0)) ||
+        (indexCount > 0 &&
+         indexType != GL_UNSIGNED_SHORT &&
+         indexType != GL_UNSIGNED_INT) ||
         vertexCount > static_cast<std::size_t>(
             std::numeric_limits<GLsizei>::max()) ||
         vertexCount > (std::numeric_limits<std::size_t>::max() / vertexStride)) {
@@ -49098,6 +49150,9 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     tdi.vertexData = vertices;
     tdi.vertexDataByteCount = vertexCount * vertexStride;
     tdi.vertexStride = vertexStride;
+    tdi.indices = indices;
+    tdi.indexCount = indexCount;
+    tdi.indexType = indexType;
 
     tdi.vertexAttributeLayouts.clear();
     auto addImmediateAttributeLayout =
@@ -49203,6 +49258,185 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
             /*genericVertexAttributesPrepared=*/true);
     const bool ok = encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
     return ok;
+}
+
+bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
+    GLenum mode,
+    const void* indices,
+    GLsizei indexCount,
+    GLenum indexType,
+    const char* label)
+{
+    if (indices == nullptr || indexCount <= 0 ||
+        (indexType != GL_UNSIGNED_SHORT && indexType != GL_UNSIGNED_INT)) {
+        return false;
+    }
+
+    const auto& vertexArray = legacyVertexArray;
+    const auto& colorArray = legacyColorArray;
+    const auto& texCoordArray = legacyTexCoordArray;
+    if (!vertexArray.enabled ||
+        (vertexArray.pointer == nullptr && vertexArray.bufferName == 0) ||
+        vertexArray.type != GL_FLOAT ||
+        vertexArray.size < 2 || vertexArray.size > 4) {
+        return false;
+    }
+
+    const bool colorArrayUsable =
+        colorArray.enabled &&
+        (colorArray.pointer != nullptr || colorArray.bufferName != 0) &&
+        colorArray.type == GL_FLOAT &&
+        colorArray.size >= 3 && colorArray.size <= 4;
+    const bool texCoordArrayUsable =
+        texCoordArray.enabled &&
+        (texCoordArray.pointer != nullptr || texCoordArray.bufferName != 0) &&
+        texCoordArray.type == GL_FLOAT &&
+        texCoordArray.size >= 1 && texCoordArray.size <= 4;
+    if ((colorArray.enabled && !colorArrayUsable) ||
+        (texCoordArray.enabled && !texCoordArrayUsable)) {
+        return false;
+    }
+
+    auto indexAt = [&](GLsizei i) -> GLuint {
+        return indexType == GL_UNSIGNED_SHORT
+            ? static_cast<GLuint>(static_cast<const GLushort*>(indices)[i])
+            : static_cast<const GLuint*>(indices)[i];
+    };
+    GLuint maxIndex = 0;
+    for (GLsizei i = 0; i < indexCount; ++i) {
+        maxIndex = std::max(maxIndex, indexAt(i));
+    }
+    const std::size_t vertexSlots = static_cast<std::size_t>(maxIndex) + 1u;
+    if (vertexSlots == 0 ||
+        vertexSlots > std::vector<ImmediateModeVertex>{}.max_size()) {
+        return false;
+    }
+
+    auto resolveArraySource = [&](const LegacyClientArray& array,
+                                  const std::uint8_t*& base,
+                                  std::size_t& availableBytes) -> bool {
+        if (array.bufferName != 0) {
+            const GLBufferObject* buffer = objects->buffers().get(array.bufferName);
+            if (buffer == nullptr || buffer->shadowBytes.empty()) {
+                return false;
+            }
+            const std::uintptr_t offset =
+                reinterpret_cast<std::uintptr_t>(array.pointer);
+            if (offset > buffer->shadowBytes.size()) {
+                return false;
+            }
+            base = buffer->shadowBytes.data() + static_cast<std::size_t>(offset);
+            availableBytes = buffer->shadowBytes.size() -
+                static_cast<std::size_t>(offset);
+            return true;
+        }
+        if (array.pointer == nullptr) {
+            return false;
+        }
+        base = static_cast<const std::uint8_t*>(array.pointer);
+        availableBytes = std::numeric_limits<std::size_t>::max();
+        return true;
+    };
+    auto elementPointer = [](const std::uint8_t* base,
+                             std::size_t availableBytes,
+                             GLuint sourceIndex,
+                             std::size_t stride,
+                             std::size_t need) -> const GLfloat* {
+        if (stride != 0 &&
+            static_cast<std::size_t>(sourceIndex) >
+                std::numeric_limits<std::size_t>::max() / stride) {
+            return nullptr;
+        }
+        const std::size_t offset = static_cast<std::size_t>(sourceIndex) * stride;
+        if (offset > availableBytes || need > availableBytes - offset) {
+            return nullptr;
+        }
+        return reinterpret_cast<const GLfloat*>(base + offset);
+    };
+
+    const std::size_t vertexStride = vertexArray.stride > 0
+        ? static_cast<std::size_t>(vertexArray.stride)
+        : static_cast<std::size_t>(vertexArray.size) * sizeof(GLfloat);
+    const std::size_t colorStride = colorArray.stride > 0
+        ? static_cast<std::size_t>(colorArray.stride)
+        : static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat);
+    const std::size_t texCoordStride = texCoordArray.stride > 0
+        ? static_cast<std::size_t>(texCoordArray.stride)
+        : static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat);
+
+    const std::uint8_t* vertexBase = nullptr;
+    std::size_t vertexAvailableBytes = 0;
+    if (!resolveArraySource(vertexArray, vertexBase, vertexAvailableBytes)) {
+        return false;
+    }
+    const std::uint8_t* colorBase = nullptr;
+    std::size_t colorAvailableBytes = 0;
+    if (colorArrayUsable &&
+        !resolveArraySource(colorArray, colorBase, colorAvailableBytes)) {
+        return false;
+    }
+    const std::uint8_t* texCoordBase = nullptr;
+    std::size_t texCoordAvailableBytes = 0;
+    if (texCoordArrayUsable &&
+        !resolveArraySource(texCoordArray, texCoordBase, texCoordAvailableBytes)) {
+        return false;
+    }
+
+    std::vector<ImmediateModeVertex> vertices(vertexSlots);
+    std::vector<std::uint8_t> populated(vertexSlots, 0);
+    for (GLsizei i = 0; i < indexCount; ++i) {
+        const GLuint sourceIndex = indexAt(i);
+        if (populated[sourceIndex] != 0) {
+            continue;
+        }
+        const GLfloat* vp = elementPointer(
+            vertexBase, vertexAvailableBytes, sourceIndex, vertexStride,
+            static_cast<std::size_t>(vertexArray.size) * sizeof(GLfloat));
+        if (vp == nullptr) {
+            return false;
+        }
+        const GLfloat* cp = colorArrayUsable
+            ? elementPointer(
+                  colorBase, colorAvailableBytes, sourceIndex, colorStride,
+                  static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat))
+            : nullptr;
+        const GLfloat* tp = texCoordArrayUsable
+            ? elementPointer(
+                  texCoordBase, texCoordAvailableBytes, sourceIndex,
+                  texCoordStride,
+                  static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat))
+            : nullptr;
+        if ((colorArrayUsable && cp == nullptr) ||
+            (texCoordArrayUsable && tp == nullptr)) {
+            return false;
+        }
+
+        ImmediateModeVertex& vertex = vertices[sourceIndex];
+        vertex.position[0] = vp[0];
+        vertex.position[1] = vp[1];
+        vertex.position[2] = vertexArray.size >= 3 ? vp[2] : 0.0f;
+        vertex.position[3] = vertexArray.size >= 4 ? vp[3] : 1.0f;
+        std::memcpy(vertex.color, immediate.currentColor, sizeof(vertex.color));
+        if (cp != nullptr) {
+            vertex.color[0] = cp[0];
+            vertex.color[1] = cp[1];
+            vertex.color[2] = cp[2];
+            vertex.color[3] = colorArray.size >= 4 ? cp[3] : vertex.color[3];
+        }
+        std::memcpy(vertex.texcoord, immediate.currentTexcoord,
+                    sizeof(vertex.texcoord));
+        if (tp != nullptr) {
+            vertex.texcoord[0] = tp[0];
+            vertex.texcoord[1] = texCoordArray.size >= 2 ? tp[1] : vertex.texcoord[1];
+            vertex.texcoord[2] = texCoordArray.size >= 3 ? tp[2] : vertex.texcoord[2];
+            vertex.texcoord[3] = texCoordArray.size >= 4 ? tp[3] : vertex.texcoord[3];
+        }
+        populated[sourceIndex] = 1;
+    }
+
+    return encodeImmediateTranslatedProgramDraw(
+        mode, vertices.data(), vertices.size(), sizeof(ImmediateModeVertex),
+        label, indices, indexCount, indexType);
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,

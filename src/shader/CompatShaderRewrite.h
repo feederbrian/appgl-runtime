@@ -186,6 +186,10 @@ struct LegacyCompatUsage {
     // so the cross-stage interface stays balanced and glslang stops
     // rejecting the reference.
     bool usesClipVertex = false;
+    // GLSL 1.30 compatibility vertex shader with no explicit legacy clip
+    // output. The rewriter wraps main() and emits gl_ClipDistance[] from
+    // gl_Position so enabled glClipPlane state reaches Metal clipping.
+    bool synthesizesLegacyClipPlanes = false;
     // `texture2D(...)` call was rewritten to `texture(...)`.
     bool rewroteTexture2D = false;
     // `textureCube(...)` call was rewritten to `texture(...)`.
@@ -217,7 +221,8 @@ struct LegacyCompatUsage {
                usesFrontSecondaryColor || usesBackSecondaryColor ||
                usesFragmentColor || usesTextureEnvColor ||
                usesLightModelAmbient || anyLight() ||
-               usesClipVertex || usesFtransform || rewroteTexture2D ||
+               usesClipVertex || synthesizesLegacyClipPlanes ||
+               usesFtransform || rewroteTexture2D ||
                rewroteTextureCube || rewroteShadow2DProj;
     }
 };
@@ -277,6 +282,8 @@ inline constexpr const char* kFogEnd =
     "appgl_FogEnd";
 inline constexpr const char* kFogScale =
     "appgl_FogScale";
+inline constexpr const char* kLegacyClipPlanes =
+    "appgl_LegacyClipPlanes";  // vec4[8] array
 }  // namespace SynthesizedUniformNames
 
 // Length of the synthesized texture matrix array. Matches
@@ -286,6 +293,9 @@ inline constexpr unsigned int kSynthesizedTextureMatrixCount = 8;
 // Length of the synthesized texture environment color array. Mirrors the
 // legacy gl_TextureEnvColor[N] surface and matches the texture-matrix count.
 inline constexpr unsigned int kSynthesizedTextureEnvColorCount = 8;
+
+// GL compatibility exposes eight legacy user clip planes.
+inline constexpr unsigned int kSynthesizedLegacyClipPlaneCount = 8;
 
 // Phase 8X Group 4d follow-up¹⁹ — length of the synthesized light-source
 // array uniform. Matches the GL 1.x `GL_MAX_LIGHTS` minimum (8) and the

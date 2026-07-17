@@ -1135,21 +1135,178 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             // program object survives across draws (link-time stable);
             // packing the byte buffer per draw is cheap.
             // The compute encoder currently binds the packed VS
-            // uniforms/output buffer only; sampled textures and image
-            // resources must stay on the CPU interpreter path.
+            // uniforms/output buffer plus VAO-backed stage inputs; sampled
+            // textures and image resources stay on the CPU interpreter path.
             bool gpuTfHandled = false;
-            if (dispatchGateOn &&
+            void* vsTfComputePSO =
+                program->metalVsTfComputePipelineState;
+            std::vector<appgl::MetalTessVertexBufferBinding>
+                vsTfVertexBufferBindings;
+            const void* vsTfClientVertexBytes = nullptr;
+            std::size_t vsTfClientVertexLength = 0;
+            std::uint32_t vsTfClientVertexSlot = 0;
+            bool vsTfDescriptorReady = !program->metalVsTfNeedsDescriptor;
+            const bool gpuTfBaseEligible = dispatchGateOn &&
                 program->vertexReflection.sampledTextures.empty() &&
                 program->vertexReflection.storageImages.empty() &&
-                !useTfCaptureIndices &&
                 program->metalVsTfTier ==
                     GLProgramObject::MetalVsTfTier::VsAsCompute &&
-                program->metalVsTfComputePipelineState != nullptr &&
-                !program->metalVsTfNeedsDescriptor &&
                 program->vsTfOutputLayout.structSize > 0 &&
                 !program->vsTfResolvedSources.empty() &&
                 impl_->frameGraph != nullptr &&
-                count > 0 && first >= 0) {
+                count > 0 && first == 0;
+
+            if (gpuTfBaseEligible && program->metalVsTfNeedsDescriptor) {
+                GLVertexArrayObject descriptorVao = *vao;
+                std::size_t clientAttributeIndex =
+                    descriptorVao.attributes.size();
+                bool descriptorInputsSupported = true;
+                for (std::size_t index = 0;
+                     index < descriptorVao.attributes.size(); ++index) {
+                    const auto& sourceAttribute = vao->attributes[index];
+                    if (!sourceAttribute.enabled) {
+                        continue;
+                    }
+                    GLuint effectiveBuffer = sourceAttribute.buffer;
+                    const bool separatedBindingInRange =
+                        sourceAttribute.bindingIndex <
+                        vao->bindingPoints.size();
+                    const bool hasSeparatedBinding =
+                        separatedBindingInRange &&
+                        vao->bindingPoints[sourceAttribute.bindingIndex].buffer != 0;
+                    if (sourceAttribute.useSeparatedFormat &&
+                        !separatedBindingInRange) {
+                        descriptorInputsSupported = false;
+                        break;
+                    }
+                    if (sourceAttribute.useSeparatedFormat ||
+                        hasSeparatedBinding) {
+                        effectiveBuffer =
+                            vao->bindingPoints[sourceAttribute.bindingIndex].buffer;
+                    }
+                    if (effectiveBuffer != 0) {
+                        continue;
+                    }
+                    // The small legacy path supports one interleaved client
+                    // attribute. More complex client layouts retain the CPU
+                    // interpreter fallback.
+                    if (clientAttributeIndex != descriptorVao.attributes.size() ||
+                        sourceAttribute.useSeparatedFormat ||
+                        sourceAttribute.pointer == 0) {
+                        descriptorInputsSupported = false;
+                        break;
+                    }
+                    clientAttributeIndex = index;
+                    descriptorVao.attributes[index].pointer = 0;
+                }
+
+                if (descriptorInputsSupported) {
+                    appgl::MetalVertexDescriptorBuildResult buildResult =
+                        appgl::buildMetalStageInputOutputDescriptor(
+                            descriptorVao);
+                    if (buildResult.descriptor != nullptr) {
+                        auto cached = program->metalVsTfComputePSOCache.find(
+                            buildResult.hash);
+                        if (cached !=
+                            program->metalVsTfComputePSOCache.end()) {
+                            vsTfComputePSO = cached->second;
+                        } else {
+                            std::string error;
+                            vsTfComputePSO =
+                                impl_->frameGraph->buildComputePipelineState(
+                                    program->vsTfAsComputeMSL, &error,
+                                    nullptr, buildResult.descriptor);
+                            if (vsTfComputePSO != nullptr) {
+                                program->metalVsTfComputePSOCache[
+                                    buildResult.hash] = vsTfComputePSO;
+                            } else if (std::getenv("APPGL_TRACE_TF_VS")) {
+                                std::fprintf(stderr,
+                                    "[APPGL] tf-vs draw-time PSO failed: %s\n",
+                                    error.c_str());
+                            }
+                        }
+
+                        if (vsTfComputePSO != nullptr) {
+                            vsTfDescriptorReady = true;
+                            for (const auto& binding :
+                                 buildResult.vertexBufferBindings) {
+                                if (binding.glBuffer == 0) {
+                                    if (clientAttributeIndex ==
+                                        descriptorVao.attributes.size()) {
+                                        vsTfDescriptorReady = false;
+                                        break;
+                                    }
+                                    const auto& clientAttribute =
+                                        vao->attributes[clientAttributeIndex];
+                                    auto componentBytes = [](GLenum type)
+                                        -> std::size_t {
+                                        switch (type) {
+                                            case GL_BYTE:
+                                            case GL_UNSIGNED_BYTE:
+                                                return 1;
+                                            case GL_SHORT:
+                                            case GL_UNSIGNED_SHORT:
+                                            case GL_HALF_FLOAT:
+                                                return 2;
+                                            case GL_DOUBLE:
+                                                return 8;
+                                            default:
+                                                return 4;
+                                        }
+                                    };
+                                    const std::size_t attributeBytes =
+                                        (clientAttribute.type ==
+                                             GL_INT_2_10_10_10_REV ||
+                                         clientAttribute.type ==
+                                             GL_UNSIGNED_INT_2_10_10_10_REV)
+                                            ? 4
+                                            : componentBytes(
+                                                  clientAttribute.type) *
+                                                  static_cast<std::size_t>(
+                                                      clientAttribute.size);
+                                    const std::size_t clientLength =
+                                        (static_cast<std::size_t>(count) - 1) *
+                                            binding.stride +
+                                        attributeBytes;
+                                    if (clientLength == 0 ||
+                                        clientLength > 4096) {
+                                        vsTfDescriptorReady = false;
+                                        break;
+                                    }
+                                    vsTfClientVertexBytes =
+                                        reinterpret_cast<const void*>(
+                                            clientAttribute.pointer);
+                                    vsTfClientVertexLength = clientLength;
+                                    vsTfClientVertexSlot = binding.metalSlot;
+                                    continue;
+                                }
+                                GLBufferObject* vbo =
+                                    impl_->objects->buffers().get(
+                                        binding.glBuffer);
+                                if (vbo == nullptr ||
+                                    vbo->metalBuffer == nullptr) {
+                                    vsTfDescriptorReady = false;
+                                    break;
+                                }
+                                appgl::MetalTessVertexBufferBinding resolved;
+                                resolved.metalBuffer = vbo->metalBuffer;
+                                resolved.offset = 0;
+                                resolved.metalSlot = binding.metalSlot;
+                                vsTfVertexBufferBindings.push_back(resolved);
+                            }
+                        }
+                        appgl::releaseMetalStageInputOutputDescriptor(
+                            buildResult.descriptor);
+                    } else if (std::getenv("APPGL_TRACE_TF_VS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] tf-vs descriptor build failed: %s\n",
+                            buildResult.error.c_str());
+                    }
+                }
+            }
+
+            if (gpuTfBaseEligible && vsTfDescriptorReady &&
+                vsTfComputePSO != nullptr) {
                 // Verify every TF varying name resolved (skip GPU
                 // path otherwise — CPU helper covers exotic varying
                 // shapes more robustly).
@@ -1187,24 +1344,69 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                     const bool encodeOk =
                         impl_->frameGraph->encodeVsTfComputeDraw(
-                            program->metalVsTfComputePipelineState,
+                            vsTfComputePSO,
                             static_cast<std::uint32_t>(count),
                             perVertexBytes,
+                            vsTfVertexBufferBindings,
+                            vsTfClientVertexBytes,
+                            vsTfClientVertexLength,
+                            vsTfClientVertexSlot,
                             uniformBytesPtr,
                             uniformBytesLen,
                             outBytes.data());
                     if (encodeOk) {
-                        impl_->writeVsTfFromComputeOutput(
-                            *program, outBytes.data(),
-                            static_cast<std::uint32_t>(count),
-                            perVertexBytes, mode);
-                        if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
-                            return true;
+                        const std::uint8_t* tfOutputBytes = outBytes.data();
+                        std::uint32_t tfOutputVertexCount =
+                            static_cast<std::uint32_t>(count);
+                        GLenum tfOutputTopology = mode;
+                        std::vector<std::uint8_t> expandedTfOutput;
+                        if (useTfCaptureIndices) {
+                            expandedTfOutput.resize(
+                                perVertexBytes * tfCaptureIndices.size());
+                            bool indicesInRange = true;
+                            for (std::size_t index = 0;
+                                 index < tfCaptureIndices.size(); ++index) {
+                                const std::uint32_t sourceVertex =
+                                    tfCaptureIndices[index];
+                                if (sourceVertex >=
+                                    static_cast<std::uint32_t>(count)) {
+                                    indicesInRange = false;
+                                    break;
+                                }
+                                std::memcpy(
+                                    expandedTfOutput.data() +
+                                        index * perVertexBytes,
+                                    outBytes.data() +
+                                        static_cast<std::size_t>(sourceVertex) *
+                                            perVertexBytes,
+                                    perVertexBytes);
+                            }
+                            if (!indicesInRange) {
+                                expandedTfOutput.clear();
+                            } else {
+                                tfOutputBytes = expandedTfOutput.data();
+                                tfOutputVertexCount =
+                                    static_cast<std::uint32_t>(
+                                        tfCaptureIndices.size());
+                                tfOutputTopology = tfCaptureTopology;
+                            }
                         }
-                        // Without rasterizer-discard, fall through to
-                        // the regular Metal-side draw so the FS still
-                        // runs. TF buffer is already populated above.
-                        gpuTfHandled = true;
+                        if (useTfCaptureIndices && expandedTfOutput.empty()) {
+                            gpuTfHandled = false;
+                        } else {
+                            impl_->writeVsTfFromComputeOutput(
+                                *program, tfOutputBytes,
+                                tfOutputVertexCount,
+                                perVertexBytes, tfOutputTopology);
+                            if (impl_->state->isEnabled(
+                                    GL_RASTERIZER_DISCARD)) {
+                                return true;
+                            }
+                            // Without rasterizer-discard, fall through to
+                            // the regular Metal-side draw so the FS still
+                            // runs. TF buffer is already populated above.
+                            gpuTfHandled = true;
+                        }
                     }
                 }
             }

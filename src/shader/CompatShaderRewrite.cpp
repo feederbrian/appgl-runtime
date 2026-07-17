@@ -1,5 +1,7 @@
 #include "CompatShaderRewrite.h"
 
+#include "../runtime/AppGLProfile.h"
+
 #include <AppGL/AppGL.h>
 
 #include <cctype>
@@ -1967,6 +1969,21 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         result.usage.modelViewProjection = true;
     }
     if (isVertex) {
+        std::size_t originalVersionStart = std::string::npos;
+        const std::size_t originalVersionEnd =
+            findVersionLineEnd(result.source, &originalVersionStart);
+        const int originalVersion =
+            originalVersionEnd == std::string::npos
+                ? -1
+                : parseVersionNumber(std::string_view(result.source).substr(
+                      originalVersionStart,
+                      originalVersionEnd - originalVersionStart));
+        const bool hasExplicitClipOutput =
+            containsCodeIdentifier(result.source, "gl_ClipVertex") ||
+            containsCodeIdentifier(result.source, "gl_ClipDistance");
+        legacy.synthesizesLegacyClipPlanes =
+            appglCompatProfileEnabled() &&
+            originalVersion == 130 && !hasExplicitClipOutput;
         legacy.attrVertex = legacy.usesFtransform ||
                             containsIdentifier(source, "gl_Vertex");
         legacy.attrNormal = containsIdentifier(source, "gl_Normal");
@@ -2693,6 +2710,14 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                       SUN::kTextureMatrix);
         preamble.append(buf);
     }
+    if (legacy.synthesizesLegacyClipPlanes) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "uniform vec4 %s[%u];\n",
+                      SUN::kLegacyClipPlanes,
+                      kSynthesizedLegacyClipPlaneCount);
+        preamble.append(buf);
+    }
 
     // 5b. fw¹⁹ — legacy attribute declarations (vertex stage only).
     // Location indices follow the NVIDIA-era conventional attribute
@@ -2994,6 +3019,25 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         injected.append(preamble);
         injected.append("#line 1\n");
         result.source.insert(0, injected);
+    }
+
+    if (legacy.synthesizesLegacyClipPlanes &&
+        replaceCodeFunctionIdentifier(
+            result.source, "main", "appgl_LegacyClipMain")) {
+        result.source.append("\nvoid main() {\n");
+        result.source.append("    appgl_LegacyClipMain();\n");
+        for (unsigned int i = 0;
+             i < kSynthesizedLegacyClipPlaneCount;
+             ++i) {
+            result.source.append("    gl_ClipDistance[")
+                .append(std::to_string(i))
+                .append("] = dot(gl_Position, ")
+                .append(SUN::kLegacyClipPlanes)
+                .append("[")
+                .append(std::to_string(i))
+                .append("]);\n");
+        }
+        result.source.append("}\n");
     }
 
     return result;

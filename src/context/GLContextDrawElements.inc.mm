@@ -41,7 +41,59 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         currentProgramForLegacyTf->linked &&
         currentProgramForLegacyTf->hasTranslatedPipeline &&
         !currentProgramForLegacyTf->transformFeedbackVaryingNames.empty();
+    const bool routeLegacyClientArrayThroughTranslatedProgram = [&]() {
+        if (requiresTranslatedLegacyTfCapture ||
+            currentProgramForLegacyTf == nullptr ||
+            !currentProgramForLegacyTf->linked ||
+            !currentProgramForLegacyTf->hasTranslatedPipeline ||
+            currentProgramForLegacyTf->hasTessellation ||
+            currentProgramForLegacyTf->gsPresent ||
+            !programAttachedShaderSourceUsesToken(
+                *currentProgramForLegacyTf, *impl_->objects, "gl_VertexID")) {
+            return false;
+        }
+        const auto& vertexArray = impl_->legacyVertexArray;
+        if (!vertexArray.enabled ||
+            (vertexArray.pointer == nullptr && vertexArray.bufferName == 0) ||
+            vertexArray.type != GL_FLOAT ||
+            vertexArray.size < 2 || vertexArray.size > 4) {
+            return false;
+        }
+        bool hasPositionInput = false;
+        for (const auto& input :
+             currentProgramForLegacyTf->vertexReflection.vertexInputs) {
+            const GLuint location = input.location;
+            const GLuint sourceLocation = input.sourceLocation;
+            const bool supportedLocation =
+                location == 0 || location == 1 || location == 3 || location == 8 ||
+                sourceLocation == 0 || sourceLocation == 1 ||
+                sourceLocation == 3 || sourceLocation == 8;
+            if (input.containsFp64 || !supportedLocation) {
+                return false;
+            }
+            hasPositionInput = hasPositionInput ||
+                location == 0 || sourceLocation == 0;
+        }
+        if (!hasPositionInput) {
+            return false;
+        }
+        const GLVertexArrayObject* currentVao =
+            impl_->currentVertexArrayOrDefault();
+        if (currentVao != nullptr) {
+            for (const auto& input :
+                 currentProgramForLegacyTf->vertexReflection.vertexInputs) {
+                if (input.sourceLocation < currentVao->attributes.size() &&
+                    currentVao->attributes[input.sourceLocation].enabled) {
+                    return false;
+                }
+            }
+        }
+        const auto& raster = impl_->state->rasterState();
+        return raster.polygonModeFront == GL_FILL &&
+            raster.polygonModeBack == GL_FILL;
+    }();
     if (!requiresTranslatedLegacyTfCapture &&
+        !routeLegacyClientArrayThroughTranslatedProgram &&
         encodeLegacyClientArrayDraw(mode, 0, count, indices, type,
                                     "glDrawElements")) {
         return true;
@@ -345,6 +397,22 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             ? nullptr
             : primitiveRestartIndices.data();
         if (drawElementsCount == 0) {
+            return true;
+        }
+    }
+    if (routeLegacyClientArrayThroughTranslatedProgram) {
+        if (impl_->encodeLegacyClientArrayTranslatedProgramDraw(
+                drawElementsMode,
+                drawElementsIndexPtr,
+                drawElementsCount,
+                drawElementsIndexType,
+                "drawElements-legacy-logical-vertex-id")) {
+            return true;
+        }
+        if (encodeLegacyClientArrayDraw(
+                drawElementsMode, 0, drawElementsCount,
+                drawElementsIndexPtr, drawElementsIndexType,
+                "glDrawElements-translated-fallback")) {
             return true;
         }
     }

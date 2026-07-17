@@ -1481,14 +1481,18 @@ public:
     // Returns true on success, false on any Metal failure (caller
     // should fall back to CPU `emulateVsOnlyDrawForTf`).
     //
-    // Day 4 Phase 3a: handles attributeless VS programs (PSO built
-    // without MTLStageInputOutputDescriptor — i.e.
-    // `program.metalVsTfNeedsDescriptor == false`). Phase 3c (Day 6+)
-    // will extend this to VAO-bound stage-input programs via
-    // per-VAO PSO + buffer binding plumbing.
+    // VAO-bound stage input is supplied through `vertexBufferBindings`.
+    // A single small legacy client-array binding can instead be passed as
+    // `clientVertexBytes`; the caller normalizes its descriptor offset to
+    // zero and supplies the corresponding low Metal buffer slot.
     bool encodeVsTfComputeDraw(void* vsComputePSO,
                                std::uint32_t vertexCount,
                                std::size_t perVertexBytes,
+                               const std::vector<MetalTessVertexBufferBinding>&
+                                   vertexBufferBindings,
+                               const void* clientVertexBytes,
+                               std::size_t clientVertexLength,
+                               std::uint32_t clientVertexSlot,
                                const void* uniformBytes,
                                std::size_t uniformLength,
                                std::uint8_t* outBytes);
