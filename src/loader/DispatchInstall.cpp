@@ -114,6 +114,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetFramebufferAttachmentParameteriv = &impl::glGetFramebufferAttachmentParameteriv;
     dispatch.glRenderbufferStorageMultisample = &impl::glRenderbufferStorageMultisample;
     dispatch.glFramebufferTextureLayer = &impl::glFramebufferTextureLayer;
+    dispatch.glFramebufferTextureLayerARB = &impl::glFramebufferTextureLayerARB;
+    dispatch.glFramebufferTextureFaceARB = &impl::glFramebufferTextureFaceARB;
     dispatch.glFramebufferTexture = &impl::glFramebufferTexture;
     dispatch.glFramebufferTextureMultiviewOVR = &impl::glFramebufferTextureMultiviewOVR;
     dispatch.glGenSamplers = &impl::glGenSamplers;
@@ -538,6 +540,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGetFramebufferAttachmentParameteriv, "Framebuffer attachment queries are live.");
     coverage.markImplemented(FunctionId::glRenderbufferStorageMultisample, "Multisample renderbuffer storage is live.");
     coverage.markImplemented(FunctionId::glFramebufferTextureLayer, "Layered texture framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glFramebufferTextureLayerARB, "ARB single-layer texture framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glFramebufferTextureFaceARB, "ARB cube-face texture framebuffer attachments are live.");
     coverage.markImplemented(FunctionId::glFramebufferTexture, "Whole-texture framebuffer attachments are live.");
     coverage.markImplemented(FunctionId::glGenSamplers, "Sampler name generation is live.");
     coverage.markImplemented(FunctionId::glDeleteSamplers, "Sampler deletion is live.");

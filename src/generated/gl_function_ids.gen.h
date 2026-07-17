@@ -683,6 +683,8 @@ enum class FunctionId : std::size_t {
     glNamedFramebufferTexture3DEXT,
     glNamedFramebufferTextureFaceEXT,
     glNamedRenderbufferStorageMultisampleCoverageEXT,
+    glFramebufferTextureLayerARB,
+    glFramebufferTextureFaceARB,
     Count,
 };
 
@@ -1372,6 +1374,8 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glNamedFramebufferTexture3DEXT, "glNamedFramebufferTexture3DEXT", "direct state access", "GL_EXT_direct_state_access"},
     {FunctionId::glNamedFramebufferTextureFaceEXT, "glNamedFramebufferTextureFaceEXT", "direct state access", "GL_EXT_direct_state_access"},
     {FunctionId::glNamedRenderbufferStorageMultisampleCoverageEXT, "glNamedRenderbufferStorageMultisampleCoverageEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glFramebufferTextureLayerARB, "glFramebufferTextureLayerARB", "framebuffers and renderbuffers", "GL_ARB_geometry_shader4"},
+    {FunctionId::glFramebufferTextureFaceARB, "glFramebufferTextureFaceARB", "framebuffers and renderbuffers", "GL_ARB_geometry_shader4"},
 };
 
 inline constexpr std::size_t kGLFunctionCount = static_cast<std::size_t>(FunctionId::Count);

@@ -6108,6 +6108,24 @@
       "firstPassingTestId": "",
       "firstPassingBenchmarkId": "",
       "notes": ""
+    },
+    {
+      "name": "glFramebufferTextureLayerARB",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "GL_ARB_geometry_shader4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferTextureFaceARB",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "GL_ARB_geometry_shader4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
     }
   ]
 }

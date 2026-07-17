@@ -891,6 +891,8 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // up to 128 input components per stage; the GL 4.6 spec floor is 64.
     integerLimits_[GL_MAX_VERTEX_OUTPUT_COMPONENTS] = 128;
     integerLimits_[GL_MAX_FRAGMENT_INPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_GEOMETRY_VARYING_COMPONENTS_ARB] = 128;
+    integerLimits_[GL_MAX_VERTEX_VARYING_COMPONENTS_ARB] = 128;
 
     // Per-stage texture image units. Missing GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
     // is what produces BAR's "max texture slots: 2" diagnostic in its version

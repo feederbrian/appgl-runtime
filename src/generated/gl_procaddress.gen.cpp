@@ -158,7 +158,6 @@ void APIENTRY glFramebufferTexture2DEXT(GLenum target, GLenum attachment, GLenum
 void APIENTRY glFramebufferTexture3DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset);
 void APIENTRY glFramebufferTextureARB(GLenum target, GLenum attachment, GLuint texture, GLint level);
 void APIENTRY glFramebufferTextureEXT(GLenum target, GLenum attachment, GLuint texture, GLint level);
-void APIENTRY glFramebufferTextureLayerARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
 void APIENTRY glFramebufferTextureLayerEXT(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
 void APIENTRY glFramebufferTextureOES(GLenum target, GLenum attachment, GLuint texture, GLint level);
 void APIENTRY glGenBuffersARB(GLsizei n, GLuint *buffers);
@@ -1412,6 +1411,7 @@ const ProcEntry kProcTable[] = {
     {"glFramebufferTexture3DEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTexture3DEXT)},
     {"glFramebufferTextureARB", reinterpret_cast<AppGLProc>(&::glFramebufferTextureARB)},
     {"glFramebufferTextureEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTextureEXT)},
+    {"glFramebufferTextureFaceARB", reinterpret_cast<AppGLProc>(&::glFramebufferTextureFaceARB)},
     {"glFramebufferTextureLayer", reinterpret_cast<AppGLProc>(&::glFramebufferTextureLayer)},
     {"glFramebufferTextureLayerARB", reinterpret_cast<AppGLProc>(&::glFramebufferTextureLayerARB)},
     {"glFramebufferTextureLayerEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTextureLayerEXT)},

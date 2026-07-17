@@ -41,6 +41,15 @@ SUPPORTED_FEATURES = [
     )
 ]
 
+# Extension blocks whose compile-time API surface is exported from AppGL's
+# generated public header even while runtime advertisement remains separately
+# gated by GLCapabilities. Commands that need their own dispatch slots still
+# belong in EXTRA_EXTENSION_COMMANDS below; aliases can remain generator-owned
+# forwarders while sharing these registry-derived prototypes and tokens.
+PUBLIC_EXTENSION_FEATURES = [
+    "GL_ARB_geometry_shader4",
+]
+
 # Registry omissions: aliases the Khronos gl.xml does not declare with an
 # explicit <alias> child element, but which the EXT/ARB extension specs
 # document as behaviorally identical to a core target. As of the vendored
@@ -227,6 +236,18 @@ EXTRA_EXTENSION_COMMANDS = [
         "void",
         "GLuint renderbuffer, GLsizei coverageSamples, GLsizei colorSamples, GLenum internalformat, GLsizei width, GLsizei height",
         "GL_EXT_direct_state_access",
+    ),
+    (
+        "glFramebufferTextureLayerARB",
+        "void",
+        "GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer",
+        "GL_ARB_geometry_shader4",
+    ),
+    (
+        "glFramebufferTextureFaceARB",
+        "void",
+        "GLenum target, GLenum attachment, GLuint texture, GLint level, GLenum face",
+        "GL_ARB_geometry_shader4",
     ),
 ]
 
@@ -876,9 +897,10 @@ def parse_registry() -> tuple[
             continue
         if target_name not in core_names and target_name not in fixed_function_names:
             continue
-        if alias_name in core_names:
-            # Both the alias and its target are already core — no stub
-            # needed, they share the same canonical entry point.
+        if alias_name in command_names:
+            # The alias spelling already has its own generated dispatch slot
+            # (core or explicitly promoted extension command), so emitting a
+            # forwarding body would create a duplicate symbol.
             continue
         if alias_name in fixed_function_names:
             # The alias name is itself in the compat-only feature set, so
@@ -977,6 +999,60 @@ def parse_registry() -> tuple[
     )
 
 
+def extract_public_extension_surface(
+    root: ET.Element,
+) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    commands_by_name: dict[str, ET.Element] = {}
+    for command in root.findall("./commands/command"):
+        proto_name = command.findtext("./proto/name")
+        if proto_name:
+            commands_by_name[proto_name] = command
+
+    enums_by_name: dict[str, str] = {}
+    for enum in root.findall(".//enum"):
+        name = enum.attrib.get("name")
+        value = enum.attrib.get("value")
+        if name and value and name not in enums_by_name:
+            enums_by_name[name] = value
+
+    extension_commands: "OrderedDict[str, dict[str, object]]" = OrderedDict()
+    extension_enums: "OrderedDict[str, str]" = OrderedDict()
+    for extension_name in PUBLIC_EXTENSION_FEATURES:
+        extension = root.find(f"./extensions/extension[@name='{extension_name}']")
+        if extension is None:
+            raise RuntimeError(f"Missing public extension block: {extension_name}")
+        supported_apis = extension.attrib.get("supported", "").split("|")
+        if "gl" not in supported_apis and "glcore" not in supported_apis:
+            raise RuntimeError(f"Public extension {extension_name} does not support desktop GL.")
+        for requirement in extension.findall("require"):
+            api = requirement.attrib.get("api")
+            if api not in (None, "gl"):
+                continue
+            for enum_node in requirement.findall("enum"):
+                enum_name = enum_node.attrib["name"]
+                enum_value = enums_by_name.get(enum_name)
+                if enum_value is None:
+                    raise RuntimeError(
+                        f"Enum {enum_name} required by {extension_name} missing from registry."
+                    )
+                extension_enums[enum_name] = enum_value
+            for command_node in requirement.findall("command"):
+                command_name = command_node.attrib["name"]
+                command = commands_by_name.get(command_name)
+                if command is None:
+                    raise RuntimeError(
+                        f"Command {command_name} required by {extension_name} missing from registry."
+                    )
+                signature = extract_command_signature(command)
+                signature["introduced_version"] = extension_name
+                extension_commands[command_name] = signature
+
+    return list(extension_commands.values()), [
+        {"name": name, "value": value}
+        for name, value in extension_enums.items()
+    ]
+
+
 def extract_header_preamble(source_lines: list[str]) -> list[str]:
     preamble: list[str] = []
     for line in source_lines:
@@ -1013,7 +1089,8 @@ def generate_public_header(
     preamble: list[str],
     type_block: list[str],
     commands: list[dict[str, object]],
-    enums: list[dict[str, str]]
+    enums: list[dict[str, str]],
+    public_extensions: list[str],
 ) -> str:
     lines: list[str] = []
     lines.append("/*")
@@ -1031,6 +1108,10 @@ def generate_public_header(
     for feature_name in SUPPORTED_FEATURES:
         lines.append(f"#ifndef {feature_name}")
         lines.append(f"#define {feature_name} 1")
+        lines.append("#endif")
+    for extension_name in public_extensions:
+        lines.append(f"#ifndef {extension_name}")
+        lines.append(f"#define {extension_name} 1")
         lines.append("#endif")
     lines.append("")
     for enum in enums:
@@ -1792,6 +1873,20 @@ def main() -> None:
         raise FileNotFoundError(f"Missing vendored khrplatform.h: {VENDOR_KHR}")
 
     root, commands, enums, _, aliases, fixed_function = parse_registry()
+    extension_commands, extension_enums = extract_public_extension_surface(root)
+
+    generated_enum_names = {entry["name"] for entry in enums}
+    enums.extend(
+        entry for entry in extension_enums
+        if entry["name"] not in generated_enum_names
+    )
+
+    public_commands = list(commands)
+    public_command_names = {entry["name"] for entry in public_commands}
+    public_commands.extend(
+        entry for entry in extension_commands
+        if entry["name"] not in public_command_names
+    )
 
     PUBLIC_INCLUDE_DIR.mkdir(parents=True, exist_ok=True)
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
@@ -1799,7 +1894,15 @@ def main() -> None:
     source_lines = SOURCE_HEADER.read_text().splitlines()
     preamble = extract_header_preamble(source_lines)
     type_block = extract_type_block(root)
-    PUBLIC_HEADER.write_text(generate_public_header(preamble, type_block, commands, enums))
+    PUBLIC_HEADER.write_text(
+        generate_public_header(
+            preamble,
+            type_block,
+            public_commands,
+            enums,
+            PUBLIC_EXTENSION_FEATURES,
+        )
+    )
     shutil.copyfile(VENDOR_KHR, PUBLIC_KHR)
     ENUMS_HEADER.write_text(generate_enums_header(enums))
     FUNCTION_IDS_HEADER.write_text(generate_function_ids_header(commands))

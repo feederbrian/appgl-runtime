@@ -684,6 +684,8 @@ struct GLDispatchTable {
     PFNGLNAMEDFRAMEBUFFERTEXTURE3DEXTPROC glNamedFramebufferTexture3DEXT = nullptr;
     PFNGLNAMEDFRAMEBUFFERTEXTUREFACEEXTPROC glNamedFramebufferTextureFaceEXT = nullptr;
     PFNGLNAMEDRENDERBUFFERSTORAGEMULTISAMPLECOVERAGEEXTPROC glNamedRenderbufferStorageMultisampleCoverageEXT = nullptr;
+    PFNGLFRAMEBUFFERTEXTURELAYERARBPROC glFramebufferTextureLayerARB = nullptr;
+    PFNGLFRAMEBUFFERTEXTUREFACEARBPROC glFramebufferTextureFaceARB = nullptr;
 };
 
 }  // namespace appgl

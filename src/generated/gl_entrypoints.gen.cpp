@@ -6062,3 +6062,21 @@ extern "C" void APIENTRY glNamedRenderbufferStorageMultisampleCoverageEXT(GLuint
     }
     appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedRenderbufferStorageMultisampleCoverageEXT, "glNamedRenderbufferStorageMultisampleCoverageEXT");
 }
+
+extern "C" void APIENTRY glFramebufferTextureLayerARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glFramebufferTextureLayerARB, "glFramebufferTextureLayerARB");
+    if (auto fn = appgl::Runtime::shared().dispatch().glFramebufferTextureLayerARB) {
+        fn(target, attachment, texture, level, layer);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glFramebufferTextureLayerARB, "glFramebufferTextureLayerARB");
+}
+
+extern "C" void APIENTRY glFramebufferTextureFaceARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLenum face) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glFramebufferTextureFaceARB, "glFramebufferTextureFaceARB");
+    if (auto fn = appgl::Runtime::shared().dispatch().glFramebufferTextureFaceARB) {
+        fn(target, attachment, texture, level, face);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glFramebufferTextureFaceARB, "glFramebufferTextureFaceARB");
+}

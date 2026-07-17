@@ -1900,6 +1900,15 @@ bool isValidFramebufferAttachment(GLenum attachment) {
         || attachment == GL_STENCIL;
 }
 
+bool isCubeMapFace(GLenum face) {
+    return face == GL_TEXTURE_CUBE_MAP_POSITIVE_X ||
+           face == GL_TEXTURE_CUBE_MAP_NEGATIVE_X ||
+           face == GL_TEXTURE_CUBE_MAP_POSITIVE_Y ||
+           face == GL_TEXTURE_CUBE_MAP_NEGATIVE_Y ||
+           face == GL_TEXTURE_CUBE_MAP_POSITIVE_Z ||
+           face == GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
+}
+
 bool isValidFramebufferAttachmentPname(GLenum pname) {
     switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
@@ -6969,7 +6978,15 @@ void APIENTRY glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum te
         recordValidationError(context, "glFramebufferTexture1D", GL_INVALID_ENUM, "attachment or texture target is invalid");
         return;
     }
-    if (context->framebufferTexture(target, attachment, textarget, texture, level, 0, false)) {
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            textarget,
+            texture,
+            level,
+            0,
+            false,
+            GLContext::FramebufferTextureNameError::InvalidOperation)) {
         markFramebufferFunction(FunctionId::glFramebufferTexture1D, "1D texture framebuffer attachments are tracked.");
         Runtime::shared().recordBootstrapTrace("glFramebufferTexture1D(" + std::to_string(attachment) + ")");
     }
@@ -6993,7 +7010,15 @@ void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum te
         recordValidationError(context, "glFramebufferTexture2D", GL_INVALID_ENUM, "attachment or texture target is invalid");
         return;
     }
-    if (context->framebufferTexture(target, attachment, textarget, texture, level, 0, false)) {
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            textarget,
+            texture,
+            level,
+            0,
+            false,
+            GLContext::FramebufferTextureNameError::InvalidOperation)) {
         markFramebufferFunction(FunctionId::glFramebufferTexture2D, "2D texture framebuffer attachments are tracked.");
         Runtime::shared().recordBootstrapTrace("glFramebufferTexture2D(" + std::to_string(attachment) + ")");
     }
@@ -7008,7 +7033,15 @@ void APIENTRY glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum te
         recordValidationError(context, "glFramebufferTexture3D", GL_INVALID_ENUM, "attachment or texture target is invalid");
         return;
     }
-    if (context->framebufferTexture(target, attachment, textarget, texture, level, zoffset, false)) {
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            textarget,
+            texture,
+            level,
+            zoffset,
+            false,
+            GLContext::FramebufferTextureNameError::InvalidOperation)) {
         markFramebufferFunction(FunctionId::glFramebufferTexture3D, "3D texture framebuffer layer attachments are tracked.");
         Runtime::shared().recordBootstrapTrace("glFramebufferTexture3D(" + std::to_string(attachment) + ")");
     }
@@ -7023,7 +7056,15 @@ void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint text
         recordValidationError(context, "glFramebufferTexture", GL_INVALID_ENUM, "attachment is invalid");
         return;
     }
-    if (context->framebufferTexture(target, attachment, 0, texture, level, 0, true)) {
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            0,
+            texture,
+            level,
+            0,
+            true,
+            GLContext::FramebufferTextureNameError::InvalidValue)) {
         markFramebufferFunction(FunctionId::glFramebufferTexture, "Whole-texture framebuffer attachments are tracked.");
         Runtime::shared().recordBootstrapTrace("glFramebufferTexture(" + std::to_string(attachment) + ")");
     }
@@ -7038,9 +7079,87 @@ void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint
         recordValidationError(context, "glFramebufferTextureLayer", GL_INVALID_ENUM, "attachment is invalid");
         return;
     }
-    if (context->framebufferTexture(target, attachment, 0, texture, level, layer, false)) {
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            0,
+            texture,
+            level,
+            layer,
+            false,
+            GLContext::FramebufferTextureNameError::InvalidOperation)) {
         markFramebufferFunction(FunctionId::glFramebufferTextureLayer, "Layered texture framebuffer attachments are tracked.");
         Runtime::shared().recordBootstrapTrace("glFramebufferTextureLayer(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferTextureLayerARB(
+    GLenum target,
+    GLenum attachment,
+    GLuint texture,
+    GLint level,
+    GLint layer) {
+    auto* context = requireCurrentContext("glFramebufferTextureLayerARB");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment)) {
+        recordValidationError(
+            context,
+            "glFramebufferTextureLayerARB",
+            GL_INVALID_ENUM,
+            "attachment is invalid");
+        return;
+    }
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            0,
+            texture,
+            level,
+            layer,
+            false,
+            GLContext::FramebufferTextureNameError::InvalidValue)) {
+        markFramebufferFunction(
+            FunctionId::glFramebufferTextureLayerARB,
+            "ARB single-layer texture framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace(
+            "glFramebufferTextureLayerARB(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferTextureFaceARB(
+    GLenum target,
+    GLenum attachment,
+    GLuint texture,
+    GLint level,
+    GLenum face) {
+    auto* context = requireCurrentContext("glFramebufferTextureFaceARB");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment) || !isCubeMapFace(face)) {
+        recordValidationError(
+            context,
+            "glFramebufferTextureFaceARB",
+            GL_INVALID_ENUM,
+            "attachment or cube-map face is invalid");
+        return;
+    }
+    if (context->framebufferTexture(
+            target,
+            attachment,
+            face,
+            texture,
+            level,
+            0,
+            false,
+            GLContext::FramebufferTextureNameError::InvalidValue)) {
+        markFramebufferFunction(
+            FunctionId::glFramebufferTextureFaceARB,
+            "ARB cube-face texture framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace(
+            "glFramebufferTextureFaceARB(" + std::to_string(attachment) + ")");
     }
 }
 
@@ -9403,41 +9522,80 @@ void APIENTRY glProgramBinary(GLuint program, GLenum binaryFormat, const void* b
 
 void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value) {
     auto* ctx = requireCurrentContext("glProgramParameteri"); if (!ctx) return;
-    // GL 4.6 §7.3: `program` must name an existing program object.
-    // Otherwise INVALID_VALUE. CTS `sepshaderobjs.PipelineApi`
-    // asserts INVALID_VALUE on a deleted program.
     auto* obj = ctx->objects().programs().get(program);
     if (obj == nullptr) {
         recordValidationError(ctx, "glProgramParameteri", GL_INVALID_VALUE,
                               "program is not an existing program object");
         return;
     }
-    // GL 4.6 §7.3 pname validation. Accepted tokens:
-    //   GL_PROGRAM_SEPARABLE (TRUE/FALSE)
-    //   GL_PROGRAM_BINARY_RETRIEVABLE_HINT (TRUE/FALSE)
-    // Anything else → INVALID_ENUM. Value must be TRUE or FALSE
-    // for both pnames.
-    if (pname != GL_PROGRAM_SEPARABLE &&
-        pname != GL_PROGRAM_BINARY_RETRIEVABLE_HINT) {
-        recordValidationError(ctx, "glProgramParameteri", GL_INVALID_ENUM,
-                              "pname is not a valid program parameter");
-        return;
+
+    switch (pname) {
+        case GL_GEOMETRY_INPUT_TYPE_ARB:
+            if (value != GL_POINTS &&
+                value != GL_LINES &&
+                value != GL_LINES_ADJACENCY_ARB &&
+                value != GL_TRIANGLES &&
+                value != GL_TRIANGLES_ADJACENCY_ARB) {
+                recordValidationError(
+                    ctx,
+                    "glProgramParameteri",
+                    GL_INVALID_VALUE,
+                    "ARB geometry input type is invalid");
+                return;
+            }
+            obj->arbGeometryShader4.inputType = static_cast<GLenum>(value);
+            break;
+        case GL_GEOMETRY_OUTPUT_TYPE_ARB:
+            if (value != GL_POINTS &&
+                value != GL_LINE_STRIP &&
+                value != GL_TRIANGLE_STRIP) {
+                recordValidationError(
+                    ctx,
+                    "glProgramParameteri",
+                    GL_INVALID_VALUE,
+                    "ARB geometry output type is invalid");
+                return;
+            }
+            obj->arbGeometryShader4.outputType = static_cast<GLenum>(value);
+            break;
+        case GL_GEOMETRY_VERTICES_OUT_ARB: {
+            GLint maxVertices = 0;
+            ctx->capabilities().queryInteger(
+                GL_MAX_GEOMETRY_OUTPUT_VERTICES_ARB,
+                &maxVertices);
+            if (value < 0 || value > maxVertices) {
+                recordValidationError(
+                    ctx,
+                    "glProgramParameteri",
+                    GL_INVALID_VALUE,
+                    "ARB geometry vertices-out request exceeds the supported range");
+                return;
+            }
+            // The active-varying product is link-dependent. Commit 2's link
+            // plan validates it without mutating the current executable.
+            obj->arbGeometryShader4.verticesOut = value;
+            break;
+        }
+        case GL_PROGRAM_SEPARABLE:
+        case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
+            if (value != GL_TRUE && value != GL_FALSE) {
+                recordValidationError(ctx, "glProgramParameteri", GL_INVALID_VALUE,
+                                      "value must be GL_TRUE or GL_FALSE");
+                return;
+            }
+            if (pname == GL_PROGRAM_SEPARABLE) {
+                obj->separable = (value == GL_TRUE);
+            }
+            break;
+        default:
+            recordValidationError(ctx, "glProgramParameteri", GL_INVALID_ENUM,
+                                  "pname is not a valid program parameter");
+            return;
     }
-    if (value != GL_TRUE && value != GL_FALSE) {
-        recordValidationError(ctx, "glProgramParameteri", GL_INVALID_VALUE,
-                              "value must be GL_TRUE or GL_FALSE");
-        return;
-    }
-    // GL 4.1 §7.3 / ARB_separate_shader_objects — GL_PROGRAM_
-    // SEPARABLE has linker-visible semantics: once set, the next
-    // `glLinkProgram` accepts incomplete stage combinations (the
-    // missing stages are filled in by the pipeline object).
-    if (pname == GL_PROGRAM_SEPARABLE) {
-        obj->separable = (value == GL_TRUE);
-    }
-    // GL_PROGRAM_BINARY_RETRIEVABLE_HINT is a no-op — we don't
-    // support program binaries.
-    markProgramFunction(FunctionId::glProgramParameteri, "ProgramParameteri GL_PROGRAM_SEPARABLE recorded.");
+
+    markProgramFunction(
+        FunctionId::glProgramParameteri,
+        "ProgramParameteri request state recorded.");
     Runtime::shared().recordBootstrapTrace("glProgramParameteri(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
 }
 

@@ -389,7 +389,15 @@ static bool c52AttachmentEquals(const GLFramebufferAttachment& a,
            a.baseViewIndex == b.baseViewIndex && a.numViews == b.numViews;
 }
 
-bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer, bool layered) {
+bool GLContext::framebufferTexture(
+    GLenum target,
+    GLenum attachment,
+    GLenum textarget,
+    GLuint texture,
+    GLint level,
+    GLint layer,
+    bool layered,
+    FramebufferTextureNameError nameError) {
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -434,20 +442,17 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         return true;
     }
 
-    // Invalid-texture-name error code differs per entry-point variant
-    // (GL 4.6 §9.2.8):
-    //  - glFramebufferTexture / glNamedFramebufferTexture (layered=true):
-    //    INVALID_VALUE when texture is non-zero but not a valid name.
-    //  - glFramebufferTextureLayer / glNamedFramebufferTextureLayer
-    //    (layered=false here): INVALID_OPERATION for the same case.
-    // The not-instantiated case stays INVALID_OPERATION for both.
+    // Invalid-texture-name errors are entry-point semantics, independent of
+    // whether the resulting attachment is layered. Core Layer uses
+    // INVALID_OPERATION; ARB_geometry_shader4 Whole/Layer/Face and core Whole
+    // use INVALID_VALUE. A reserved but never instantiated texture name is
+    // still not the name of an existing texture object and follows the same
+    // entry-point policy.
     const GLTextureObject* textureObject = impl_->objects->textures().get(texture);
-    if (textureObject == nullptr) {
-        pushError(layered ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
-        return false;
-    }
-    if (!textureObject->instantiated) {
-        pushError(GL_INVALID_OPERATION);
+    if (textureObject == nullptr || !textureObject->instantiated) {
+        pushError(nameError == FramebufferTextureNameError::InvalidValue
+                      ? GL_INVALID_VALUE
+                      : GL_INVALID_OPERATION);
         return false;
     }
     // GL 4.6 §9.2.8 / §8.18.1 textarget-vs-texture-target validation:
@@ -714,7 +719,8 @@ bool GLContext::framebufferTextureMultiviewOVR(GLenum target,
         texture,
         level,
         baseViewIndex,
-        true);
+        true,
+        FramebufferTextureNameError::InvalidValue);
     if (!ok || texture == 0) {
         return ok;
     }
@@ -1799,13 +1805,18 @@ bool GLContext::namedFramebufferTexture(GLuint framebuffer, GLenum attachment, G
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
     // glNamedFramebufferTexture binds the *whole* texture (all layers)
-    // as a layered attachment — passes `layered=true` so the internal
-    // framebufferTexture reaches the spec-correct INVALID_VALUE path
-    // for invalid texture names (the non-layer-variant uses
-    // INVALID_OPERATION per §9.2.8 distinction). Also textarget=0 so
-    // we don't force-check against GL_TEXTURE_2D when the texture was
-    // created with a different target (array / cube / 3D).
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, 0, texture, level, 0, true);
+    // as a layered attachment. The explicit InvalidValue policy preserves
+    // whole-texture name semantics independently from `layered`; textarget=0
+    // avoids forcing a target match for array / cube / 3D textures.
+    bool ok = framebufferTexture(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        0,
+        texture,
+        level,
+        0,
+        true,
+        FramebufferTextureNameError::InvalidValue);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -1814,7 +1825,15 @@ bool GLContext::namedFramebufferTexture1DEXT(GLuint framebuffer, GLenum attachme
     DSA_FB_CHECK(framebuffer)
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, textarget, texture, level, 0, false);
+    bool ok = framebufferTexture(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        textarget,
+        texture,
+        level,
+        0,
+        false,
+        FramebufferTextureNameError::InvalidOperation);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -1823,7 +1842,15 @@ bool GLContext::namedFramebufferTexture2DEXT(GLuint framebuffer, GLenum attachme
     DSA_FB_CHECK(framebuffer)
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, textarget, texture, level, 0, false);
+    bool ok = framebufferTexture(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        textarget,
+        texture,
+        level,
+        0,
+        false,
+        FramebufferTextureNameError::InvalidOperation);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -1832,7 +1859,15 @@ bool GLContext::namedFramebufferTexture3DEXT(GLuint framebuffer, GLenum attachme
     DSA_FB_CHECK(framebuffer)
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, textarget, texture, level, zoffset, false);
+    bool ok = framebufferTexture(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        textarget,
+        texture,
+        level,
+        zoffset,
+        false,
+        FramebufferTextureNameError::InvalidOperation);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -1841,7 +1876,15 @@ bool GLContext::namedFramebufferTextureFaceEXT(GLuint framebuffer, GLenum attach
     DSA_FB_CHECK(framebuffer)
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, face, texture, level, 0, false);
+    bool ok = framebufferTexture(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        face,
+        texture,
+        level,
+        0,
+        false,
+        FramebufferTextureNameError::InvalidOperation);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -1851,8 +1894,8 @@ bool GLContext::namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachme
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
     // glNamedFramebufferTextureLayer binds a *specific* layer of a
-    // texture (3D/Array/Cube-Array). Two wiring points for correct
-    // error-code mapping:
+    // texture (3D/Array/Cube-Array). Three wiring points preserve its
+    // validation semantics:
     //
     //  - `textarget = 0` (don't check texture target against a passed
     //    enum): the spec lets this entry point accept whatever target
@@ -1864,11 +1907,22 @@ bool GLContext::namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachme
     //    one attachment" (glFramebufferTexture semantics); this is
     //    the specific-layer variant, so bounds validation has to run.
     //
+    //  - `InvalidOperation`: a non-object texture name follows the core
+    //    Layer rule rather than the ARB_geometry_shader4 Layer rule.
+    //
     // Together these let `framebufferTexture` reach the spec-required
     // INVALID_VALUE for an out-of-range layer instead of bailing
     // earlier on target mismatch or skipping the layer check entirely
     // (framebuffers_texture_attachment_errors).
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, 0, texture, level, layer, false);
+    bool ok = framebufferTexture(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        0,
+        texture,
+        level,
+        layer,
+        false,
+        FramebufferTextureNameError::InvalidOperation);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }

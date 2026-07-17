@@ -218,6 +218,18 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(maxLen);
             return true;
         }
+        // GL_ARB_geometry_shader4 request queries are intentionally distinct
+        // from the core linked-executable queries below. They remain readable
+        // before link and after a failed relink.
+        case GL_GEOMETRY_VERTICES_OUT_ARB:
+            *params = object->arbGeometryShader4.verticesOut;
+            return true;
+        case GL_GEOMETRY_INPUT_TYPE_ARB:
+            *params = static_cast<GLint>(object->arbGeometryShader4.inputType);
+            return true;
+        case GL_GEOMETRY_OUTPUT_TYPE_ARB:
+            *params = static_cast<GLint>(object->arbGeometryShader4.outputType);
+            return true;
         // Geometry shader queries (GL 3.2+). GL 4.6 §7.13 "Program
         // Queries": GL_GEOMETRY_* pnames generate GL_INVALID_OPERATION
         // when the program has not been successfully linked with a

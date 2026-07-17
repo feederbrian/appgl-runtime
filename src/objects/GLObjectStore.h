@@ -1030,6 +1030,12 @@ inline std::uint64_t nextGLProgramObjectSerial() {
     return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
+struct ArbGeometryShader4Requests {
+    GLenum inputType = GL_TRIANGLES;
+    GLenum outputType = GL_TRIANGLE_STRIP;
+    GLint verticesOut = 0;
+};
+
 struct GLProgramObject {
     // Phase 3f-11: explicit special members declared here + defined
     // in GLObjectStore.cpp, where appgl::interp::SpirvModule is a
@@ -1060,6 +1066,10 @@ struct GLProgramObject {
     // glProgramParameteri mutates `separable` above for the next link;
     // pipeline legality checks use this linked snapshot.
     bool separableLinked = false;
+    // GL_ARB_geometry_shader4 program parameters are requests for the next
+    // link, distinct from the current executable's gs* metadata below.
+    // They remain queryable before link and after a failed relink.
+    ArbGeometryShader4Requests arbGeometryShader4;
     // Stage bits present in the most recently linked executable.
     // Unlike attachedShaders, this survives glCreateShaderProgramv's
     // attach-link-detach flow for separable program pipeline stages.

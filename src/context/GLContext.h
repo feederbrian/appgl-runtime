@@ -25,6 +25,11 @@ struct GLTextureObject;
 
 class GLContext {
 public:
+    enum class FramebufferTextureNameError {
+        InvalidOperation,
+        InvalidValue,
+    };
+
     explicit GLContext(void* layer);
     GLContext(GLsizei offscreenWidth, GLsizei offscreenHeight);
     ~GLContext();
@@ -214,7 +219,14 @@ public:
     bool isFramebuffer(GLuint framebuffer) const;
     bool bindFramebuffer(GLenum target, GLuint framebuffer);
     GLenum checkFramebufferStatus(GLenum target) const;
-    bool framebufferTexture(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer, bool layered);
+    bool framebufferTexture(GLenum target,
+                            GLenum attachment,
+                            GLenum textarget,
+                            GLuint texture,
+                            GLint level,
+                            GLint layer,
+                            bool layered,
+                            FramebufferTextureNameError nameError);
     bool framebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
     bool framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
     bool blitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);

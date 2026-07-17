@@ -680,10 +680,6 @@ extern "C" void APIENTRY glFramebufferTextureEXT(GLenum target, GLenum attachmen
     ::glFramebufferTexture(target, attachment, texture, level);
 }
 
-extern "C" void APIENTRY glFramebufferTextureLayerARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
-    ::glFramebufferTextureLayer(target, attachment, texture, level, layer);
-}
-
 extern "C" void APIENTRY glFramebufferTextureLayerEXT(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     ::glFramebufferTextureLayer(target, attachment, texture, level, layer);
 }

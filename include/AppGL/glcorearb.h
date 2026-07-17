@@ -170,6 +170,9 @@ typedef void(APIENTRY *GLVULKANPROCNV)(void);
 #ifndef GL_VERSION_4_6
 #define GL_VERSION_4_6 1
 #endif
+#ifndef GL_ARB_geometry_shader4
+#define GL_ARB_geometry_shader4 1
+#endif
 
 #ifndef GL_DEPTH_BUFFER_BIT
 #define GL_DEPTH_BUFFER_BIT 0x00000100
@@ -4605,6 +4608,60 @@ typedef void(APIENTRY *GLVULKANPROCNV)(void);
 #ifndef GL_HSL_LUMINOSITY_KHR
 #define GL_HSL_LUMINOSITY_KHR 0x92B0
 #endif
+#ifndef GL_LINES_ADJACENCY_ARB
+#define GL_LINES_ADJACENCY_ARB 0x000A
+#endif
+#ifndef GL_LINE_STRIP_ADJACENCY_ARB
+#define GL_LINE_STRIP_ADJACENCY_ARB 0x000B
+#endif
+#ifndef GL_TRIANGLES_ADJACENCY_ARB
+#define GL_TRIANGLES_ADJACENCY_ARB 0x000C
+#endif
+#ifndef GL_TRIANGLE_STRIP_ADJACENCY_ARB
+#define GL_TRIANGLE_STRIP_ADJACENCY_ARB 0x000D
+#endif
+#ifndef GL_PROGRAM_POINT_SIZE_ARB
+#define GL_PROGRAM_POINT_SIZE_ARB 0x8642
+#endif
+#ifndef GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS_ARB
+#define GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS_ARB 0x8C29
+#endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_LAYERED_ARB
+#define GL_FRAMEBUFFER_ATTACHMENT_LAYERED_ARB 0x8DA7
+#endif
+#ifndef GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS_ARB
+#define GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS_ARB 0x8DA8
+#endif
+#ifndef GL_FRAMEBUFFER_INCOMPLETE_LAYER_COUNT_ARB
+#define GL_FRAMEBUFFER_INCOMPLETE_LAYER_COUNT_ARB 0x8DA9
+#endif
+#ifndef GL_GEOMETRY_SHADER_ARB
+#define GL_GEOMETRY_SHADER_ARB 0x8DD9
+#endif
+#ifndef GL_GEOMETRY_VERTICES_OUT_ARB
+#define GL_GEOMETRY_VERTICES_OUT_ARB 0x8DDA
+#endif
+#ifndef GL_GEOMETRY_INPUT_TYPE_ARB
+#define GL_GEOMETRY_INPUT_TYPE_ARB 0x8DDB
+#endif
+#ifndef GL_GEOMETRY_OUTPUT_TYPE_ARB
+#define GL_GEOMETRY_OUTPUT_TYPE_ARB 0x8DDC
+#endif
+#ifndef GL_MAX_GEOMETRY_VARYING_COMPONENTS_ARB
+#define GL_MAX_GEOMETRY_VARYING_COMPONENTS_ARB 0x8DDD
+#endif
+#ifndef GL_MAX_VERTEX_VARYING_COMPONENTS_ARB
+#define GL_MAX_VERTEX_VARYING_COMPONENTS_ARB 0x8DDE
+#endif
+#ifndef GL_MAX_GEOMETRY_UNIFORM_COMPONENTS_ARB
+#define GL_MAX_GEOMETRY_UNIFORM_COMPONENTS_ARB 0x8DDF
+#endif
+#ifndef GL_MAX_GEOMETRY_OUTPUT_VERTICES_ARB
+#define GL_MAX_GEOMETRY_OUTPUT_VERTICES_ARB 0x8DE0
+#endif
+#ifndef GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS_ARB
+#define GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS_ARB 0x8DE1
+#endif
 
 typedef void (APIENTRYP PFNGLCULLFACEPROC)(GLenum mode);
 typedef void (APIENTRYP PFNGLFRONTFACEPROC)(GLenum mode);
@@ -5284,6 +5341,10 @@ typedef void (APIENTRYP PFNGLNAMEDFRAMEBUFFERTEXTURE2DEXTPROC)(GLuint framebuffe
 typedef void (APIENTRYP PFNGLNAMEDFRAMEBUFFERTEXTURE3DEXTPROC)(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset);
 typedef void (APIENTRYP PFNGLNAMEDFRAMEBUFFERTEXTUREFACEEXTPROC)(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLenum face);
 typedef void (APIENTRYP PFNGLNAMEDRENDERBUFFERSTORAGEMULTISAMPLECOVERAGEEXTPROC)(GLuint renderbuffer, GLsizei coverageSamples, GLsizei colorSamples, GLenum internalformat, GLsizei width, GLsizei height);
+typedef void (APIENTRYP PFNGLFRAMEBUFFERTEXTURELAYERARBPROC)(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
+typedef void (APIENTRYP PFNGLFRAMEBUFFERTEXTUREFACEARBPROC)(GLenum target, GLenum attachment, GLuint texture, GLint level, GLenum face);
+typedef void (APIENTRYP PFNGLPROGRAMPARAMETERIARBPROC)(GLuint program, GLenum pname, GLint value);
+typedef void (APIENTRYP PFNGLFRAMEBUFFERTEXTUREARBPROC)(GLenum target, GLenum attachment, GLuint texture, GLint level);
 
 GLAPI void APIENTRY glCullFace(GLenum mode);
 GLAPI void APIENTRY glFrontFace(GLenum mode);
@@ -5963,6 +6024,10 @@ GLAPI void APIENTRY glNamedFramebufferTexture2DEXT(GLuint framebuffer, GLenum at
 GLAPI void APIENTRY glNamedFramebufferTexture3DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset);
 GLAPI void APIENTRY glNamedFramebufferTextureFaceEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLenum face);
 GLAPI void APIENTRY glNamedRenderbufferStorageMultisampleCoverageEXT(GLuint renderbuffer, GLsizei coverageSamples, GLsizei colorSamples, GLenum internalformat, GLsizei width, GLsizei height);
+GLAPI void APIENTRY glFramebufferTextureLayerARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
+GLAPI void APIENTRY glFramebufferTextureFaceARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLenum face);
+GLAPI void APIENTRY glProgramParameteriARB(GLuint program, GLenum pname, GLint value);
+GLAPI void APIENTRY glFramebufferTextureARB(GLenum target, GLenum attachment, GLuint texture, GLint level);
 
 #ifdef __cplusplus
 }
