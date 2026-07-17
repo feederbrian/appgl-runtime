@@ -247,6 +247,91 @@ struct CompatShaderRewriteResult {
     bool didRewrite = false;
 };
 
+enum class GeometryShader4DirectiveMode {
+    Absent,
+    Disable,
+    Warn,
+    Enable,
+    Require,
+};
+
+struct GeometryShader4DirectiveState {
+    GeometryShader4DirectiveMode mode = GeometryShader4DirectiveMode::Absent;
+    bool present = false;
+
+    bool active() const {
+        return mode == GeometryShader4DirectiveMode::Warn ||
+               mode == GeometryShader4DirectiveMode::Enable ||
+               mode == GeometryShader4DirectiveMode::Require;
+    }
+};
+
+struct GeometryShader4SourceLayout {
+    bool hasInputType = false;
+    GLenum inputType = 0;
+    bool hasOutputType = false;
+    GLenum outputType = 0;
+    bool hasVerticesOut = false;
+    int verticesOut = 0;
+    bool valid = true;
+    std::string diagnostic;
+};
+
+// Link-local effective geometry state. Source layout declarations win over
+// the program's ARB request state independently for each property.
+struct GeometryShader4LinkPlan {
+    bool active = false;
+    GLenum inputType = 0;
+    GLenum outputType = 0;
+    int verticesOut = 0;
+    int verticesIn = 0;
+    // Standalone compile can widen private legacy built-in arrays so
+    // topology-dependent bounds remain link errors. Zero uses verticesIn.
+    int materializedInputCapacity = 0;
+    bool inputFromSource = false;
+    bool outputFromSource = false;
+    bool verticesOutFromSource = false;
+};
+
+struct GeometryShader4LegacyInputUsage {
+    bool clipVertex = false;
+    bool frontColor = false;
+    bool backColor = false;
+    bool frontSecondaryColor = false;
+    bool backSecondaryColor = false;
+    bool texCoord = false;
+    bool fogFragCoord = false;
+
+    bool any() const {
+        return clipVertex || frontColor || backColor ||
+               frontSecondaryColor || backSecondaryColor ||
+               texCoord || fogFragCoord;
+    }
+};
+
+struct GeometryShader4RewriteResult {
+    std::string source;
+    GeometryShader4DirectiveState directive;
+    GeometryShader4LegacyInputUsage legacyInputs;
+    bool didRewrite = false;
+    bool valid = true;
+    std::string diagnostic;
+};
+
+// Structured ARB_geometry_shader4 source handling. These helpers recognize
+// only real preprocessing directives and code tokens; comments, strings, and
+// identifier substrings do not activate or rewrite the compatibility path.
+GeometryShader4DirectiveState scanGeometryShader4Directive(
+    std::string_view source);
+GeometryShader4SourceLayout parseGeometryShader4SourceLayout(
+    std::string_view source);
+GeometryShader4RewriteResult rewriteGeometryShader4Source(
+    std::string_view source,
+    const GeometryShader4LinkPlan& plan);
+std::string rewriteGeometryShader4VertexTransport(
+    std::string_view normalizedVertexSource,
+    const GeometryShader4LegacyInputUsage& usage);
+
 // Names of the synthesized matrix uniforms. Hand-coded constexpr strings
 // so the link-time path can match by name without having to know the
 // rewriter's internal table. Kept in a namespace so callers don't

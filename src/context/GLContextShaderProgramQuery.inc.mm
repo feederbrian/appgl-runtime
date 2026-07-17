@@ -82,7 +82,7 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = object->deleteRequested ? GL_TRUE : GL_FALSE;
             return true;
         case GL_LINK_STATUS:
-            *params = object->linked ? GL_TRUE : GL_FALSE;
+            *params = object->lastLinkSucceeded ? GL_TRUE : GL_FALSE;
             return true;
         case 0x91B1:   // GL_COMPLETION_STATUS_KHR / _ARB
             // Synchronous link — always complete post-glLinkProgram.

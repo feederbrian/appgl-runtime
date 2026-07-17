@@ -9847,7 +9847,9 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // routings (e.g. disabling combined clip/cull slice on the
     // synth VS when the cull count is ambiguous, or
     // reflecting the FS input layout).
-    if (programStoresClipOrCull() && !geometryStoresLayerOrViewport()) {
+    if (programStoresClipOrCull() &&
+        !program.usesArbGeometryShader4LinkView &&
+        !geometryStoresLayerOrViewport()) {
         if (!program.transformFeedbackVaryingNames.empty()) {
             program.geometryEmulatedTransformFeedbackOnly = true;
         } else {

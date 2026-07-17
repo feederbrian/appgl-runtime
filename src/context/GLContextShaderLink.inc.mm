@@ -70,14 +70,60 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->fragmentMslUsesFragCoordParams;
     const auto priorVertexReflection = programObject->vertexReflection;
     const auto priorFragmentReflection = programObject->fragmentReflection;
+    const auto priorGeometryReflection = programObject->geometryReflection;
     const auto priorVertexSourceHash = programObject->vertexSourceHash;
     const auto priorFragmentSourceHash = programObject->fragmentSourceHash;
+    const bool priorGeometryEmulated = programObject->geometryEmulated;
+    const bool priorUsesArbGeometryShader4LinkView =
+        programObject->usesArbGeometryShader4LinkView;
+    const bool priorGeometryEmulatedTransformFeedbackOnly =
+        programObject->geometryEmulatedTransformFeedbackOnly;
+    const auto priorGeometryEmulationDiagnostic =
+        programObject->geometryEmulationDiagnostic;
+    const auto priorGeometrySpirv = programObject->geometrySpirv;
+    const auto priorVertexSpirv = programObject->vertexSpirv;
+    const auto priorVertexSpirvEntryPoint = programObject->vertexSpirvEntryPoint;
+    const auto priorVertexSpirvSpecializationConstants =
+        programObject->vertexSpirvSpecializationConstants;
+    const bool priorGsPresent = programObject->gsPresent;
+    const GLenum priorGsInputTopology = programObject->gsInputTopology;
+    const GLenum priorGsOutputTopology = programObject->gsOutputTopology;
+    const std::uint32_t priorGsMaxVertices = programObject->gsMaxVertices;
+    const std::uint32_t priorGsInvocations = programObject->gsInvocations;
+    const bool priorNeedsCullDistancePrepass =
+        programObject->needsCullDistancePrepass;
+    const auto priorGsPassThroughVertexMSL =
+        programObject->gsPassThroughVertexMSL;
+    const bool priorGsPassThroughVertexMslUsesArgumentBuffer =
+        programObject->gsPassThroughVertexMslUsesArgumentBuffer;
+    const bool priorGsPassThroughVertexMSLLayered =
+        programObject->gsPassThroughVertexMSLLayered;
+    const bool priorGsPassThroughVertexMSLViewportArray =
+        programObject->gsPassThroughVertexMSLViewportArray;
+    const auto priorGsPassThroughReflection =
+        programObject->gsPassThroughReflection;
+    const auto priorGsPassThroughFragmentMSL =
+        programObject->gsPassThroughFragmentMSL;
+    const bool priorGsPassThroughFragmentMslUsesArgumentBuffer =
+        programObject->gsPassThroughFragmentMslUsesArgumentBuffer;
+    const bool priorGsPassThroughFragmentMSLActive =
+        programObject->gsPassThroughFragmentMSLActive;
+    const std::uint32_t priorGsPassThroughFragmentMSLPrimIdLoc =
+        programObject->gsPassThroughFragmentMSLPrimIdLoc;
+    const auto priorGeometryShaderAsMeshMSL =
+        programObject->geometryShaderAsMeshMSL;
+    const auto priorMetalGSVsComputeMSL = programObject->metalGSVsComputeMSL;
+    const bool priorMetalGSVsComputeNeedsDescriptor =
+        programObject->metalGSVsComputeNeedsDescriptor;
+    const auto priorMetalGSTier = programObject->metalGSTier;
     const GLsizei priorOvrMultiviewNumViews =
         programObject->ovrMultiviewNumViews;
+    bool priorExecutableRestored = false;
     auto restorePriorExecutableForFailedRelink = [&]() {
-        if (!hadPriorExecutable) {
+        if (!hadPriorExecutable || priorExecutableRestored) {
             return;
         }
+        priorExecutableRestored = true;
         programObject->uniforms = priorUniforms;
         programObject->attributes = priorAttributes;
         programObject->uniformValues = priorUniformValues;
@@ -122,8 +168,49 @@ bool GLContext::linkProgram(GLuint program) {
             priorFragmentMslUsesFragCoordParams;
         programObject->vertexReflection = priorVertexReflection;
         programObject->fragmentReflection = priorFragmentReflection;
+        programObject->geometryReflection = priorGeometryReflection;
         programObject->vertexSourceHash = priorVertexSourceHash;
         programObject->fragmentSourceHash = priorFragmentSourceHash;
+        programObject->geometryEmulated = priorGeometryEmulated;
+        programObject->usesArbGeometryShader4LinkView =
+            priorUsesArbGeometryShader4LinkView;
+        programObject->geometryEmulatedTransformFeedbackOnly =
+            priorGeometryEmulatedTransformFeedbackOnly;
+        programObject->geometryEmulationDiagnostic =
+            priorGeometryEmulationDiagnostic;
+        programObject->geometrySpirv = priorGeometrySpirv;
+        programObject->vertexSpirv = priorVertexSpirv;
+        programObject->vertexSpirvEntryPoint = priorVertexSpirvEntryPoint;
+        programObject->vertexSpirvSpecializationConstants =
+            priorVertexSpirvSpecializationConstants;
+        programObject->gsPresent = priorGsPresent;
+        programObject->gsInputTopology = priorGsInputTopology;
+        programObject->gsOutputTopology = priorGsOutputTopology;
+        programObject->gsMaxVertices = priorGsMaxVertices;
+        programObject->gsInvocations = priorGsInvocations;
+        programObject->needsCullDistancePrepass =
+            priorNeedsCullDistancePrepass;
+        programObject->gsPassThroughVertexMSL = priorGsPassThroughVertexMSL;
+        programObject->gsPassThroughVertexMslUsesArgumentBuffer =
+            priorGsPassThroughVertexMslUsesArgumentBuffer;
+        programObject->gsPassThroughVertexMSLLayered =
+            priorGsPassThroughVertexMSLLayered;
+        programObject->gsPassThroughVertexMSLViewportArray =
+            priorGsPassThroughVertexMSLViewportArray;
+        programObject->gsPassThroughReflection = priorGsPassThroughReflection;
+        programObject->gsPassThroughFragmentMSL =
+            priorGsPassThroughFragmentMSL;
+        programObject->gsPassThroughFragmentMslUsesArgumentBuffer =
+            priorGsPassThroughFragmentMslUsesArgumentBuffer;
+        programObject->gsPassThroughFragmentMSLActive =
+            priorGsPassThroughFragmentMSLActive;
+        programObject->gsPassThroughFragmentMSLPrimIdLoc =
+            priorGsPassThroughFragmentMSLPrimIdLoc;
+        programObject->geometryShaderAsMeshMSL = priorGeometryShaderAsMeshMSL;
+        programObject->metalGSVsComputeMSL = priorMetalGSVsComputeMSL;
+        programObject->metalGSVsComputeNeedsDescriptor =
+            priorMetalGSVsComputeNeedsDescriptor;
+        programObject->metalGSTier = priorMetalGSTier;
         programObject->ovrMultiviewNumViews =
             priorOvrMultiviewNumViews;
         programObject->uniformLayoutComputed = false;
@@ -135,9 +222,18 @@ bool GLContext::linkProgram(GLuint program) {
                 &programObject->vertexMSL);
             impl_->frameGraph->invalidateMslHashMemoForStringObject(
                 &programObject->fragmentMSL);
+            impl_->frameGraph->invalidateMslHashMemoForStringObject(
+                &programObject->gsPassThroughVertexMSL);
+            impl_->frameGraph->invalidateMslHashMemoForStringObject(
+                &programObject->gsPassThroughFragmentMSL);
         }
-        programObject->linked = false;
+        programObject->linked = true;
     };
+    auto failedRelinkDeleter = [&](GLProgramObject*) {
+        restorePriorExecutableForFailedRelink();
+    };
+    std::unique_ptr<GLProgramObject, decltype(failedRelinkDeleter)>
+        failedRelinkGuard(programObject, failedRelinkDeleter);
 
     programObject->uniforms.clear();
     programObject->attributes.clear();
@@ -158,7 +254,9 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->pipelineEmulationStageUniformsValid[stage] = false;
     }
     programObject->linkLog.clear();
+    programObject->lastLinkSucceeded = false;
     programObject->linked = false;
+    programObject->usesArbGeometryShader4LinkView = false;
     programObject->linkedStageBits = 0;
     programObject->ovrMultiviewNumViews = 0;
     programObject->advancedBlendSupportMask = 0;
@@ -257,6 +355,11 @@ bool GLContext::linkProgram(GLuint program) {
     std::vector<GLShaderObject*> tessControlShaderObjects;
     std::vector<GLShaderObject*> tessEvalShaderObjects;
     std::vector<GLShaderObject*> computeShaderObjects;
+    GLShaderObject geometryShader4LinkObject;
+    GLShaderObject geometryShader4VertexLinkObject;
+    GeometryShader4LinkPlan geometryShader4LinkPlan;
+    GeometryShader4LegacyInputUsage geometryShader4LegacyInputs;
+    bool hasGeometryShader4LinkView = false;
 
     for (GLuint shaderId : programObject->attachedShaders) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
@@ -345,6 +448,382 @@ bool GLContext::linkProgram(GLuint program) {
                 case ExplicitOpaqueBindingKind::AtomicCounter:
                     break;
             }
+        }
+    }
+
+    // ARB_geometry_shader4 program parameters are link requests. Compile an
+    // effective core-view of the geometry stage for this program only; never
+    // write request-specific source or SPIR-V back to the attached shader.
+    auto prepareGeometryShader4LinkView = [&]() -> bool {
+        if (geometryShader == nullptr || geometryShader->isSpirvBinary) {
+            return true;
+        }
+
+        bool active = false;
+        GeometryShader4SourceLayout mergedLayout;
+        auto mergeLayout = [&](const GeometryShader4SourceLayout& layout) {
+            if (!layout.valid) {
+                mergedLayout.valid = false;
+                mergedLayout.diagnostic = layout.diagnostic;
+                return;
+            }
+            if (layout.hasInputType) {
+                if (mergedLayout.hasInputType &&
+                    mergedLayout.inputType != layout.inputType) {
+                    mergedLayout.valid = false;
+                    mergedLayout.diagnostic =
+                        "conflicting geometry shader input layouts";
+                } else {
+                    mergedLayout.hasInputType = true;
+                    mergedLayout.inputType = layout.inputType;
+                }
+            }
+            if (layout.hasOutputType) {
+                if (mergedLayout.hasOutputType &&
+                    mergedLayout.outputType != layout.outputType) {
+                    mergedLayout.valid = false;
+                    mergedLayout.diagnostic =
+                        "conflicting geometry shader output layouts";
+                } else {
+                    mergedLayout.hasOutputType = true;
+                    mergedLayout.outputType = layout.outputType;
+                }
+            }
+            if (layout.hasVerticesOut) {
+                if (mergedLayout.hasVerticesOut &&
+                    mergedLayout.verticesOut != layout.verticesOut) {
+                    mergedLayout.valid = false;
+                    mergedLayout.diagnostic =
+                        "conflicting geometry shader max_vertices layouts";
+                } else {
+                    mergedLayout.hasVerticesOut = true;
+                    mergedLayout.verticesOut = layout.verticesOut;
+                }
+            }
+        };
+        for (const GLShaderObject* stage : geometryShaderObjects) {
+            if (stage == nullptr) continue;
+            const GeometryShader4DirectiveState directive =
+                scanGeometryShader4Directive(stage->source);
+            if (directive.active()) {
+                active = true;
+                mergeLayout(parseGeometryShader4SourceLayout(stage->source));
+            }
+        }
+        if (!active) {
+            return true;
+        }
+        if (!mergedLayout.valid) {
+            programObject->linkLog = mergedLayout.diagnostic;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog,
+                "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+
+        geometryShader4LinkPlan.active = true;
+        geometryShader4LinkPlan.inputType = mergedLayout.hasInputType
+            ? mergedLayout.inputType : programObject->arbGeometryShader4.inputType;
+        geometryShader4LinkPlan.outputType = mergedLayout.hasOutputType
+            ? mergedLayout.outputType : programObject->arbGeometryShader4.outputType;
+        geometryShader4LinkPlan.verticesOut = mergedLayout.hasVerticesOut
+            ? mergedLayout.verticesOut : programObject->arbGeometryShader4.verticesOut;
+        geometryShader4LinkPlan.inputFromSource = mergedLayout.hasInputType;
+        geometryShader4LinkPlan.outputFromSource = mergedLayout.hasOutputType;
+        geometryShader4LinkPlan.verticesOutFromSource =
+            mergedLayout.hasVerticesOut;
+        switch (geometryShader4LinkPlan.inputType) {
+            case GL_POINTS: geometryShader4LinkPlan.verticesIn = 1; break;
+            case GL_LINES: geometryShader4LinkPlan.verticesIn = 2; break;
+            case GL_LINES_ADJACENCY:
+                geometryShader4LinkPlan.verticesIn = 4;
+                break;
+            case GL_TRIANGLES: geometryShader4LinkPlan.verticesIn = 3; break;
+            case GL_TRIANGLES_ADJACENCY:
+                geometryShader4LinkPlan.verticesIn = 6;
+                break;
+            default: geometryShader4LinkPlan.verticesIn = 0; break;
+        }
+        if (geometryShader4LinkPlan.verticesIn == 0 ||
+            geometryShader4LinkPlan.verticesOut <= 0) {
+            programObject->linkLog =
+                "ARB geometry shader has zero or invalid effective layout";
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog,
+                "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+        GLint maxOutputVertices = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_GEOMETRY_OUTPUT_VERTICES, &maxOutputVertices);
+        }
+        if (maxOutputVertices > 0 &&
+            geometryShader4LinkPlan.verticesOut > maxOutputVertices) {
+            programObject->linkLog =
+                "ARB geometry shader max_vertices exceeds implementation limit";
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog,
+                "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+
+        std::vector<std::string> normalizedSources;
+        normalizedSources.reserve(geometryShaderObjects.size());
+        for (const GLShaderObject* stage : geometryShaderObjects) {
+            if (stage == nullptr) continue;
+            std::string normalized = stage->source;
+            if (scanGeometryShader4Directive(stage->source).active()) {
+                GeometryShader4RewriteResult geometryRewrite =
+                    rewriteGeometryShader4Source(
+                        stage->source, geometryShader4LinkPlan);
+                if (!geometryRewrite.valid) {
+                    programObject->linkLog = geometryRewrite.diagnostic;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "",
+                        programObject->linkLog, "", false
+                    });
+                    restorePriorExecutableForFailedRelink();
+                    return false;
+                }
+                geometryShader4LegacyInputs.clipVertex =
+                    geometryShader4LegacyInputs.clipVertex ||
+                    geometryRewrite.legacyInputs.clipVertex;
+                geometryShader4LegacyInputs.frontColor =
+                    geometryShader4LegacyInputs.frontColor ||
+                    geometryRewrite.legacyInputs.frontColor;
+                geometryShader4LegacyInputs.backColor =
+                    geometryShader4LegacyInputs.backColor ||
+                    geometryRewrite.legacyInputs.backColor;
+                geometryShader4LegacyInputs.frontSecondaryColor =
+                    geometryShader4LegacyInputs.frontSecondaryColor ||
+                    geometryRewrite.legacyInputs.frontSecondaryColor;
+                geometryShader4LegacyInputs.backSecondaryColor =
+                    geometryShader4LegacyInputs.backSecondaryColor ||
+                    geometryRewrite.legacyInputs.backSecondaryColor;
+                geometryShader4LegacyInputs.texCoord =
+                    geometryShader4LegacyInputs.texCoord ||
+                    geometryRewrite.legacyInputs.texCoord;
+                geometryShader4LegacyInputs.fogFragCoord =
+                    geometryShader4LegacyInputs.fogFragCoord ||
+                    geometryRewrite.legacyInputs.fogFragCoord;
+                normalized = std::move(geometryRewrite.source);
+            }
+            CompatShaderRewriteResult compat =
+                rewriteCompatShader(normalized, GL_GEOMETRY_SHADER);
+            if (compat.didRewrite) normalized = std::move(compat.source);
+            normalized = rewriteShaderDrawParametersForSpirv(
+                normalized, GL_GEOMETRY_SHADER);
+            normalized = rewriteUnsizedUniformArrayInitializersForSpirv(
+                normalized);
+            normalized = rewriteImageSamplesForSpirv(normalized);
+            normalized = rewriteSsboConsecutiveRuntimeArraysForSpirv(
+                normalized);
+            normalized = rewrite420packImplicitConversionsForSpirv(
+                normalized);
+            normalized = rewrite420packQualifierOrderInvariantInputsForSpirv(
+                normalized);
+            normalizedSources.push_back(std::move(normalized));
+        }
+        if (normalizedSources.empty()) {
+            programObject->linkLog =
+                "ARB geometry shader produced no link-local source";
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+
+        ShaderTranslator linkLocalTranslator;
+        std::string compileLog;
+        std::vector<std::uint32_t> localSpirv =
+            linkLocalTranslator.compileGLSLStageProgram(
+                normalizedSources, GL_GEOMETRY_SHADER, 460, &compileLog);
+        if (localSpirv.empty()) {
+            programObject->linkLog = "ARB geometry shader link-local compile failed";
+            if (!compileLog.empty()) {
+                programObject->linkLog += ": " + compileLog;
+            }
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-geometry-arb-link-view", "geometry",
+                quickHash(normalizedSources.front()), "", "",
+                programObject->linkLog, "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+
+        // GL_ARB_geometry_shader4 limits user varying components across the
+        // complete emitted primitive, not just each output vertex. SPIR-V
+        // reflection resolves symbolic constant array extents before this
+        // link-local max_vertices value is applied.
+        GLint maxTotalOutputComponents = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS,
+                &maxTotalOutputComponents);
+        }
+        const StageOutputComponentCount outputComponents =
+            linkLocalTranslator.reflectStageOutputComponentCount(
+                localSpirv.data(), localSpirv.size());
+        if (maxTotalOutputComponents > 0 && outputComponents.valid) {
+            const std::uint64_t componentLimit =
+                static_cast<std::uint64_t>(maxTotalOutputComponents);
+            const std::uint64_t verticesOut =
+                static_cast<std::uint64_t>(geometryShader4LinkPlan.verticesOut);
+            if (outputComponents.userComponents > 0 &&
+                outputComponents.userComponents > componentLimit / verticesOut) {
+                programObject->linkLog =
+                    "ARB geometry shader total output components exceed "
+                    "implementation limit";
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "",
+                    programObject->linkLog, "", false
+                });
+                restorePriorExecutableForFailedRelink();
+                return false;
+            }
+        }
+
+        GLShaderObject* sharedGeometryShader = geometryShader;
+        geometryShader4LinkObject = *sharedGeometryShader;
+        geometryShader4LinkObject.source = normalizedSources.front();
+        geometryShader4LinkObject.spirv = std::move(localSpirv);
+        geometryShader4LinkObject.compiled = true;
+        geometryShader4LinkObject.compileLog.clear();
+        const GLSLReflectionResult localReflection = reflectGLSL(
+            geometryShader4LinkObject.source, GL_GEOMETRY_SHADER);
+        geometryShader4LinkObject.declaredUniforms = localReflection.uniforms;
+        geometryShader4LinkObject.declaredInputs = localReflection.inputs;
+        geometryShader4LinkObject.declaredOutputs = localReflection.outputs;
+        geometryShader = &geometryShader4LinkObject;
+        geometryShaderObjects.clear();
+        geometryShaderObjects.push_back(geometryShader);
+        for (GLShaderObject*& stage : attachedShaderObjects) {
+            if (stage == sharedGeometryShader) {
+                stage = geometryShader;
+            }
+        }
+
+        if (geometryShader4LegacyInputs.any() && vertexShader != nullptr &&
+            !vertexShader->isSpirvBinary) {
+            std::vector<std::string> normalizedVertexSources;
+            normalizedVertexSources.reserve(vertexShaderObjects.size());
+            for (const GLShaderObject* stage : vertexShaderObjects) {
+                if (stage == nullptr) continue;
+                std::string normalizedVertex = stage->source;
+                CompatShaderRewriteResult vertexCompat =
+                    rewriteCompatShader(normalizedVertex, GL_VERTEX_SHADER);
+                if (vertexCompat.didRewrite) {
+                    normalizedVertex = std::move(vertexCompat.source);
+                }
+                normalizedVertex = rewriteGeometryShader4VertexTransport(
+                    normalizedVertex, geometryShader4LegacyInputs);
+                normalizedVertex = rewriteShaderDrawParametersForSpirv(
+                    normalizedVertex, GL_VERTEX_SHADER);
+                normalizedVertex = rewriteUnsizedUniformArrayInitializersForSpirv(
+                    normalizedVertex);
+                normalizedVertex = rewriteImageSamplesForSpirv(normalizedVertex);
+                normalizedVertex = rewriteSsboConsecutiveRuntimeArraysForSpirv(
+                    normalizedVertex);
+                normalizedVertex = rewrite420packImplicitConversionsForSpirv(
+                    normalizedVertex);
+                normalizedVertex = rewrite420packQualifierOrderInvariantInputsForSpirv(
+                    normalizedVertex);
+                normalizedVertexSources.push_back(std::move(normalizedVertex));
+            }
+            if (normalizedVertexSources.empty()) {
+                programObject->linkLog =
+                    "ARB geometry shader produced no link-local vertex source";
+                restorePriorExecutableForFailedRelink();
+                return false;
+            }
+            std::string vertexCompileLog;
+            std::vector<std::uint32_t> localVertexSpirv =
+                linkLocalTranslator.compileGLSLStageProgram(
+                    normalizedVertexSources, GL_VERTEX_SHADER, 460,
+                    &vertexCompileLog);
+            if (localVertexSpirv.empty()) {
+                programObject->linkLog =
+                    "ARB geometry shader link-local vertex compile failed";
+                if (!vertexCompileLog.empty()) {
+                    programObject->linkLog += ": " + vertexCompileLog;
+                }
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-arb-vertex-view", "vertex",
+                    quickHash(normalizedVertexSources.front()), "", "",
+                    programObject->linkLog, "", false
+                });
+                restorePriorExecutableForFailedRelink();
+                return false;
+            }
+            GLShaderObject* sharedVertexShader = vertexShader;
+            geometryShader4VertexLinkObject = *sharedVertexShader;
+            geometryShader4VertexLinkObject.source =
+                normalizedVertexSources.front();
+            geometryShader4VertexLinkObject.spirv =
+                std::move(localVertexSpirv);
+            geometryShader4VertexLinkObject.compiled = true;
+            geometryShader4VertexLinkObject.compileLog.clear();
+            const GLSLReflectionResult localVertexReflection = reflectGLSL(
+                geometryShader4VertexLinkObject.source, GL_VERTEX_SHADER);
+            geometryShader4VertexLinkObject.declaredUniforms =
+                localVertexReflection.uniforms;
+            geometryShader4VertexLinkObject.declaredInputs =
+                localVertexReflection.inputs;
+            geometryShader4VertexLinkObject.declaredOutputs =
+                localVertexReflection.outputs;
+            vertexShader = &geometryShader4VertexLinkObject;
+            vertexShaderObjects.clear();
+            vertexShaderObjects.push_back(vertexShader);
+            for (GLShaderObject*& stage : attachedShaderObjects) {
+                if (stage == sharedVertexShader) {
+                    stage = vertexShader;
+                }
+            }
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-geometry-arb-vertex-view", "vertex",
+                quickHash(vertexShader->source), "", "", "ok", "", true
+            });
+        }
+        hasGeometryShader4LinkView = true;
+        Runtime::shared().recordShaderTranslation({
+            programTag + "-geometry-arb-link-view", "geometry",
+            quickHash(geometryShader->source), "", "", "ok", "", true
+        });
+        return true;
+    };
+
+    if (!prepareGeometryShader4LinkView()) {
+        return false;
+    }
+    programObject->usesArbGeometryShader4LinkView =
+        hasGeometryShader4LinkView;
+
+    // A separate program may begin at the geometry stage only when its
+    // inputs are built-ins. ARB link-local transport declarations use the
+    // appgl_ prefix and therefore do not turn built-in inputs into user ones.
+    if (geometryShader != nullptr && vertexShader == nullptr) {
+        const bool hasUserGeometryInput = std::any_of(
+            geometryShader->declaredInputs.begin(),
+            geometryShader->declaredInputs.end(),
+            [](const GLShaderDeclaration& input) {
+                return input.name.rfind("gl_", 0) != 0 &&
+                       input.name.rfind("appgl_", 0) != 0;
+            });
+        if (hasUserGeometryInput) {
+            programObject->linkLog =
+                "geometry shader user inputs require a vertex shader";
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog,
+                "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
         }
     }
 
@@ -2041,9 +2520,9 @@ bool GLContext::linkProgram(GLuint program) {
         bool varyingMismatch = false;
         std::string mismatchMsg;
         for (const auto& pair : pairs) {
-            std::unordered_map<std::string, GLenum> producerOut;
+            std::unordered_map<std::string, GLShaderDeclaration> producerOut;
             for (const auto& decl : pair.producer->declaredOutputs) {
-                producerOut[decl.name] = decl.type;
+                producerOut[decl.name] = decl;
             }
             for (const auto& decl : pair.consumer->declaredInputs) {
                 // Skip built-ins / gl_in gl_out blocks — glslang
@@ -2052,11 +2531,20 @@ bool GLContext::linkProgram(GLuint program) {
                 if (decl.name.compare(0, 3, "gl_") == 0) continue;
                 auto it = producerOut.find(decl.name);
                 if (it == producerOut.end()) continue;   // unmatched; not our check
-                if (it->second != decl.type) {
+                std::vector<GLint> producerDimensions =
+                    it->second.arrayDimensions;
+                std::vector<GLint> consumerDimensions =
+                    decl.arrayDimensions;
+                if (pair.consumer->stage == GL_GEOMETRY_SHADER &&
+                    !consumerDimensions.empty()) {
+                    consumerDimensions.erase(consumerDimensions.begin());
+                }
+                if (it->second.type != decl.type ||
+                    producerDimensions != consumerDimensions) {
                     varyingMismatch = true;
-                    mismatchMsg = std::string("varying '") + decl.name + "' type mismatch: "
+                    mismatchMsg = std::string("varying '") + decl.name + "' type/shape mismatch: "
                         + std::string(pair.producerName) + " stage outputs type 0x" +
-                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second); return std::string(b); }()
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second.type); return std::string(b); }()
                         + ", " + std::string(pair.consumerName) + " stage inputs type 0x" +
                         [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", decl.type); return std::string(b); }();
                     break;
@@ -9261,6 +9749,17 @@ bool GLContext::linkProgram(GLuint program) {
     addParsedBlockArrayResources(fallbackTesSrc, 0x10, true);
     addParsedBlockArrayResources(fallbackCsSrc, 0x20, true);
 
+    // The link-local module carries these execution modes already, but publish
+    // from the resolved plan at the final commit point so no partial ARB
+    // request state can leak through a failed link.
+    if (hasGeometryShader4LinkView) {
+        programObject->gsPresent = true;
+        programObject->gsInputTopology = geometryShader4LinkPlan.inputType;
+        programObject->gsOutputTopology = geometryShader4LinkPlan.outputType;
+        programObject->gsMaxVertices = static_cast<std::uint32_t>(
+            geometryShader4LinkPlan.verticesOut);
+    }
+
     ++programObject->executableGeneration;
     if (programObject->executableGeneration == 0) {
         programObject->executableGeneration = 1;
@@ -9283,5 +9782,7 @@ bool GLContext::linkProgram(GLuint program) {
         impl_->frameGraph->invalidateMslHashMemoForStringObject(
             &programObject->gsPassThroughFragmentMSL);
     }
+    programObject->lastLinkSucceeded = true;
+    failedRelinkGuard.release();
     return true;
 }

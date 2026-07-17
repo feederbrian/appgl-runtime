@@ -1052,7 +1052,11 @@ struct GLProgramObject {
     std::vector<GLuint> attachedShaders;
     std::string linkLog;
     std::string validateLog;
+    // True when this object owns a usable executable. A failed relink leaves
+    // the previous executable installed, so this is intentionally distinct
+    // from the status of the most recent link attempt below.
     bool linked = false;
+    bool lastLinkSucceeded = false;
     bool validated = false;
     // GL 4.1 (ARB_separate_shader_objects) — GL_PROGRAM_SEPARABLE
     // flag set via `glProgramParameteri`. When true, glLinkProgram
@@ -1225,6 +1229,9 @@ struct GLProgramObject {
     // branches on `geometryEmulated` before the normal translated-
     // pipeline path. See docs/geometry-shader-emulation.md.
     bool geometryEmulated = false;
+    // True only for an executable whose geometry stage was produced from an
+    // active GL_ARB_geometry_shader4 directive through the link-local view.
+    bool usesArbGeometryShader4LinkView = false;
     // Narrow override for GS programs where the VS writes clip/cull
     // distances. Those remain unsafe for the synthetic raster path, but
     // TF-configured programs still need CPU GS execution under rasterizer

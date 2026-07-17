@@ -12,6 +12,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         return false;
     }
     if (count == 0) {
+        // ARB_geometry_shader4 requires draw-mode validation even when the
+        // draw contains no vertices: glDrawArrays still implicitly begins a
+        // primitive.
+        const GLuint progName = impl_->state->currentProgram();
+        const GLProgramObject* p = progName != 0
+            ? impl_->objects->programs().get(progName)
+            : nullptr;
+        if (p != nullptr && p->gsPresent && !p->hasTessellation &&
+            !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         return true;
     }
     if (recordDisplayListClientArrayDraw(mode, first, count, nullptr, 0, "glDrawArrays")) {

@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -11397,6 +11398,81 @@ TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size
     return modes;
 }
 
+StageOutputComponentCount ShaderTranslator::reflectStageOutputComponentCount(
+    const std::uint32_t* spirv, std::size_t wordCount) const
+{
+    StageOutputComponentCount out;
+    if (spirv == nullptr || wordCount < 5) return out;
+    try {
+        spirv_cross::Compiler compiler(spirv, wordCount);
+        const auto resources = compiler.get_shader_resources();
+        constexpr std::uint64_t kMax =
+            std::numeric_limits<std::uint64_t>::max();
+        auto multiply = [=](std::uint64_t lhs,
+                            std::uint64_t rhs) -> std::uint64_t {
+            if (lhs == 0 || rhs == 0) return 0;
+            if (lhs > kMax / rhs) return kMax;
+            return lhs * rhs;
+        };
+        auto add = [=](std::uint64_t lhs,
+                       std::uint64_t rhs) -> std::uint64_t {
+            if (lhs > kMax - rhs) return kMax;
+            return lhs + rhs;
+        };
+
+        std::function<std::uint64_t(std::uint32_t)> countType;
+        countType = [&](std::uint32_t typeId) -> std::uint64_t {
+            const spirv_cross::SPIRType& type = compiler.get_type(typeId);
+            std::uint64_t elements = 1;
+            for (std::size_t i = 0; i < type.array.size(); ++i) {
+                std::uint64_t extent = type.array[i];
+                if (i < type.array_size_literal.size() &&
+                    !type.array_size_literal[i]) {
+                    extent = compiler.get_constant(type.array[i]).scalar();
+                }
+                elements = multiply(elements, extent);
+            }
+
+            std::uint64_t components = 0;
+            if (type.basetype == spirv_cross::SPIRType::Struct) {
+                for (std::uint32_t i = 0; i < type.member_types.size(); ++i) {
+                    if (compiler.has_member_decoration(
+                            type.self, i, spv::DecorationBuiltIn)) {
+                        continue;
+                    }
+                    components = add(
+                        components, countType(type.member_types[i]));
+                }
+            } else {
+                const std::uint64_t scalarSlots =
+                    std::max<std::uint64_t>(1, (type.width + 31u) / 32u);
+                components = multiply(
+                    scalarSlots,
+                    std::max<std::uint64_t>(1, type.vecsize));
+                components = multiply(
+                    components,
+                    std::max<std::uint64_t>(1, type.columns));
+            }
+            return multiply(components, elements);
+        };
+
+        for (const auto& resource : resources.stage_outputs) {
+            if (compiler.has_decoration(resource.id,
+                                        spv::DecorationBuiltIn)) {
+                continue;
+            }
+            out.userComponents = add(
+                out.userComponents, countType(resource.type_id));
+        }
+        out.valid = true;
+    } catch (const std::exception&) {
+        out = {};
+    } catch (...) {
+        out = {};
+    }
+    return out;
+}
+
 // Phase 6 [metal-tess-TF]: reflect the TES output struct layout under
 // the same SPIRV-Cross options that the TES-as-compute MSL translation
 // uses. Returns member names + byte offsets so the transform-feedback
@@ -11588,6 +11664,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
 
 StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
     const std::uint32_t*, std::size_t, const TranslatorOptions&) const
+{
+    return {};
+}
+
+StageOutputComponentCount ShaderTranslator::reflectStageOutputComponentCount(
+    const std::uint32_t*, std::size_t) const
 {
     return {};
 }

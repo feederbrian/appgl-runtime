@@ -181,8 +181,58 @@ bool GLContext::compileShader(GLuint shader) {
     //    uniforms get picked up by the scanner and end up in
     //    declaredUniforms — which linkProgram lifts into
     //    programObject->uniforms with normal sequential locations.
+    std::string geometryShader4CompileSource;
+    const std::string* compatRewriteSource = &object->source;
+    if (object->stage == GL_GEOMETRY_SHADER) {
+        const GeometryShader4DirectiveState directive =
+            scanGeometryShader4Directive(object->source);
+        if (directive.active()) {
+            const GeometryShader4SourceLayout sourceLayout =
+                parseGeometryShader4SourceLayout(object->source);
+            if (!sourceLayout.valid) {
+                object->compileLog = sourceLayout.diagnostic;
+                Runtime::shared().recordShaderTranslation({
+                    shaderTag, "compile", sourceHash, "", "",
+                    object->compileLog, "", false
+                });
+                return true;
+            }
+            GeometryShader4LinkPlan provisional;
+            provisional.active = true;
+            provisional.inputType = sourceLayout.hasInputType
+                ? sourceLayout.inputType : GL_TRIANGLES;
+            provisional.outputType = sourceLayout.hasOutputType
+                ? sourceLayout.outputType : GL_POINTS;
+            provisional.verticesOut = sourceLayout.hasVerticesOut
+                ? sourceLayout.verticesOut : 1;
+            provisional.inputFromSource = sourceLayout.hasInputType;
+            provisional.outputFromSource = sourceLayout.hasOutputType;
+            provisional.verticesOutFromSource = sourceLayout.hasVerticesOut;
+            switch (provisional.inputType) {
+                case GL_POINTS: provisional.verticesIn = 1; break;
+                case GL_LINES: provisional.verticesIn = 2; break;
+                case GL_LINES_ADJACENCY: provisional.verticesIn = 4; break;
+                case GL_TRIANGLES: provisional.verticesIn = 3; break;
+                case GL_TRIANGLES_ADJACENCY: provisional.verticesIn = 6; break;
+                default: provisional.verticesIn = 0; break;
+            }
+            provisional.materializedInputCapacity = 256;
+            GeometryShader4RewriteResult geometryRewrite =
+                rewriteGeometryShader4Source(object->source, provisional);
+            if (!geometryRewrite.valid) {
+                object->compileLog = geometryRewrite.diagnostic;
+                Runtime::shared().recordShaderTranslation({
+                    shaderTag, "compile", sourceHash, "", "",
+                    object->compileLog, "", false
+                });
+                return true;
+            }
+            geometryShader4CompileSource = std::move(geometryRewrite.source);
+            compatRewriteSource = &geometryShader4CompileSource;
+        }
+    }
     CompatShaderRewriteResult rewrite =
-        rewriteCompatShader(object->source, object->stage);
+        rewriteCompatShader(*compatRewriteSource, object->stage);
     // GLSL 4.00 subroutines are unsupported by glslang's SPIR-V
     // backend ("feature not yet implemented"). Rewrite subroutine
     // syntax into plain GLSL that compiles — enough for CTS
@@ -1459,7 +1509,7 @@ bool GLContext::compileShader(GLuint shader) {
     };
     // Apply to the compat-rewritten source.
     const std::string& subroutineRewriteInput =
-        rewrite.didRewrite ? rewrite.source : object->source;
+        rewrite.didRewrite ? rewrite.source : *compatRewriteSource;
     std::string afterSubRewrite = rewriteSubroutinesForSpirv(subroutineRewriteInput);
     if (!subroutineValidationError.empty()) {
         object->compileLog = subroutineValidationError;

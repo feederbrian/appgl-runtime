@@ -479,6 +479,11 @@ struct StageOutputLayout {
     std::vector<Member> members;
 };
 
+struct StageOutputComponentCount {
+    std::uint64_t userComponents = 0;
+    bool valid = false;
+};
+
 class ShaderTranslator {
 public:
     std::vector<std::uint32_t> compileGLSL(std::string_view source, GLenum stage, int version, std::string* log) const;
@@ -492,6 +497,8 @@ public:
     // `structSize == 0` + empty `members` on failure (or when the
     // stage has no outputs to reflect).
     StageOutputLayout reflectStageOutputLayout(const std::uint32_t* spirv, std::size_t wordCount, const TranslatorOptions& options) const;
+    StageOutputComponentCount reflectStageOutputComponentCount(
+        const std::uint32_t* spirv, std::size_t wordCount) const;
 
     // Phase 8X Group 4d follow-up⁵ — link-time co-compile entry point.
     // Re-parses both vertex and fragment GLSL into a single

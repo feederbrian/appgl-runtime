@@ -9,6 +9,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace appgl {
 
@@ -1816,7 +1817,1103 @@ void rewriteLightSourceSubscripts(std::string& src) {
     }
 }
 
+std::string maskCommentsAndStrings(std::string_view source) {
+    std::string masked(source);
+    bool lineComment = false;
+    bool blockComment = false;
+    char quote = '\0';
+    for (std::size_t i = 0; i < masked.size(); ++i) {
+        const char c = source[i];
+        const char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        if (lineComment) {
+            if (c == '\n') {
+                lineComment = false;
+            } else {
+                masked[i] = ' ';
+            }
+            continue;
+        }
+        if (blockComment) {
+            if (c == '*' && next == '/') {
+                masked[i] = masked[i + 1] = ' ';
+                ++i;
+                blockComment = false;
+            } else if (c != '\n') {
+                masked[i] = ' ';
+            }
+            continue;
+        }
+        if (quote != '\0') {
+            if (c == '\\' && i + 1 < source.size()) {
+                masked[i] = masked[i + 1] = ' ';
+                ++i;
+            } else {
+                if (c == quote) {
+                    quote = '\0';
+                }
+                if (c != '\n') {
+                    masked[i] = ' ';
+                }
+            }
+            continue;
+        }
+        if (c == '/' && next == '/') {
+            masked[i] = masked[i + 1] = ' ';
+            ++i;
+            lineComment = true;
+        } else if (c == '/' && next == '*') {
+            masked[i] = masked[i + 1] = ' ';
+            ++i;
+            blockComment = true;
+        } else if (c == '"' || c == '\'') {
+            masked[i] = ' ';
+            quote = c;
+        }
+    }
+    return masked;
+}
+
+struct GeometryShader4DirectiveRecord {
+    std::size_t hash = 0;
+    std::size_t lineEnd = 0;
+    GeometryShader4DirectiveMode mode = GeometryShader4DirectiveMode::Absent;
+};
+
+std::vector<GeometryShader4DirectiveRecord> collectGeometryShader4Directives(
+    std::string_view source)
+{
+    const std::string masked = maskCommentsAndStrings(source);
+    std::vector<GeometryShader4DirectiveRecord> records;
+    std::size_t lineStart = 0;
+    while (lineStart < masked.size()) {
+        const std::size_t newline = masked.find('\n', lineStart);
+        const std::size_t lineEnd = newline == std::string::npos
+            ? masked.size() : newline;
+        std::size_t pos = lineStart;
+        while (pos < lineEnd &&
+               (masked[pos] == ' ' || masked[pos] == '\t' ||
+                masked[pos] == '\r')) {
+            ++pos;
+        }
+        if (pos < lineEnd && masked[pos] == '#') {
+            const std::size_t hash = pos++;
+            while (pos < lineEnd &&
+                   (masked[pos] == ' ' || masked[pos] == '\t')) {
+                ++pos;
+            }
+            std::string_view directive;
+            if (readIdentifier(masked, pos, &directive) &&
+                directive == "extension") {
+                while (pos < lineEnd &&
+                       std::isspace(static_cast<unsigned char>(masked[pos]))) {
+                    ++pos;
+                }
+                std::string_view extension;
+                if (readIdentifier(masked, pos, &extension) &&
+                    extension == "GL_ARB_geometry_shader4") {
+                    while (pos < lineEnd &&
+                           std::isspace(static_cast<unsigned char>(masked[pos]))) {
+                        ++pos;
+                    }
+                    if (pos < lineEnd && masked[pos] == ':') {
+                        ++pos;
+                        while (pos < lineEnd &&
+                               std::isspace(static_cast<unsigned char>(masked[pos]))) {
+                            ++pos;
+                        }
+                        std::string_view behavior;
+                        if (readIdentifier(masked, pos, &behavior)) {
+                            GeometryShader4DirectiveMode mode =
+                                GeometryShader4DirectiveMode::Absent;
+                            if (behavior == "disable") {
+                                mode = GeometryShader4DirectiveMode::Disable;
+                            } else if (behavior == "warn") {
+                                mode = GeometryShader4DirectiveMode::Warn;
+                            } else if (behavior == "enable") {
+                                mode = GeometryShader4DirectiveMode::Enable;
+                            } else if (behavior == "require") {
+                                mode = GeometryShader4DirectiveMode::Require;
+                            }
+                            if (mode != GeometryShader4DirectiveMode::Absent) {
+                                records.push_back({hash, lineEnd, mode});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (newline == std::string::npos) {
+            break;
+        }
+        lineStart = newline + 1;
+    }
+    return records;
+}
+
+std::size_t geometryShader4PreambleOffset(const std::string& source) {
+    const std::string masked = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while (pos < masked.size()) {
+        while (pos < masked.size() &&
+               std::isspace(static_cast<unsigned char>(masked[pos]))) {
+            ++pos;
+        }
+        if (pos >= masked.size() || masked[pos] != '#') {
+            break;
+        }
+        const std::size_t eol = source.find('\n', pos);
+        pos = eol == std::string::npos ? source.size() : eol + 1;
+    }
+    return pos;
+}
+
+bool replaceGeometryShader4VaryingStorage(std::string& source) {
+    bool changed = false;
+    std::size_t pos = 0;
+    while (pos < source.size()) {
+        if (isPreprocessorDirectiveLine(source, pos)) {
+            pos = skipPreprocessorDirective(source, pos);
+            continue;
+        }
+        if (source.compare(pos, 2, "//") == 0) {
+            pos = skipLineComment(source, pos);
+            continue;
+        }
+        if (source.compare(pos, 2, "/*") == 0) {
+            pos = skipBlockComment(source, pos);
+            continue;
+        }
+        if (source[pos] == '"' || source[pos] == '\'') {
+            pos = skipStringLiteral(source, pos);
+            continue;
+        }
+        if (!sourceHasWordAt(source, pos, "varying")) {
+            ++pos;
+            continue;
+        }
+        std::size_t next = pos + std::strlen("varying");
+        if (!skipWhitespaceAndComments(source, next) ||
+            (!sourceHasWordAt(source, next, "in") &&
+             !sourceHasWordAt(source, next, "out"))) {
+            pos += std::strlen("varying");
+            continue;
+        }
+        source.replace(pos, std::strlen("varying"),
+                       std::strlen("varying"), ' ');
+        changed = true;
+        pos = next;
+    }
+    return changed;
+}
+
+bool eraseSingleLineStorageDeclaration(std::string& source,
+                                       const char* identifier) {
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while ((pos = clean.find(identifier, pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, identifier)) {
+            ++pos;
+            continue;
+        }
+        const std::size_t lineBreak = clean.rfind('\n', pos);
+        const std::size_t lineStart = lineBreak == std::string::npos
+            ? 0 : lineBreak + 1;
+        const std::size_t semicolon = clean.find(';', pos);
+        if (semicolon == std::string::npos) return false;
+        const std::string declaration = clean.substr(
+            lineStart, semicolon + 1 - lineStart);
+        const bool hasStorage = containsCodeIdentifier(declaration, "varying") ||
+            containsCodeIdentifier(declaration, "in") ||
+            containsCodeIdentifier(declaration, "out");
+        if (!hasStorage) {
+            pos += std::strlen(identifier);
+            continue;
+        }
+        for (std::size_t i = lineStart; i <= semicolon; ++i) {
+            if (source[i] != '\n') source[i] = ' ';
+        }
+        return true;
+    }
+    return false;
+}
+
+bool parseSimpleGeometryShader4Integer(std::string_view expression,
+                                       int& value);
+
+int provisionalGeometryShader4VerticesIn(std::string_view source) {
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while ((pos = clean.find("varying", pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, "varying")) {
+            ++pos;
+            continue;
+        }
+        std::size_t scan = pos + std::strlen("varying");
+        while (scan < clean.size() &&
+               std::isspace(static_cast<unsigned char>(clean[scan]))) {
+            ++scan;
+        }
+        if (!sourceHasWordAt(clean, scan, "in")) {
+            pos += std::strlen("varying");
+            continue;
+        }
+        const std::size_t semicolon = clean.find(';', scan);
+        const std::size_t open = clean.find('[', scan);
+        if (open == std::string::npos ||
+            (semicolon != std::string::npos && open > semicolon)) {
+            pos += std::strlen("varying");
+            continue;
+        }
+        const std::size_t close = clean.find(']', open + 1);
+        if (close == std::string::npos) break;
+        const std::string_view extent = trimAscii(
+            std::string_view(clean).substr(open + 1, close - open - 1));
+        if (extent.empty()) return 6;
+        int parsed = 0;
+        if (parseSimpleGeometryShader4Integer(extent, parsed) &&
+            (parsed == 1 || parsed == 2 || parsed == 3 ||
+             parsed == 4 || parsed == 6)) {
+            return parsed;
+        }
+        pos = close + 1;
+    }
+    return 3;
+}
+
+GLenum geometryShader4InputTypeForVertexCount(int vertices) {
+    switch (vertices) {
+        case 1: return GL_POINTS;
+        case 2: return GL_LINES;
+        case 4: return GL_LINES_ADJACENCY;
+        case 6: return GL_TRIANGLES_ADJACENCY;
+        default: return GL_TRIANGLES;
+    }
+}
+
+bool parseSimpleGeometryShader4Integer(std::string_view expression,
+                                       int& value) {
+    expression = trimAscii(expression);
+    int sign = 1;
+    if (!expression.empty() && (expression.front() == '+' || expression.front() == '-')) {
+        if (expression.front() == '-') sign = -1;
+        expression.remove_prefix(1);
+        expression = trimAscii(expression);
+    }
+    if (expression.empty()) return false;
+    int base = 0;
+    if (expression.substr(0, std::strlen("gl_MaxClipDistances")) ==
+        "gl_MaxClipDistances") {
+        base = 8;
+        expression.remove_prefix(std::strlen("gl_MaxClipDistances"));
+    } else {
+        std::size_t digits = 0;
+        while (digits < expression.size() &&
+               std::isdigit(static_cast<unsigned char>(expression[digits]))) {
+            ++digits;
+        }
+        if (digits == 0) return false;
+        base = std::atoi(std::string(expression.substr(0, digits)).c_str());
+        expression.remove_prefix(digits);
+    }
+    expression = trimAscii(expression);
+    if (!expression.empty()) {
+        const char op = expression.front();
+        if (op != '+' && op != '-') return false;
+        expression.remove_prefix(1);
+        expression = trimAscii(expression);
+        std::size_t digits = 0;
+        while (digits < expression.size() &&
+               std::isdigit(static_cast<unsigned char>(expression[digits]))) {
+            ++digits;
+        }
+        if (digits == 0 || !trimAscii(expression.substr(digits)).empty()) {
+            return false;
+        }
+        const int rhs = std::atoi(std::string(expression.substr(0, digits)).c_str());
+        base = op == '+' ? base + rhs : base - rhs;
+    }
+    value = sign * base;
+    return true;
+}
+
+struct GeometryShader4ClipDistanceDecl {
+    bool present = false;
+    std::size_t storagePos = std::string::npos;
+    int outerSize = 0;
+    int innerSize = 0;
+};
+
+GeometryShader4ClipDistanceDecl findGeometryShader4ClipDistanceDecl(
+    const std::string& source)
+{
+    GeometryShader4ClipDistanceDecl result;
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t name = 0;
+    while ((name = clean.find("gl_ClipDistanceIn", name)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, name, "gl_ClipDistanceIn")) {
+            ++name;
+            continue;
+        }
+        std::size_t stmtStart = name;
+        while (stmtStart > 0 && clean[stmtStart - 1] != ';' &&
+               clean[stmtStart - 1] != '{' && clean[stmtStart - 1] != '}') {
+            --stmtStart;
+        }
+        std::size_t scan = stmtStart;
+        std::size_t inPos = std::string::npos;
+        bool sawFloat = false;
+        while (scan < name) {
+            while (scan < name && !isIdentChar(clean[scan])) ++scan;
+            const std::size_t begin = scan;
+            while (scan < name && isIdentChar(clean[scan])) ++scan;
+            if (begin == scan) break;
+            const std::string_view token(clean.data() + begin, scan - begin);
+            if (token == "in") inPos = begin;
+            if (token == "float") sawFloat = true;
+        }
+        if (inPos == std::string::npos || !sawFloat) {
+            name += std::strlen("gl_ClipDistanceIn");
+            continue;
+        }
+        std::size_t p = name + std::strlen("gl_ClipDistanceIn");
+        while (p < clean.size() && std::isspace(static_cast<unsigned char>(clean[p]))) ++p;
+        int dimensions[2] = {0, 0};
+        bool ok = true;
+        for (int dim = 0; dim < 2; ++dim) {
+            if (p >= clean.size() || clean[p] != '[') { ok = false; break; }
+            const std::size_t close = clean.find(']', p + 1);
+            if (close == std::string::npos ||
+                !parseSimpleGeometryShader4Integer(
+                    std::string_view(clean).substr(p + 1, close - p - 1),
+                    dimensions[dim])) {
+                ok = false;
+                break;
+            }
+            p = close + 1;
+            while (p < clean.size() && std::isspace(static_cast<unsigned char>(clean[p]))) ++p;
+        }
+        if (ok) {
+            result.present = true;
+            result.storagePos = inPos;
+            result.outerSize = dimensions[0];
+            result.innerSize = dimensions[1];
+        }
+        return result;
+    }
+    return result;
+}
+
+bool validateImplicitGeometryShader4ClipDistanceAccess(
+    const std::string& source, std::string& diagnostic)
+{
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while ((pos = clean.find("gl_ClipDistanceIn", pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, "gl_ClipDistanceIn")) {
+            ++pos;
+            continue;
+        }
+        std::size_t p = pos + std::strlen("gl_ClipDistanceIn");
+        while (p < clean.size() && std::isspace(static_cast<unsigned char>(clean[p]))) ++p;
+        if (p >= clean.size() || clean[p] != '[') {
+            diagnostic = "implicit gl_ClipDistanceIn requires constant two-dimensional indexing";
+            return false;
+        }
+        const std::size_t outerClose = clean.find(']', p + 1);
+        if (outerClose == std::string::npos) return false;
+        p = outerClose + 1;
+        while (p < clean.size() && std::isspace(static_cast<unsigned char>(clean[p]))) ++p;
+        if (p >= clean.size() || clean[p] != '[') {
+            diagnostic = "implicit gl_ClipDistanceIn has an unsized inner array";
+            return false;
+        }
+        const std::size_t innerClose = clean.find(']', p + 1);
+        int innerIndex = 0;
+        if (innerClose == std::string::npos ||
+            !parseSimpleGeometryShader4Integer(
+                std::string_view(clean).substr(p + 1, innerClose - p - 1),
+                innerIndex)) {
+            diagnostic = "implicit gl_ClipDistanceIn requires a constant inner index";
+            return false;
+        }
+        if (innerIndex < 0 || innerIndex >= 8) {
+            diagnostic = "gl_ClipDistanceIn inner index exceeds gl_MaxClipDistances";
+            return false;
+        }
+        pos = innerClose + 1;
+    }
+    return true;
+}
+
 }  // namespace
+
+GeometryShader4DirectiveState scanGeometryShader4Directive(
+    std::string_view source)
+{
+    GeometryShader4DirectiveState result;
+    for (const auto& record : collectGeometryShader4Directives(source)) {
+        result.present = true;
+        result.mode = record.mode;
+    }
+    return result;
+}
+
+GeometryShader4SourceLayout parseGeometryShader4SourceLayout(
+    std::string_view source)
+{
+    GeometryShader4SourceLayout result;
+    const std::string clean = maskCommentsAndStrings(source);
+    auto fail = [&](const std::string& message) {
+        result.valid = false;
+        result.diagnostic = message;
+    };
+    auto setInput = [&](GLenum value) {
+        if (result.hasInputType && result.inputType != value) {
+            fail("conflicting geometry shader input layout declarations");
+        } else {
+            result.hasInputType = true;
+            result.inputType = value;
+        }
+    };
+    auto setOutput = [&](GLenum value) {
+        if (result.hasOutputType && result.outputType != value) {
+            fail("conflicting geometry shader output layout declarations");
+        } else {
+            result.hasOutputType = true;
+            result.outputType = value;
+        }
+    };
+    std::size_t pos = 0;
+    while (result.valid &&
+           (pos = clean.find("layout", pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, "layout")) {
+            ++pos;
+            continue;
+        }
+        std::size_t open = pos + std::strlen("layout");
+        while (open < clean.size() &&
+               std::isspace(static_cast<unsigned char>(clean[open]))) ++open;
+        if (open >= clean.size() || clean[open] != '(') {
+            pos += std::strlen("layout");
+            continue;
+        }
+        int depth = 1;
+        std::size_t close = open + 1;
+        while (close < clean.size() && depth > 0) {
+            if (clean[close] == '(') ++depth;
+            else if (clean[close] == ')') --depth;
+            ++close;
+        }
+        if (depth != 0) {
+            fail("unterminated geometry shader layout declaration");
+            break;
+        }
+        const std::size_t closeParen = close - 1;
+        std::size_t storage = close;
+        while (storage < clean.size() &&
+               std::isspace(static_cast<unsigned char>(clean[storage]))) ++storage;
+        const bool isInput = sourceHasWordAt(clean, storage, "in");
+        const bool isOutput = sourceHasWordAt(clean, storage, "out");
+        if (!isInput && !isOutput) {
+            pos = close;
+            continue;
+        }
+        std::string_view inner(clean.data() + open + 1,
+                               closeParen - open - 1);
+        std::size_t itemStart = 0;
+        while (itemStart <= inner.size() && result.valid) {
+            const std::size_t comma = inner.find(',', itemStart);
+            std::string_view item = trimAscii(inner.substr(
+                itemStart, comma == std::string_view::npos
+                    ? inner.size() - itemStart : comma - itemStart));
+            const std::size_t equals = item.find('=');
+            const std::string_view name = trimAscii(item.substr(0, equals));
+            if (isInput) {
+                if (name == "points") setInput(GL_POINTS);
+                else if (name == "lines") setInput(GL_LINES);
+                else if (name == "lines_adjacency") setInput(GL_LINES_ADJACENCY);
+                else if (name == "triangles") setInput(GL_TRIANGLES);
+                else if (name == "triangles_adjacency") setInput(GL_TRIANGLES_ADJACENCY);
+            }
+            if (isOutput) {
+                if (name == "points") setOutput(GL_POINTS);
+                else if (name == "line_strip") setOutput(GL_LINE_STRIP);
+                else if (name == "triangle_strip") setOutput(GL_TRIANGLE_STRIP);
+                else if (name == "max_vertices") {
+                    int parsed = 0;
+                    if (equals == std::string_view::npos ||
+                        !parseSimpleGeometryShader4Integer(
+                            item.substr(equals + 1), parsed) || parsed <= 0) {
+                        fail("invalid geometry shader max_vertices layout");
+                    } else if (result.hasVerticesOut &&
+                               result.verticesOut != parsed) {
+                        fail("conflicting geometry shader max_vertices declarations");
+                    } else {
+                        result.hasVerticesOut = true;
+                        result.verticesOut = parsed;
+                    }
+                }
+            }
+            if (comma == std::string_view::npos) break;
+            itemStart = comma + 1;
+        }
+        pos = close;
+    }
+    return result;
+}
+
+GeometryShader4RewriteResult rewriteGeometryShader4Source(
+    std::string_view source,
+    const GeometryShader4LinkPlan& plan)
+{
+    GeometryShader4RewriteResult result;
+    result.source.assign(source.begin(), source.end());
+    result.directive = scanGeometryShader4Directive(source);
+    if (!result.directive.active() || !plan.active) {
+        return result;
+    }
+    if (plan.verticesIn <= 0 || plan.verticesOut <= 0) {
+        result.valid = false;
+        result.diagnostic = "ARB geometry shader link plan has zero effective vertices";
+        return result;
+    }
+    int effectiveVerticesIn = plan.verticesIn;
+    GLenum effectiveInputType = plan.inputType;
+    if (plan.materializedInputCapacity > plan.verticesIn &&
+        !plan.inputFromSource) {
+        effectiveVerticesIn = provisionalGeometryShader4VerticesIn(source);
+        effectiveInputType = geometryShader4InputTypeForVertexCount(
+            effectiveVerticesIn);
+    }
+    const int materializedInputCapacity =
+        plan.materializedInputCapacity > 0
+            ? plan.materializedInputCapacity
+            : effectiveVerticesIn;
+
+    const GeometryShader4SourceLayout layout =
+        parseGeometryShader4SourceLayout(source);
+    if (!layout.valid) {
+        result.valid = false;
+        result.diagnostic = layout.diagnostic;
+        return result;
+    }
+
+    for (const auto& record : collectGeometryShader4Directives(result.source)) {
+        if (record.hash + 1 < record.lineEnd) {
+            result.source[record.hash] = '/';
+            result.source[record.hash + 1] = '/';
+        }
+    }
+
+    const std::string masked = maskCommentsAndStrings(result.source);
+    std::size_t version = 0;
+    bool replacedVersion = false;
+    while ((version = masked.find('#', version)) != std::string::npos) {
+        std::size_t p = version + 1;
+        while (p < masked.size() &&
+               (masked[p] == ' ' || masked[p] == '\t')) ++p;
+        if (sourceHasWordAt(masked, p, "version")) {
+            const std::size_t eol = result.source.find('\n', version);
+            const std::size_t end = eol == std::string::npos
+                ? result.source.size() : eol;
+            result.source.replace(version, end - version, "#version 460 core");
+            replacedVersion = true;
+            break;
+        }
+        ++version;
+    }
+    if (!replacedVersion) {
+        result.source.insert(0, "#version 460 core\n");
+    }
+
+    replaceGeometryShader4VaryingStorage(result.source);
+    replaceCodeIdentifier(result.source, "gl_VerticesIn",
+                          std::to_string(effectiveVerticesIn));
+
+    const bool usesPositionIn =
+        containsCodeIdentifier(result.source, "gl_PositionIn");
+    const bool usesPointSizeIn =
+        containsCodeIdentifier(result.source, "gl_PointSizeIn");
+    const bool usesClipVertexIn =
+        containsCodeIdentifier(result.source, "gl_ClipVertexIn");
+    const bool usesFrontColorIn =
+        containsCodeIdentifier(result.source, "gl_FrontColorIn");
+    const bool usesBackColorIn =
+        containsCodeIdentifier(result.source, "gl_BackColorIn");
+    const bool usesFrontSecondaryColorIn =
+        containsCodeIdentifier(result.source, "gl_FrontSecondaryColorIn");
+    const bool usesBackSecondaryColorIn =
+        containsCodeIdentifier(result.source, "gl_BackSecondaryColorIn");
+    const bool usesTexCoordIn =
+        containsCodeIdentifier(result.source, "gl_TexCoordIn");
+    const bool usesFogFragCoordIn =
+        containsCodeIdentifier(result.source, "gl_FogFragCoordIn");
+    const bool usesClipDistanceIn =
+        containsCodeIdentifier(result.source, "gl_ClipDistanceIn");
+    result.legacyInputs.clipVertex = usesClipVertexIn;
+    result.legacyInputs.frontColor = usesFrontColorIn;
+    result.legacyInputs.backColor = usesBackColorIn;
+    result.legacyInputs.frontSecondaryColor = usesFrontSecondaryColorIn;
+    result.legacyInputs.backSecondaryColor = usesBackSecondaryColorIn;
+    result.legacyInputs.texCoord = usesTexCoordIn;
+    result.legacyInputs.fogFragCoord = usesFogFragCoordIn;
+
+    const GeometryShader4ClipDistanceDecl clipDecl =
+        findGeometryShader4ClipDistanceDecl(result.source);
+    int clipDistanceWidth = 8;
+    if (clipDecl.present) {
+        clipDistanceWidth = clipDecl.innerSize;
+        if (clipDecl.outerSize != effectiveVerticesIn) {
+            result.valid = false;
+            result.diagnostic =
+                "gl_ClipDistanceIn outer dimension differs from gl_VerticesIn";
+            return result;
+        }
+        if (clipDistanceWidth <= 0 || clipDistanceWidth > 8) {
+            result.valid = false;
+            result.diagnostic =
+                "gl_ClipDistanceIn width exceeds gl_MaxClipDistances";
+            return result;
+        }
+        result.source.replace(clipDecl.storagePos, 2, "  ");
+    } else if (usesClipDistanceIn &&
+               !validateImplicitGeometryShader4ClipDistanceAccess(
+                   result.source, result.diagnostic)) {
+        result.valid = false;
+        return result;
+    }
+
+    if (usesClipDistanceIn) {
+        eraseSingleLineStorageDeclaration(result.source, "gl_ClipDistance");
+    }
+    if (usesTexCoordIn) {
+        eraseSingleLineStorageDeclaration(result.source, "gl_TexCoordIn");
+    }
+
+    if (usesPositionIn) {
+        replaceCodeIdentifier(result.source, "gl_PositionIn",
+                              "appgl_PositionIn");
+    }
+    if (usesPointSizeIn) {
+        replaceCodeIdentifier(result.source, "gl_PointSizeIn",
+                              "appgl_PointSizeIn");
+    }
+    if (usesClipDistanceIn) {
+        replaceCodeIdentifier(result.source, "gl_ClipDistanceIn",
+                              "appgl_ClipDistanceIn");
+    }
+    if (usesClipVertexIn) {
+        replaceCodeIdentifier(result.source, "gl_ClipVertexIn",
+                              "appgl_ClipVertexIn");
+    }
+    if (usesFrontColorIn) {
+        replaceCodeIdentifier(result.source, "gl_FrontColorIn",
+                              "appgl_FrontColorIn");
+    }
+    if (usesBackColorIn) {
+        replaceCodeIdentifier(result.source, "gl_BackColorIn",
+                              "appgl_BackColorIn");
+    }
+    if (usesFrontSecondaryColorIn) {
+        replaceCodeIdentifier(result.source, "gl_FrontSecondaryColorIn",
+                              "appgl_FrontSecondaryColorIn");
+    }
+    if (usesBackSecondaryColorIn) {
+        replaceCodeIdentifier(result.source, "gl_BackSecondaryColorIn",
+                              "appgl_BackSecondaryColorIn");
+    }
+    if (usesTexCoordIn) {
+        replaceCodeIdentifier(result.source, "gl_TexCoordIn",
+                              "appgl_TexCoordIn");
+    }
+    if (usesFogFragCoordIn) {
+        replaceCodeIdentifier(result.source, "gl_FogFragCoordIn",
+                              "appgl_FogFragCoordIn");
+    }
+
+    // Legacy extension texture entry points became the unified core texture
+    // family. Keep this list explicit so only code tokens in ARB geometry
+    // sources are changed; comments and similarly named helpers stay intact.
+    constexpr std::pair<const char*, const char*> textureAliases[] = {
+        {"texture1DGradARB", "textureGrad"},
+        {"texture1DProjGradARB", "textureProjGrad"},
+        {"texture2DGradARB", "textureGrad"},
+        {"texture2DProjGradARB", "textureProjGrad"},
+        {"texture3DGradARB", "textureGrad"},
+        {"texture3DProjGradARB", "textureProjGrad"},
+        {"textureCubeGradARB", "textureGrad"},
+        {"shadow1DGradARB", "textureGrad"},
+        {"shadow1DProjGradARB", "textureProjGrad"},
+        {"shadow2DGradARB", "textureGrad"},
+        {"shadow2DProjGradARB", "textureProjGrad"},
+        {"texture2DRect", "texture"},
+        {"texture2DRectProj", "textureProj"},
+        {"shadow2DRect", "texture"},
+        {"shadow2DRectProj", "textureProj"},
+        {"texture1DArray", "texture"},
+        {"texture1DArrayLod", "textureLod"},
+        {"texture2DArray", "texture"},
+        {"texture2DArrayLod", "textureLod"},
+        {"shadow1DArray", "texture"},
+        {"shadow1DArrayLod", "textureLod"},
+        {"shadow2DArray", "texture"},
+    };
+    for (const auto& [legacyName, coreName] : textureAliases) {
+        replaceCodeIdentifier(result.source, legacyName, coreName);
+    }
+    replaceCodeIdentifier(result.source, "gl_MaxVaryingFloats", "128");
+
+    // Core GLSL removed several fixed-function uniforms that were legal in
+    // ARB geometry shaders. Existing matrix/fog/light-source names flow
+    // through rewriteCompatShader; declare the remaining aggregate surfaces
+    // only when this geometry source actually references them.
+    std::string geometryCompatibilityPreamble;
+    if (result.source.find("gl_DepthRange.") != std::string::npos) {
+        replaceLiteral(result.source, "gl_DepthRange.near",
+                       "appgl_DepthRangeNear");
+        replaceLiteral(result.source, "gl_DepthRange.far",
+                       "appgl_DepthRangeFar");
+        replaceLiteral(result.source, "gl_DepthRange.diff",
+                       "appgl_DepthRangeDiff");
+        geometryCompatibilityPreamble +=
+            "uniform float appgl_DepthRangeNear;\n"
+            "uniform float appgl_DepthRangeFar;\n"
+            "uniform float appgl_DepthRangeDiff;\n";
+    }
+    auto bridgeUniform = [&](const char* legacyName,
+                             const char* replacement,
+                             const char* declaration) {
+        if (!containsCodeIdentifier(result.source, legacyName)) return false;
+        replaceCodeIdentifier(result.source, legacyName, replacement);
+        geometryCompatibilityPreamble += declaration;
+        return true;
+    };
+    replaceCodeIdentifier(result.source, "gl_ModelViewMatrixInverseTranspose",
+                          "transpose(gl_ModelViewMatrixInverse)");
+    replaceCodeIdentifier(result.source, "gl_ProjectionMatrixInverseTranspose",
+                          "transpose(gl_ProjectionMatrixInverse)");
+    replaceCodeIdentifier(result.source,
+                          "gl_ModelViewProjectionMatrixInverseTranspose",
+                          "transpose(gl_ModelViewProjectionMatrixInverse)");
+    replaceCodeIdentifier(result.source, "gl_ModelViewMatrixTranspose",
+                          "transpose(gl_ModelViewMatrix)");
+    replaceCodeIdentifier(result.source, "gl_ProjectionMatrixTranspose",
+                          "transpose(gl_ProjectionMatrix)");
+    replaceCodeIdentifier(result.source, "gl_ModelViewProjectionMatrixTranspose",
+                          "transpose(gl_ModelViewProjectionMatrix)");
+    bridgeUniform("gl_TextureMatrixInverseTranspose",
+                  "appgl_TextureMatrixInverseTranspose",
+                  "uniform mat4 appgl_TextureMatrixInverseTranspose[8];\n");
+    bridgeUniform("gl_TextureMatrixTranspose", "appgl_TextureMatrixTranspose",
+                  "uniform mat4 appgl_TextureMatrixTranspose[8];\n");
+    bridgeUniform("gl_TextureMatrixInverse", "appgl_TextureMatrixInverse",
+                  "uniform mat4 appgl_TextureMatrixInverse[8];\n");
+    bridgeUniform("gl_NormalScale", "appgl_NormalScale",
+                  "uniform float appgl_NormalScale;\n");
+    bridgeUniform("gl_ClipPlane", "appgl_ClipPlane",
+                  "uniform vec4 appgl_ClipPlane[8];\n");
+    if (bridgeUniform("gl_Point", "appgl_Point",
+                      "uniform AppGLPointParameters appgl_Point;\n")) {
+        geometryCompatibilityPreamble.insert(
+            0,
+            "struct AppGLPointParameters { float size; float sizeMin; "
+            "float sizeMax; float fadeThresholdSize; "
+            "float distanceConstantAttenuation; "
+            "float distanceLinearAttenuation; "
+            "float distanceQuadraticAttenuation; };\n");
+    }
+    const bool usesFrontMaterial = containsCodeIdentifier(
+        result.source, "gl_FrontMaterial");
+    const bool usesBackMaterial = containsCodeIdentifier(
+        result.source, "gl_BackMaterial");
+    if (usesFrontMaterial || usesBackMaterial) {
+        geometryCompatibilityPreamble +=
+            "struct AppGLMaterialParameters { vec4 emission; vec4 ambient; "
+            "vec4 diffuse; vec4 specular; float shininess; };\n";
+        if (usesFrontMaterial) {
+            replaceCodeIdentifier(result.source, "gl_FrontMaterial",
+                                  "appgl_FrontMaterial");
+            geometryCompatibilityPreamble +=
+                "uniform AppGLMaterialParameters appgl_FrontMaterial;\n";
+        }
+        if (usesBackMaterial) {
+            replaceCodeIdentifier(result.source, "gl_BackMaterial",
+                                  "appgl_BackMaterial");
+            geometryCompatibilityPreamble +=
+                "uniform AppGLMaterialParameters appgl_BackMaterial;\n";
+        }
+    }
+    const bool usesFrontLightModelProduct = containsCodeIdentifier(
+        result.source, "gl_FrontLightModelProduct");
+    const bool usesBackLightModelProduct = containsCodeIdentifier(
+        result.source, "gl_BackLightModelProduct");
+    if (usesFrontLightModelProduct || usesBackLightModelProduct) {
+        geometryCompatibilityPreamble +=
+            "struct AppGLLightModelProducts { vec4 sceneColor; };\n";
+        if (usesFrontLightModelProduct) {
+            replaceCodeIdentifier(result.source, "gl_FrontLightModelProduct",
+                                  "appgl_FrontLightModelProduct");
+            geometryCompatibilityPreamble +=
+                "uniform AppGLLightModelProducts appgl_FrontLightModelProduct;\n";
+        }
+        if (usesBackLightModelProduct) {
+            replaceCodeIdentifier(result.source, "gl_BackLightModelProduct",
+                                  "appgl_BackLightModelProduct");
+            geometryCompatibilityPreamble +=
+                "uniform AppGLLightModelProducts appgl_BackLightModelProduct;\n";
+        }
+    }
+    const bool usesFrontLightProduct = containsCodeIdentifier(
+        result.source, "gl_FrontLightProduct");
+    const bool usesBackLightProduct = containsCodeIdentifier(
+        result.source, "gl_BackLightProduct");
+    if (usesFrontLightProduct || usesBackLightProduct) {
+        geometryCompatibilityPreamble +=
+            "struct AppGLLightProducts { vec4 ambient; vec4 diffuse; "
+            "vec4 specular; };\n";
+        if (usesFrontLightProduct) {
+            replaceCodeIdentifier(result.source, "gl_FrontLightProduct",
+                                  "appgl_FrontLightProduct");
+            geometryCompatibilityPreamble +=
+                "uniform AppGLLightProducts appgl_FrontLightProduct[8];\n";
+        }
+        if (usesBackLightProduct) {
+            replaceCodeIdentifier(result.source, "gl_BackLightProduct",
+                                  "appgl_BackLightProduct");
+            geometryCompatibilityPreamble +=
+                "uniform AppGLLightProducts appgl_BackLightProduct[8];\n";
+        }
+    }
+    bridgeUniform("gl_EyePlaneS", "appgl_EyePlaneS",
+                  "uniform vec4 appgl_EyePlaneS[8];\n");
+    bridgeUniform("gl_EyePlaneT", "appgl_EyePlaneT",
+                  "uniform vec4 appgl_EyePlaneT[8];\n");
+    bridgeUniform("gl_EyePlaneR", "appgl_EyePlaneR",
+                  "uniform vec4 appgl_EyePlaneR[8];\n");
+    bridgeUniform("gl_EyePlaneQ", "appgl_EyePlaneQ",
+                  "uniform vec4 appgl_EyePlaneQ[8];\n");
+    bridgeUniform("gl_ObjectPlaneS", "appgl_ObjectPlaneS",
+                  "uniform vec4 appgl_ObjectPlaneS[8];\n");
+    bridgeUniform("gl_ObjectPlaneT", "appgl_ObjectPlaneT",
+                  "uniform vec4 appgl_ObjectPlaneT[8];\n");
+    bridgeUniform("gl_ObjectPlaneR", "appgl_ObjectPlaneR",
+                  "uniform vec4 appgl_ObjectPlaneR[8];\n");
+    bridgeUniform("gl_ObjectPlaneQ", "appgl_ObjectPlaneQ",
+                  "uniform vec4 appgl_ObjectPlaneQ[8];\n");
+
+    auto inputToken = [](GLenum type) -> const char* {
+        switch (type) {
+            case GL_POINTS: return "points";
+            case GL_LINES: return "lines";
+            case GL_LINES_ADJACENCY: return "lines_adjacency";
+            case GL_TRIANGLES: return "triangles";
+            case GL_TRIANGLES_ADJACENCY: return "triangles_adjacency";
+            default: return nullptr;
+        }
+    };
+    auto outputToken = [](GLenum type) -> const char* {
+        switch (type) {
+            case GL_POINTS: return "points";
+            case GL_LINE_STRIP: return "line_strip";
+            case GL_TRIANGLE_STRIP: return "triangle_strip";
+            default: return nullptr;
+        }
+    };
+    const char* inToken = inputToken(effectiveInputType);
+    const char* outToken = outputToken(plan.outputType);
+    if (inToken == nullptr || outToken == nullptr) {
+        result.valid = false;
+        result.diagnostic = "invalid ARB geometry shader primitive request";
+        return result;
+    }
+
+    std::string preamble = std::move(geometryCompatibilityPreamble);
+    if (!layout.hasInputType) {
+        preamble += "layout(" + std::string(inToken) + ") in;\n";
+    }
+    if (!layout.hasOutputType) {
+        preamble += "layout(" + std::string(outToken) + ") out;\n";
+    }
+    if (!layout.hasVerticesOut) {
+        preamble += "layout(max_vertices = " +
+                    std::to_string(plan.verticesOut) + ") out;\n";
+    }
+    if (usesClipDistanceIn) {
+        preamble += "in gl_PerVertex {\n";
+        preamble += "    vec4 gl_Position;\n";
+        preamble += "    float gl_PointSize;\n";
+        preamble += "    float gl_ClipDistance[" +
+                    std::to_string(clipDistanceWidth) + "];\n";
+        preamble += "} gl_in[];\n";
+        preamble += "out gl_PerVertex {\n";
+        preamble += "    vec4 gl_Position;\n";
+        preamble += "    float gl_PointSize;\n";
+        preamble += "    float gl_ClipDistance[" +
+                    std::to_string(clipDistanceWidth) + "];\n";
+        preamble += "};\n";
+    }
+    if (usesPositionIn) {
+        preamble += "vec4 appgl_PositionIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesPointSizeIn) {
+        preamble += "float appgl_PointSizeIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesClipDistanceIn && !clipDecl.present) {
+        preamble += "float appgl_ClipDistanceIn[" +
+                    std::to_string(effectiveVerticesIn) + "][" +
+                    std::to_string(clipDistanceWidth) + "];\n";
+    }
+    if (usesClipVertexIn) {
+        preamble += "in vec4 appgl_ClipVertexFromVS[];\n";
+        preamble += "vec4 appgl_ClipVertexIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesFrontColorIn) {
+        preamble += "in vec4 appgl_FrontColorFromVS[];\n";
+        preamble += "vec4 appgl_FrontColorIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesBackColorIn) {
+        preamble += "in vec4 appgl_BackColorFromVS[];\n";
+        preamble += "vec4 appgl_BackColorIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesFrontSecondaryColorIn) {
+        preamble += "in vec4 appgl_FrontSecondaryColorFromVS[];\n";
+        preamble += "vec4 appgl_FrontSecondaryColorIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesBackSecondaryColorIn) {
+        preamble += "in vec4 appgl_BackSecondaryColorFromVS[];\n";
+        preamble += "vec4 appgl_BackSecondaryColorIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+    if (usesTexCoordIn) {
+        preamble += "in vec4 appgl_TexCoordFromVS[][8];\n";
+        preamble += "vec4 appgl_TexCoordIn[" +
+                    std::to_string(materializedInputCapacity) + "][8];\n";
+    }
+    if (usesFogFragCoordIn) {
+        preamble += "in float appgl_FogFragCoordFromVS[];\n";
+        preamble += "float appgl_FogFragCoordIn[" +
+                    std::to_string(materializedInputCapacity) + "];\n";
+    }
+
+    result.source.insert(geometryShader4PreambleOffset(result.source), preamble);
+
+    if (usesPositionIn || usesPointSizeIn || usesClipDistanceIn ||
+        usesClipVertexIn || usesFrontColorIn || usesBackColorIn ||
+        usesFrontSecondaryColorIn || usesBackSecondaryColorIn ||
+        usesTexCoordIn || usesFogFragCoordIn) {
+        if (!replaceCodeFunctionIdentifier(
+                result.source, "main", "appgl_ArbGeometryShader4Main")) {
+            result.valid = false;
+            result.diagnostic = "ARB geometry shader has no main entry point";
+            return result;
+        }
+        result.source += "\nvoid main() {\n";
+        result.source += "    for (int appgl_i = 0; appgl_i < " +
+                         std::to_string(effectiveVerticesIn) + "; ++appgl_i) {\n";
+        if (usesPositionIn) {
+            result.source +=
+                "        appgl_PositionIn[appgl_i] = gl_in[appgl_i].gl_Position;\n";
+        }
+        if (usesPointSizeIn) {
+            result.source +=
+                "        appgl_PointSizeIn[appgl_i] = gl_in[appgl_i].gl_PointSize;\n";
+        }
+        if (usesClipDistanceIn) {
+            result.source += "        for (int appgl_j = 0; appgl_j < " +
+                             std::to_string(clipDistanceWidth) +
+                             "; ++appgl_j) {\n";
+            result.source +=
+                "            appgl_ClipDistanceIn[appgl_i][appgl_j] = "
+                "gl_in[appgl_i].gl_ClipDistance[appgl_j];\n";
+            result.source += "        }\n";
+        }
+        if (usesClipVertexIn) {
+            result.source +=
+                "        appgl_ClipVertexIn[appgl_i] = "
+                "appgl_ClipVertexFromVS[appgl_i];\n";
+        }
+        if (usesFrontColorIn) {
+            result.source +=
+                "        appgl_FrontColorIn[appgl_i] = "
+                "appgl_FrontColorFromVS[appgl_i];\n";
+        }
+        if (usesBackColorIn) {
+            result.source +=
+                "        appgl_BackColorIn[appgl_i] = "
+                "appgl_BackColorFromVS[appgl_i];\n";
+        }
+        if (usesFrontSecondaryColorIn) {
+            result.source +=
+                "        appgl_FrontSecondaryColorIn[appgl_i] = "
+                "appgl_FrontSecondaryColorFromVS[appgl_i];\n";
+        }
+        if (usesBackSecondaryColorIn) {
+            result.source +=
+                "        appgl_BackSecondaryColorIn[appgl_i] = "
+                "appgl_BackSecondaryColorFromVS[appgl_i];\n";
+        }
+        if (usesTexCoordIn) {
+            result.source +=
+                "        for (int appgl_tc = 0; appgl_tc < 8; ++appgl_tc) {\n";
+            result.source +=
+                "            appgl_TexCoordIn[appgl_i][appgl_tc] = "
+                "appgl_TexCoordFromVS[appgl_i][appgl_tc];\n";
+            result.source += "        }\n";
+        }
+        if (usesFogFragCoordIn) {
+            result.source +=
+                "        appgl_FogFragCoordIn[appgl_i] = "
+                "appgl_FogFragCoordFromVS[appgl_i];\n";
+        }
+        result.source += "    }\n";
+        result.source += "    appgl_ArbGeometryShader4Main();\n";
+        result.source += "}\n";
+    }
+    result.didRewrite = true;
+    return result;
+}
+
+std::string rewriteGeometryShader4VertexTransport(
+    std::string_view normalizedVertexSource,
+    const GeometryShader4LegacyInputUsage& usage)
+{
+    std::string result(normalizedVertexSource);
+    if (usage.clipVertex) {
+        replaceIdentifier(result, "appgl_ClipVertex",
+                          "appgl_ClipVertexFromVS");
+    }
+    if (usage.frontColor) {
+        replaceIdentifier(result, "appgl_FrontColor",
+                          "appgl_FrontColorFromVS");
+    }
+    if (usage.backColor) {
+        replaceIdentifier(result, "appgl_BackColor",
+                          "appgl_BackColorFromVS");
+    }
+    if (usage.frontSecondaryColor) {
+        replaceIdentifier(result, "appgl_FrontSecondaryColor",
+                          "appgl_FrontSecondaryColorFromVS");
+    }
+    if (usage.backSecondaryColor) {
+        replaceIdentifier(result, "appgl_BackSecondaryColor",
+                          "appgl_BackSecondaryColorFromVS");
+    }
+    if (usage.texCoord) {
+        replaceIdentifier(result, "appgl_TexCoord",
+                          "appgl_TexCoordFromVS");
+    }
+    if (usage.fogFragCoord) {
+        replaceIdentifier(result, "appgl_FogFragCoord",
+                          "appgl_FogFragCoordFromVS");
+    }
+    return result;
+}
 
 CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                                               GLenum stage) {
@@ -1968,7 +3065,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.usesFtransform) {
         result.usage.modelViewProjection = true;
     }
-    if (isVertex) {
+    if (isVertex || isGeometry) {
         std::size_t originalVersionStart = std::string::npos;
         const std::size_t originalVersionEnd =
             findVersionLineEnd(result.source, &originalVersionStart);
@@ -1984,11 +3081,13 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         legacy.synthesizesLegacyClipPlanes =
             appglCompatProfileEnabled() &&
             originalVersion == 130 && !hasExplicitClipOutput;
-        legacy.attrVertex = legacy.usesFtransform ||
-                            containsIdentifier(source, "gl_Vertex");
-        legacy.attrNormal = containsIdentifier(source, "gl_Normal");
-        legacy.attrColor = containsIdentifier(source, "gl_Color");
-        scanMultiTexCoord(source, legacy.attrMultiTexCoord);
+        if (isVertex) {
+            legacy.attrVertex = legacy.usesFtransform ||
+                                containsIdentifier(source, "gl_Vertex");
+            legacy.attrNormal = containsIdentifier(source, "gl_Normal");
+            legacy.attrColor = containsIdentifier(source, "gl_Color");
+            scanMultiTexCoord(source, legacy.attrMultiTexCoord);
+        }
         legacy.usesClipVertex = containsIdentifier(source, "gl_ClipVertex");
     }
     if (isFragment) {
@@ -2007,7 +3106,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.usesFogFragCoord = containsIdentifier(source, "gl_FogFragCoord");
     legacy.usesFogFragCoordInput =
         isGeometry && containsFogFragCoordInputAccess(source);
-    if (isVertex) {
+    if (isVertex || isGeometry) {
         legacy.usesFrontColor = containsIdentifier(source, "gl_FrontColor");
         legacy.usesBackColor = containsIdentifier(source, "gl_BackColor");
         legacy.usesFrontSecondaryColor =
@@ -2514,6 +3613,9 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         replaceIdentifier(result.source, "textureCube", "texture");
     }
     if (legacy.hadVarying) {
+        if (legacy.texCoordMax >= 0) {
+            eraseSingleLineStorageDeclaration(result.source, "gl_TexCoord");
+        }
         if (isVertex) {
             replaceIdentifier(result.source, "varying", "out");
         } else if (isFragment) {
@@ -2827,6 +3929,12 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                           "#define gl_TexCoord appgl_TexCoord\n",
                           count);
             preamble.append(buf);
+        } else if (isGeometry) {
+            std::snprintf(buf, sizeof(buf),
+                          "out vec4 appgl_TexCoord[%u];\n"
+                          "#define gl_TexCoord appgl_TexCoord\n",
+                          count);
+            preamble.append(buf);
         }
     }
 
@@ -2844,16 +3952,16 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    if (legacy.usesFrontColor && isVertex) {
+    if (legacy.usesFrontColor && (isVertex || isGeometry)) {
         preamble.append("out vec4 appgl_FrontColor;\n");
     }
-    if (legacy.usesBackColor && isVertex) {
+    if (legacy.usesBackColor && (isVertex || isGeometry)) {
         preamble.append("out vec4 appgl_BackColor;\n");
     }
-    if (legacy.usesFrontSecondaryColor && isVertex) {
+    if (legacy.usesFrontSecondaryColor && (isVertex || isGeometry)) {
         preamble.append("out vec4 appgl_FrontSecondaryColor;\n");
     }
-    if (legacy.usesBackSecondaryColor && isVertex) {
+    if (legacy.usesBackSecondaryColor && (isVertex || isGeometry)) {
         preamble.append("out vec4 appgl_BackSecondaryColor;\n");
     }
     if (legacy.usesFragmentColor && isFragment) {
@@ -2919,6 +4027,8 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // varying.
     if (legacy.usesClipVertex) {
         if (isVertex) {
+            preamble.append("out vec4 appgl_ClipVertex;\n");
+        } else if (isGeometry) {
             preamble.append("out vec4 appgl_ClipVertex;\n");
         } else if (isFragment) {
             preamble.append("in vec4 appgl_ClipVertex;\n");
