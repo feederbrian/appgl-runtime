@@ -15,6 +15,8 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment ta
 
 project(AppGL LANGUAGES C CXX OBJCXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -217,6 +219,33 @@ target_include_directories(appgl_gauntlet_cli
 )
 target_compile_definitions(appgl_gauntlet_cli PRIVATE GL_SILENCE_DEPRECATION=1)
 target_link_libraries(appgl_gauntlet_cli PRIVATE AppGL_static)
+
+# Focused public-surface coverage for GL_ARB_geometry_shader4. The default
+# CTest lane excludes the separately adjudicated 128-component spill probe;
+# run that datum explicitly with --f2-only so PASS and SPILL-FLAG remain
+# distinguishable in review evidence.
+add_executable(appgl_arb_geometry_shader4_probe
+  tests/ArbGeometryShader4Probe.cpp
+)
+add_dependencies(appgl_arb_geometry_shader4_probe appgl-codegen)
+target_include_directories(appgl_arb_geometry_shader4_probe
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_compile_definitions(appgl_arb_geometry_shader4_probe PRIVATE GL_SILENCE_DEPRECATION=1)
+target_link_libraries(appgl_arb_geometry_shader4_probe PRIVATE AppGL)
+
+if(BUILD_TESTING)
+  add_test(
+    NAME appgl_arb_geometry_shader4_semantics
+    COMMAND appgl_arb_geometry_shader4_probe --blockers-only
+  )
+  add_test(
+    NAME appgl_arb_geometry_shader4_codegen
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_arb_geometry_shader4_codegen.py"
+  )
+endif()
 
 # Standalone ASAN reproducer for the SpirvModule heap-corruption bug
 # (session-12 gl_in_array_length SIGSEGV). dlopens the shared dylib
