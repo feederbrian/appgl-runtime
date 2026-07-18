@@ -82,6 +82,7 @@ namespace spv {
         OpFUnordEqual = 181, OpFUnordNotEqual = 183,
         OpFUnordLessThan = 185, OpFUnordGreaterThan = 187,
         OpFUnordLessThanEqual = 189, OpFUnordGreaterThanEqual = 191,
+        OpIsNan = 156, OpIsInf = 157,
         OpLogicalAnd = 167, OpLogicalOr = 166, OpLogicalNot = 168,
         OpLogicalEqual = 164, OpLogicalNotEqual = 165,
         OpSelect = 169, OpAny = 154, OpAll = 155,
@@ -9012,6 +9013,20 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpIsNan: case spv::OpIsInf: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpIsNan/OpIsInf: unknown operand"); break; }
+                std::array<bool, 4> lanes{};
+                const int n = a.componentCount();
+                for (int k = 0; k < n && k < 4; ++k) {
+                    lanes[k] = opcode == spv::OpIsNan
+                        ? std::isnan(a.f[k])
+                        : std::isinf(a.f[k]);
+                }
+                valueStore_[w[1]] = makeBoolResult(w[0], lanes, n);
+                pc += wc;
+                break;
+            }
             case spv::OpLogicalNot: {
                 Value a;
                 if (!tryGetValue(w[2], a)) { bail("OpLogicalNot: unknown operand"); break; }
@@ -9564,6 +9579,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpFUnordGreaterThan:
         case spv::OpFUnordLessThanEqual:
         case spv::OpFUnordGreaterThanEqual:
+        case spv::OpIsNan:
+        case spv::OpIsInf:
         // ─ Logical / selection ─
         case spv::OpLogicalNot:
         case spv::OpLogicalAnd:

@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -875,10 +877,163 @@ void runWideVaryingProbe() {
     spillOutcome(wide.passed, wide.stage);
 }
 
+void runIsInfIsNanTransformFeedbackProbe() {
+    const std::string vertexSource = R"GLSL(#version 130
+uniform float uValue;
+out vec4 captured;
+void main() {
+    captured = vec4(uValue,
+                    isinf(uValue) ? 1.0 : 0.0,
+                    isnan(uValue) ? 1.0 : 0.0,
+                    7.0);
+    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}
+)GLSL";
+    const std::string fragmentSource = R"GLSL(#version 130
+void main() {
+    gl_FragColor = vec4(1.0);
+}
+)GLSL";
+
+    bool vertexCompiled = false;
+    bool fragmentCompiled = false;
+    const GLuint vertexShader = compileRaw(
+        GL_VERTEX_SHADER, vertexSource, vertexCompiled);
+    const GLuint fragmentShader = compileRaw(
+        GL_FRAGMENT_SHADER, fragmentSource, fragmentCompiled);
+    blocker("isinf-isnan.compile.vertex", vertexCompiled);
+    blocker("isinf-isnan.compile.fragment", fragmentCompiled);
+    if (!vertexCompiled || !fragmentCompiled) {
+        if (!vertexCompiled) {
+            std::fprintf(stderr, "ISINF_ISNAN_COMPILE_LOG[vertex]=%s\n",
+                         shaderLog(vertexShader).c_str());
+        }
+        if (!fragmentCompiled) {
+            std::fprintf(stderr, "ISINF_ISNAN_COMPILE_LOG[fragment]=%s\n",
+                         shaderLog(fragmentShader).c_str());
+        }
+        glDeleteShader(fragmentShader);
+        glDeleteShader(vertexShader);
+        return;
+    }
+
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    const char* varying = "captured";
+    glTransformFeedbackVaryings(program, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(program);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    blocker("isinf-isnan.link", linked == GL_TRUE, linked, GL_TRUE);
+    if (linked != GL_TRUE) {
+        std::fprintf(stderr, "ISINF_ISNAN_LINK_LOG=%s\n",
+                     programLog(program).c_str());
+        glDeleteProgram(program);
+        glDeleteShader(fragmentShader);
+        glDeleteShader(vertexShader);
+        return;
+    }
+
+    const GLint valueLocation = glGetUniformLocation(program, "uValue");
+    blocker("isinf-isnan.uniform", valueLocation >= 0,
+            valueLocation >= 0 ? 1 : 0, 1);
+    if (valueLocation < 0) {
+        glDeleteProgram(program);
+        glDeleteShader(fragmentShader);
+        glDeleteShader(vertexShader);
+        return;
+    }
+
+    struct Case {
+        const char* name;
+        float input;
+        bool expectedInf;
+        bool expectedNan;
+    };
+    const std::array<Case, 4> cases = {{
+        {"finite", 2.0f, false, false},
+        {"positive-inf", std::numeric_limits<float>::infinity(), true, false},
+        {"negative-inf", -std::numeric_limits<float>::infinity(), true, false},
+        {"nan", std::numeric_limits<float>::quiet_NaN(), false, true},
+    }};
+
+    GLuint vertexArray = 0;
+    GLuint buffer = 0;
+    glGenVertexArrays(1, &vertexArray);
+    glBindVertexArray(vertexArray);
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+    glUseProgram(program);
+
+    bool sawNonZeroReadback = false;
+    for (const Case& testCase : cases) {
+        const std::array<float, 4> zeros = {};
+        glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                     static_cast<GLsizeiptr>(sizeof(zeros)),
+                     zeros.data(), GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+        glUniform1f(valueLocation, testCase.input);
+        drainErrors();
+        glEnable(GL_RASTERIZER_DISCARD);
+        glBeginTransformFeedback(GL_POINTS);
+        glDrawArrays(GL_POINTS, 0, 1);
+        glEndTransformFeedback();
+        glDisable(GL_RASTERIZER_DISCARD);
+        const GLenum drawError = glGetError();
+        blocker(std::string("isinf-isnan.") + testCase.name + ".draw-error",
+                drawError == GL_NO_ERROR, drawError, GL_NO_ERROR);
+        drainErrors();
+
+        std::array<float, 4> observed = {};
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+        glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                           static_cast<GLsizeiptr>(sizeof(observed)),
+                           observed.data());
+        const GLenum readbackError = glGetError();
+        blocker(std::string("isinf-isnan.") + testCase.name + ".readback-error",
+                readbackError == GL_NO_ERROR, readbackError, GL_NO_ERROR);
+        drainErrors();
+
+        const bool allZero = std::all_of(
+            observed.begin(), observed.end(),
+            [](float value) { return value == 0.0f; });
+        sawNonZeroReadback = sawNonZeroReadback || !allZero;
+        const bool valueMatches = testCase.expectedNan
+            ? std::isnan(observed[0])
+            : (testCase.expectedInf
+                ? std::isinf(observed[0]) &&
+                    std::signbit(observed[0]) == std::signbit(testCase.input)
+                : std::fabs(observed[0] - testCase.input) < 0.0001f);
+        const bool infMatches =
+            std::fabs(observed[1] - (testCase.expectedInf ? 1.0f : 0.0f)) < 0.0001f;
+        const bool nanMatches =
+            std::fabs(observed[2] - (testCase.expectedNan ? 1.0f : 0.0f)) < 0.0001f;
+        const bool sentinelMatches = std::fabs(observed[3] - 7.0f) < 0.0001f;
+        std::printf("TF_READBACK\t%s\tvalues=%a,%a,%a,%a\tall_zero=%d\n",
+                    testCase.name, observed[0], observed[1], observed[2],
+                    observed[3], allZero ? 1 : 0);
+        blocker(std::string("isinf-isnan.") + testCase.name + ".values",
+                valueMatches && infMatches && nanMatches && sentinelMatches);
+    }
+    blocker("isinf-isnan.tf-produced-output", sawNonZeroReadback);
+
+    glUseProgram(0);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &buffer);
+    glDeleteVertexArrays(1, &vertexArray);
+    glDeleteProgram(program);
+    glDeleteShader(fragmentShader);
+    glDeleteShader(vertexShader);
+}
+
 enum class Mode {
     All,
     BlockersOnly,
     F2Only,
+    IsInfIsNanTfOnly,
 };
 
 Mode parseMode(int argc, char** argv) {
@@ -889,8 +1044,12 @@ Mode parseMode(int argc, char** argv) {
     if (std::strcmp(argv[1], "--f2-only") == 0) {
         return Mode::F2Only;
     }
+    if (std::strcmp(argv[1], "--isinf-isnan-tf-only") == 0) {
+        return Mode::IsInfIsNanTfOnly;
+    }
     std::fprintf(stderr,
-                 "usage: %s [--blockers-only|--f2-only]\n", argv[0]);
+                 "usage: %s [--blockers-only|--f2-only|--isinf-isnan-tf-only]\n",
+                 argv[0]);
     std::exit(64);
 }
 
@@ -913,11 +1072,15 @@ int main(int argc, char** argv) {
     if (context != nullptr) {
         appglMakeCurrent(context);
         drainErrors();
-        if (mode != Mode::F2Only) {
-            runBlockingSemantics();
-        }
-        if (mode != Mode::BlockersOnly) {
-            runWideVaryingProbe();
+        if (mode == Mode::IsInfIsNanTfOnly) {
+            runIsInfIsNanTransformFeedbackProbe();
+        } else {
+            if (mode != Mode::F2Only) {
+                runBlockingSemantics();
+            }
+            if (mode != Mode::BlockersOnly) {
+                runWideVaryingProbe();
+            }
         }
         appglMakeCurrent(nullptr);
         appglDestroyContext(context);
