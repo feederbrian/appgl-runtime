@@ -27,7 +27,13 @@ glslang
     Licensed under the Apache License, Version 2.0, and additional licenses
     listed in that project's LICENSE.txt.
 
-    Used unmodified at the pinned revision in scripts/fetch_third_party.sh.
+    MODIFIED BY APPGL. Four files under glslang/MachineIndependent/ are changed
+    from the pinned upstream revision: Initialize.cpp, ParseHelper.cpp,
+    Versions.cpp, and Versions.h. The changes expose gl_NumSamples and
+    cull-distance builtin constants when targeting SPIR-V, and add a binding
+    range check under vulkanRelaxed. They are recorded as patches in
+    third_party/patches/ and applied by scripts/fetch_third_party.sh; those
+    modifications are likewise Apache-2.0.
 
 --------------------------------------------------------------------------------
 

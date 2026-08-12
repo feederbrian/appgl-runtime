@@ -22,10 +22,35 @@ SPIRV_CROSS_PIN="601164c16ba27c8f375277115fa719c22b58ed71"
 GLSLANG_REPO="${APPGL_GLSLANG_REPO:-https://github.com/KhronosGroup/glslang.git}"
 GLSLANG_PIN="dcf1aaa6fd7dc2081f17aa0a4f1590a76473d961"
 
-# SPIRV-Cross is fetched from a fork, not from upstream Khronos. The fork carries
-# AppGL-specific fixes that have not been upstreamed. third_party/patches/ holds
-# those changes in patch form as a provenance record; they are NOT applied by
-# this script and are not build inputs. The fork is the build input.
+# The two dependencies are handled differently, deliberately:
+#
+#   SPIRV-Cross carries 19 commits of AppGL work, so it is fetched from a fork
+#   with those changes already in its history. The spirv-cross-*.patch files in
+#   third_party/patches/ are a provenance record only and are NOT applied.
+#
+#   glslang carries three small changes across four files, which is too little to
+#   justify a fork. It is fetched clean from upstream and patched here. Those
+#   patches ARE build inputs — without them the build differs from the one AppGL's
+#   conformance results were measured against.
+#
+# ⚠ Do NOT apply every file in third_party/patches/glslang-*.patch. The
+# cull-distance patch is a superset that already contains every change in
+# gl-numsamples; applying both fails. gl-numsamples is retained as superseded
+# provenance. The two patches listed below reproduce the build tree exactly, and
+# the digests are verified after application rather than assumed.
+
+GLSLANG_PATCHES=(
+    "glslang-cull-distance-builtin-constants.patch"
+    "glslang-vulkanrelaxed-binding-range-check.patch"
+)
+
+# sha256 of each patched file, in the order listed. Verified post-application.
+GLSLANG_EXPECT=(
+    "glslang/MachineIndependent/Initialize.cpp  a8cdc95d946d38f99a41f1eda48cd7f725b8dc27f4ea89ac1eb6081e8be06b80"
+    "glslang/MachineIndependent/ParseHelper.cpp b0afa0d27f1c2f24dc62b87e44c04ae31f59793caeb8a8089db411a6bb83fcfe"
+    "glslang/MachineIndependent/Versions.cpp    9c53b8075b664b873150396c32423145bbb1fd557604b98fad0c7a2cb32c37ca"
+    "glslang/MachineIndependent/Versions.h      f774164de32c98f4e5543d3e78fa4f33ef9ae44a3439c0598121a7e2b7c548ad"
+)
 
 # ---------------------------------------------------------------------------
 
@@ -84,6 +109,49 @@ fetch_pinned() {
     log "${name}: verified at ${pin:0:12}"
 }
 
+# apply_glslang_patches
+#
+# Applies the AppGL changes onto the clean upstream checkout, then verifies the
+# result against known digests. Idempotent: if the tree already matches, it does
+# nothing. Verification is the point — a patch that applies with fuzz produces a
+# tree that is neither upstream nor ours, and silently building it is worse than
+# failing here.
+apply_glslang_patches() {
+    local dest="${THIRD_PARTY}/glslang"
+    local patches="${THIRD_PARTY}/patches"
+
+    if verify_glslang; then
+        log "glslang: patches already applied and verified"
+        return 0
+    fi
+
+    for p in "${GLSLANG_PATCHES[@]}"; do
+        [ -f "${patches}/${p}" ] || fail "missing patch ${patches}/${p}"
+        if git -C "${dest}" apply --check "${patches}/${p}" 2>/dev/null; then
+            git -C "${dest}" apply "${patches}/${p}" || fail "glslang: ${p} failed to apply"
+            log "glslang: applied ${p}"
+        else
+            fail "glslang: ${p} does not apply cleanly to the pinned revision"
+        fi
+    done
+
+    verify_glslang || fail "glslang: patches applied but the result does not match expected digests"
+    log "glslang: patched tree verified against expected digests"
+}
+
+# verify_glslang — true only if every patched file matches its expected sha256.
+verify_glslang() {
+    local dest="${THIRD_PARTY}/glslang" entry rel want got
+    for entry in "${GLSLANG_EXPECT[@]}"; do
+        rel="${entry%% *}"
+        want="${entry##* }"
+        [ -f "${dest}/${rel}" ] || return 1
+        got=$(shasum -a 256 "${dest}/${rel}" 2>/dev/null | cut -d' ' -f1)
+        [ "${got}" = "${want}" ] || return 1
+    done
+    return 0
+}
+
 main() {
     [ -d "${REPO_ROOT}/src" ] \
         || fail "cannot locate repository root (no src/ above ${SCRIPT_DIR})"
@@ -93,6 +161,7 @@ main() {
     echo "Fetching AppGL third-party dependencies into ${THIRD_PARTY}"
     fetch_pinned "SPIRV-Cross" "${SPIRV_CROSS_REPO}" "${SPIRV_CROSS_PIN}"
     fetch_pinned "glslang"     "${GLSLANG_REPO}"     "${GLSLANG_PIN}"
+    apply_glslang_patches
     echo "Done. All dependencies verified at their pinned revisions."
 }
 
