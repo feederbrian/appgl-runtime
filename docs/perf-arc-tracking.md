@@ -6,7 +6,7 @@ Owner: AppGL-Foreman
 
 ## Active Baseline
 
-- Source worktree: `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime`
+- Source worktree: `$PROJECT_ROOT/appgl-runtime`
 - Base branch at pickup: `master` / `d28b150`
 - Perf baseline-of-record remains the GLTest A864F73B provisional Warzone capture:
   `sampler_producer_drain` `21.875 us/draw`, nested under
@@ -49,7 +49,7 @@ skip gate.
 GLTest-Foreman completed the EDB4C8AC Warzone token-profile refire:
 
 - Summary:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung1-warzone-token-profile-EDB4C8AC-20260609T022218Z/baseline-warzone-tokenprofile-highground-json-1280x720-EDB4C8AC-midscene-sigterm8s/PROFILE-SUMMARY.md`
+  `$PROJECT_ROOT/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung1-warzone-token-profile-EDB4C8AC-20260609T022218Z/baseline-warzone-tokenprofile-highground-json-1280x720-EDB4C8AC-midscene-sigterm8s/PROFILE-SUMMARY.md`
 - Runtime/source UUID: `EDB4C8AC-1682-3477-935B-DBD24DBC875B`
 - sha256: `0e3708445bd0f13a8a563c5a35a880f4407769b08aa647d95e9349dfe8827fe5`
 - Exit: controlled SIGTERM `143`, no game-ended marker, no shutdown abort.
@@ -200,7 +200,7 @@ gates before AppGL-Worker review fixes landed:
 
 - GLTest Gate 1 synthetic A/B passed:
   - Artifact root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-sampler-gpu-order-synthetic-ab-486490E2-20260609T023739Z`
+    `$PROJECT_ROOT/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-sampler-gpu-order-synthetic-ab-486490E2-20260609T023739Z`
   - Median `perDrawUs` `56.661 -> 39.477`, delta `-17.184 us/draw`
     (`-30.33%`).
   - `sampler_producer_drain` `44.941 -> 0.0045 us/draw`.
@@ -217,7 +217,7 @@ and Gate 2 clearance:
 
 - GLTest formal Gate 1 synthetic A/B rerun passed:
   - Artifact root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-sampler-gpu-order-synthetic-ab-F120F1C0-20260609T025449Z`
+    `$PROJECT_ROOT/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-sampler-gpu-order-synthetic-ab-F120F1C0-20260609T025449Z`
   - Median `perDrawUs` `54.122 -> 37.223`, delta `-16.899 us/draw`
     (`-31.22%`).
   - `sampler_producer_drain` `41.733 -> 0.0065 us/draw`.
@@ -225,7 +225,7 @@ and Gate 2 clearance:
     `gpu_order_skip_blocked=0`; readback identical.
 - Scout formal Gate 2 focused stale-pixel/conformance rerun passed:
   - Report dir:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/perf-step7-rung3-sampler-gpu-order-scout-F120F1C0/`
+    `$PROJECT_ROOT/scout-worktree/reports/perf-step7-rung3-sampler-gpu-order-scout-F120F1C0/`
   - Focused `111/111` caselist, default and skip both
     `P=106 F=4 NS=1 IE=0`.
   - F120 skip vs d28b150 baseline: `P->F=0`, `P->nonPass=0`,
@@ -236,7 +236,7 @@ Gate 3 live Warzone re-profile on `F120F1C0` completed with valid identity and
 profile rows, but did not validate the lever as implemented:
 
 - Artifact root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-warzone-skip-profile-F120F1C0-20260609T030212Z`
+  `$PROJECT_ROOT/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-warzone-skip-profile-F120F1C0-20260609T030212Z`
 - Selected run:
   `skip-warzone-tokenprofile-highground-json-1280x720-F120F1C0-midscene-sigterm8s`
 - Rows: GL draw `27`, GL detail `20`, producer-token `6`, CB `2633`.
@@ -259,7 +259,7 @@ FAF1A9BA Gate 1 synthetic A/B rerun is green:
 
 - Bridge message: `a8a7e811-84c5-418d-b051-a6af5d973250`.
 - Artifact root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-token-merge-gate1-synthetic-ab-FAF1A9BA-20260609T032512Z`
+  `$PROJECT_ROOT/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-token-merge-gate1-synthetic-ab-FAF1A9BA-20260609T032512Z`
 - Workload matched the established Gate 1 BAR-B shape:
   `--mode producer --size 64 --frames 96 --warmup-frames 4 --chain-draws 64 --no-uploads --shader-iters 1`.
 - Validity: `8/8` exit `0`; GL draw/detail/token/CB rows present every band;
@@ -278,7 +278,7 @@ FAF1A9BA Gate 2 focused stale-pixel/conformance rerun is green:
 
 - Bridge message: `99fc9e61-8c45-46dd-85e0-351fef64e19f`.
 - Report dir:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/perf-step7-rung3-token-merge-gate2-FAF1A9BA/`
+  `$PROJECT_ROOT/scout-worktree/reports/perf-step7-rung3-token-merge-gate2-FAF1A9BA/`
 - Focused `111/111` caselist plus `dcr3c-sentinels`.
 - Default and skip gauntlet rc `0`; all `9` DCR3-C sentinels passed.
 - CTS default and skip both `P=106 F=4 NS=1 IE=0`; inherited
@@ -296,7 +296,7 @@ FAF1A9BA Gate 3 live Warzone rerun achieved live sampler skip behavior:
 
 - Bridge message: `66395c45-4501-4f25-95c0-38e579700228`.
 - Artifact root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-token-merge-warzone-profile-FAF1A9BA-20260609T033140Z`
+  `$PROJECT_ROOT/ogl-test-application/ogltest/traces-db/revendor/2026-06-09-step7-rung3-token-merge-warzone-profile-FAF1A9BA-20260609T033140Z`
 - Selected run:
   `skip-warzone-tokenmerge-highground-json-1280x720-FAF1A9BA-midscene-sigterm8s`
 - Profile row path passed: GL draw `27`, GL detail `20`, producer-token `6`,
@@ -796,7 +796,7 @@ correctness-fixed source candidate before any wider CTS/Scout ask.
 
 - Date/time staged: `2026-06-09T09:47:59Z`
 - Temporary live-target pin:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`
 - Staged UUID: `D0F3A096-472D-3A18-8E6B-6E5DD1987504`
 - Staged pinned sha256:
   `f82a95b2cda40429434da9c4b6f2f9789677d621b466bf08fa48d27fb45a9e27`
@@ -809,7 +809,7 @@ correctness-fixed source candidate before any wider CTS/Scout ask.
 Restore safety:
 
 - Pre-stage Scout-cleared backup captured at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T094759Z-71153768-pre-D0F3A096-warzone-rerun.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T094759Z-71153768-pre-D0F3A096-warzone-rerun.dylib`
 - Previous user-facing live pin before staging:
   `71153768-044A-3B6C-AB0E-77ED809E6C8F`
   / sha256 `6e2a9d70b9aba0ca1b6fda82a9b5fdba622b0d57170915209e77328e754b5a1c`
@@ -975,7 +975,7 @@ Local verification on `C26B7090`:
 Temporary live staging used for GLTest rerun:
 
 - live pin path:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`
 - staged UUID at rerun time:
   `C26B7090-A8B0-3D97-A7E0-D8CC9EB52FE0`
 - staged sha256 at rerun time:
@@ -983,14 +983,14 @@ Temporary live staging used for GLTest rerun:
 - staged install-name: `@rpath/libAppGL.dylib`
 - staged codesign verify: passed
 - pre-stage `71153768` backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T101502Z-71153768-pre-C26B7090-depth32f-readback-diag.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T101502Z-71153768-pre-C26B7090-depth32f-readback-diag.dylib`
 - backup UUID:
   `71153768-044A-3B6C-AB0E-77ED809E6C8F`
 - backup sha256:
   `6e2a9d70b9aba0ca1b6fda82a9b5fdba622b0d57170915209e77328e754b5a1c`
 - final pin sanity check briefly found the live slot back on `71153768`;
   Foreman restaged `C26B7090` and captured a fresh current audit backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T101922Z-71153768-pre-C26B7090-depth32f-readback-diag-restage.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T101922Z-71153768-pre-C26B7090-depth32f-readback-diag-restage.dylib`
   with the same `71153768` UUID and sha256
 
 Bridge coordination:
@@ -1027,7 +1027,7 @@ after the restage correction.
 
 Artifact:
 
-- `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/tests/reports/perf-step7-rung3-depth32f-readback-diag-C26B-warzone-rerun/20260609T101629Z-skip-on/`
+- `$PROJECT_ROOT/appgl-runtime/tests/reports/perf-step7-rung3-depth32f-readback-diag-C26B-warzone-rerun/20260609T101629Z-skip-on/`
 
 Launch proof:
 
@@ -1084,7 +1084,7 @@ Restore/race closure:
   creating the `101922Z` restage backup.
 - Because the completed artifact already proved C26B at launch, GLTest skipped
   duplicate Warzone work and restored again from:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T101922Z-71153768-pre-C26B7090-depth32f-readback-diag-restage.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T101922Z-71153768-pre-C26B7090-depth32f-readback-diag-restage.dylib`
 - final live pin UUID:
   `71153768-044A-3B6C-AB0E-77ED809E6C8F`
 - final live pin sha256:
@@ -1158,14 +1158,14 @@ Local verification:
 Live staging proof:
 
 - live pin:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`
 - live UUID: `DB8D3D1F-0FD3-3BEA-A87B-14C1BDAC00E6`
 - live sha256:
   `a50ed84ad11bcc11f9c8984a29fd1c90e8da50c605a90969251312c00f0bb33b`
 - live install-name: `@rpath/libAppGL.dylib`
 - live codesign verify: passed
 - restore backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T104141Z-71153768-pre-C27-process-cb-diagnostics.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T104141Z-71153768-pre-C27-process-cb-diagnostics.dylib`
 - restore backup UUID: `71153768-044A-3B6C-AB0E-77ED809E6C8F`
 - restore backup sha256:
   `6e2a9d70b9aba0ca1b6fda82a9b5fdba622b0d57170915209e77328e754b5a1c`
@@ -1200,7 +1200,7 @@ C27 GLTest result:
 - bridge result message:
   `8c7ee68e-f2b5-481a-bdc3-5f38aa513d75`
 - primary artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/tests/reports/perf-step7-rung3-c27-process-cb-tail-diagnostics-warzone-rerun/20260609T104258Z-skip-on/`
+  `$PROJECT_ROOT/appgl-runtime/tests/reports/perf-step7-rung3-c27-process-cb-tail-diagnostics-warzone-rerun/20260609T104258Z-skip-on/`
 - primary exit/RSS:
   `exit=143`, samples `49`, first `662.734 MiB`, last/peak
   `1047.375 MiB`, delta `+384.641 MiB`, slope `+256.107 MiB/min`
@@ -1211,7 +1211,7 @@ C27 GLTest result:
   `393.9M / 422.0M / 450.1M`, MALLOC zone allocated
   `441.5M / 445.0M / 465.1M`
 - secondary natural-exit artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/tests/reports/perf-step7-rung3-c27-process-cb-tail-diagnostics-warzone-rerun/20260609T104456Z-skip-on/`
+  `$PROJECT_ROOT/appgl-runtime/tests/reports/perf-step7-rung3-c27-process-cb-tail-diagnostics-warzone-rerun/20260609T104456Z-skip-on/`
 - secondary exit/RSS:
   `exit=0`, samples `45`, first `884.906 MiB`, last `891.500 MiB`,
   peak `1044.469 MiB`, delta `+6.594 MiB`, slope
@@ -1237,7 +1237,7 @@ C27 GLTest result:
   the primary and `828` plans / about `131608` bytes in the natural-exit
   run, still far too small to explain the RSS movement.
 - final live pin restored from:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T104141Z-71153768-pre-C27-process-cb-diagnostics.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T104141Z-71153768-pre-C27-process-cb-diagnostics.dylib`
 - AppGL-Foreman verified restored live pin:
   UUID `71153768-044A-3B6C-AB0E-77ED809E6C8F`, sha256
   `6e2a9d70b9aba0ca1b6fda82a9b5fdba622b0d57170915209e77328e754b5a1c`,
@@ -1410,7 +1410,7 @@ Local gates:
   `DYLD_LIBRARY_PATH=build-release-fp64on ./build-release-fp64on/appgl_bar_b_benchmark`:
   `58.340295 us/draw`.
 - `bash -n` passed for
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/diagnose-warzone-memory.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/diagnose-warzone-memory.sh`.
 - The new `diagnostic_framegraph_process_summary` jq block was smoke-tested by
   wrapping the local C29 diagnostics artifact into the bridge JSONL shape; it
   emitted the expected process, device, drawable, depth/offscreen, and
@@ -1590,7 +1590,7 @@ Local gates:
 
 - `git diff --check` passed for the C30-touched source/doc files.
 - `bash -n` passed for
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/diagnose-warzone-memory.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/diagnose-warzone-memory.sh`.
 - `cmake --build build-release-fp64on --target AppGL appgl_gauntlet_cli appgl_bar_b_benchmark -j2`
   passed, with only the known `MTLResourceUsageSample` deprecation warnings and
   duplicate-library linker warning.
@@ -1825,7 +1825,7 @@ Local gates:
 
 - `git diff --check`: passed.
 - `bash -n` passed for
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/diagnose-warzone-memory.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/diagnose-warzone-memory.sh`.
 - build passed:
   `cmake --build build-release-fp64on --target AppGL appgl_gauntlet_cli appgl_bar_b_benchmark -j2`
   with only the existing `MTLResourceUsageSample` deprecation warnings and
@@ -1897,7 +1897,7 @@ Bridge coordination:
 Follow-up correction:
 
 - GLTest completed the first C31 live artifact at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T121202Z-skip-on/`,
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T121202Z-skip-on/`,
   message `91f90b99-9f72-475f-93cd-d6a8c1163f5b`.
 - AppGL-Worker review message
   `92d57fe9-589c-45ae-a5c5-f044f2271144` found two blockers:
@@ -1927,7 +1927,7 @@ Follow-up correction:
 Corrected C31 live proof:
 
 - Artifact of record:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T121939Z-skip-on/`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T121939Z-skip-on/`
 - GLTest-Foreman completion:
   `82e86539-1909-4a96-ab7f-61dd6e15dbea`.
 - Run env confirmed sampler GPU-order skip and both C30 texture-shadow drop
@@ -2102,7 +2102,7 @@ C33 local gates:
 C33 live proof:
 
 - Generated/immutable-only C32 live artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T125211Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T125211Z-skip-on/`.
   It proved the first implementation did not affect Warzone because the live
   mip growth was app-uploaded: RSS `737.047 -> 894.219 MiB`, slope
   `257.557 MiB/min`, `textureShadowMipBytes 0 -> 78446285`, and
@@ -2111,13 +2111,13 @@ C33 live proof:
   UUID `66D1660B-D388-3980-B077-4CD5BB2563E1`, sha256
   `a19522333db285882196ce31754afc3e36b833aa4b775e5b19fac47767225e6d`.
 - Profiles-on live artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T130405Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T130405Z-skip-on/`.
   RSS `706.266 -> 809.047 MiB`, peak `970.156 MiB`, slope
   `307.857 MiB/min`; mip lane active with `textureShadowMipBytes 0`,
   evicted bytes `757115634`, live evicted bytes `78446285`,
   materialize calls `1231`, materialize bytes `678669349`, failures `0`.
 - Profiles-off live artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T130516Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T130516Z-skip-on/`.
   RSS `775.281 -> 806.984 MiB`, peak `967.422 MiB`, slope
   `116.436 MiB/min`; mip lane stayed active with the same clean
   materialization counters.
@@ -2179,7 +2179,7 @@ C34 local gates:
 
 Current live pin:
 
-- `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`
+- `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`
   now points to the C34 refined build.
 - UUID `25BF6A62-9C1A-3FA3-9A61-B4BF76554EF0`.
 - sha256
@@ -2191,7 +2191,7 @@ Current live pin:
 C34 live proof:
 
 - Artifact of record:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T132445Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T132445Z-skip-on/`.
 - Run command shape:
   `APPGL_WARZONE_MEMORY_PROFILES=0 APPGL_BRIDGE_DIAG_FRAME_INTERVAL=15 APPGL_WARZONE_MEMORY_TAIL_SAMPLES=2,5,8,11 APPGL_WARZONE_MEMORY_DURATION=25 ./diagnose-warzone-memory.sh skip-on`.
 - Profiles stayed off; RSS samples `18`, RSS `752.375 -> 810.391 MiB`,
@@ -2234,7 +2234,7 @@ Current state:
 - Do not crown yet. The catastrophic live leak is greatly reduced, but there is
   still measurable residual heap/RSS growth under Warzone autogame.
 - Current live pin:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
 - UUID `97A0C540-DFAC-3168-B72E-00A478F4219C`, sha256
   `6d01c11dc08643a2f39661f1d4f8ff16aff2aa227c21b589d78a6fd7db2135bb`.
 - Backup before this pin:
@@ -2281,16 +2281,16 @@ Local gates for the current build:
 Live Warzone cap comparison:
 
 - C37 baseline artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T142127Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T142127Z-skip-on/`.
   Frame `45 -> 105`: heap all-zones
   `372,312,640 -> 381,105,584` (`+8.79 MiB`); render PSO and MSL-slot
   retained rows continued growing.
 - C39 cap-256 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T143628Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T143628Z-skip-on/`.
   Slot cache capped (`live=256`, evictions `479` by frame 105), but render PSO
   evictions stayed `0` and live render PSOs still rose `255 -> 463`.
 - C39 cap-64 artifact of record:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T143718Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T143718Z-skip-on/`.
   Frame `45 -> 105`: heap all-zones
   `375,133,824 -> 376,698,000` (`+1.56 MiB`), resident
   `999,505,920 -> 1,005,699,072` (`+5.91 MiB`), render PSO evictions
@@ -2298,7 +2298,7 @@ Live Warzone cap comparison:
   Summary RSS samples were `790.562 -> 803.375 MiB`, peak `967.547 MiB`,
   slope `23.0219 MiB/min`.
 - C39 cap-32 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T143818Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T143818Z-skip-on/`.
   Lower PSO live count (`142 -> 247`) but much higher rebuild churn
   (`misses=4199` by frame 105) and worse frame `45 -> 105` heap growth
   (`+3.26 MiB`). Cap-64 is the better current launcher default.
@@ -2319,7 +2319,7 @@ Current state:
 - Do not crown yet. C40/C41 reduce the remaining cache-growth lane to a small
   residual and give us better attribution, but manual soak is still required.
 - Current live pin:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
 - UUID `53FC202F-2C5E-3F82-9562-3E86DA4B4444`, sha256
   `83fb9ecd3e405754b347cfffc535ce5a3add593fa2cb0ebf2475585f7c36671b`.
 - Backup before C41 hardening:
@@ -2339,7 +2339,7 @@ C40 completed:
 - C40 live pin was UUID `4F63CC10-E2EA-3BF6-AFD4-72D36338D790`, sha256
   `28290c20dce49921c28fa2a5e21f28d23e0a24580105e27f3190869841cd30b1`.
 - Artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T145529Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T145529Z-skip-on/`.
 - Frame `45 -> 105`: heap all-zones
   `376,045,824 -> 380,432,768` (`+4.18 MiB`), resident
   `1,009,008,640 -> 1,015,775,232` (`+6.45 MiB`), host cache
@@ -2400,17 +2400,17 @@ C41 local validation:
 C41 live probes:
 
 - Total384 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T150514Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T150514Z-skip-on/`.
   The run ended at frame 105 before crossing the cap:
   renderPsoTotal `375`, global evictions `0`, heap frame `45 -> 105`
   `376,075,760 -> 379,977,920` (`+3.72 MiB`).
 - Total320 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T150602Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T150602Z-skip-on/`.
   This proved the cap engages: frame 105 renderPsoTotal `320`,
   global evictions `123`. It is not a default candidate yet because heap rose
   to `394,099,696` by frame 105 and host/texture-shadow bytes were higher.
 - Total360 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T150646Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T150646Z-skip-on/`.
   This is the best C41 candidate so far. Frame `45 -> 105`: heap all-zones
   `373,563,840 -> 377,957,680` (`+4.19 MiB`), resident
   `1,003,503,616 -> 1,010,302,976` (`+6.48 MiB`), host cache
@@ -2419,12 +2419,12 @@ C41 live probes:
   `360`, high-water `361`, global evictions `39`, per-program evictions
   `1014`, MSL-slot evictions `586`.
 - Hardened total360 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T151611Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T151611Z-skip-on/`.
   Frame 105 reached renderPsoTotal `360` with high-water `360` and global
   evictions `0`; resident `1,010,253,824`, heap all-zones `379,949,008`,
   host cache `221,017,562`, device allocated `538,394,624`.
 - Hardened total320 artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T151648Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T151648Z-skip-on/`.
   This proves per-program global-eviction attribution: frame 105
   renderPsoTotal `320`, high-water `321`, global evictions `89`.
   Example owners: program `34` global `23`, program `55` global `24`,
@@ -2448,7 +2448,7 @@ Manual user soak, hardened C41 default launcher:
 - New watch item: Mach ports grew continuously during the 3-minute run and
   approached `30,000`. Treat as suspicious until instrumented.
 - Added alternate launcher for opt-in total cap soak:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-total360.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-total360.sh`.
 - AppGL-Worker Mach-port read (`2dc2624f-d38f-4143-bba9-eafec10c98f0`):
   memory result is encouraging but no crown while Mach ports climb. Recommended
   first `lsmp` snapshots where privileges allow, plus an in-process
@@ -2494,13 +2494,13 @@ Manual user soak, hardened C41 default launcher:
 Controlled harness Mach-port A/B:
 
 - Initial autogame attempts were too short for this lane:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T162911Z-skip-on/`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T162911Z-skip-on/`
   and
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T163008Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T163008Z-skip-on/`.
   Both exited after only a few real seconds despite the second using a longer
   `--gametimelimit`, confirming the known autogame fast-forward caveat.
 - Default non-autogame skirmish artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T163057Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T163057Z-skip-on/`.
   Args: `--window --resolution=1280x720 --nosound --skirmish=highground.json --gametimelimit=1800`.
   Duration `210s`, harness exit `143`. RSS `409.031 -> 542.062 MiB`
   (`+133.031 MiB`, slope `34.9419 MiB/min`). Mach ports stayed flat:
@@ -2508,7 +2508,7 @@ Controlled harness Mach-port A/B:
   msgsent `4430 -> 53347`, msgrecv `4371 -> 141697`, sysmach
   `14144 -> 376971`.
 - Total360 non-autogame skirmish artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T163459Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T163459Z-skip-on/`.
   Same args plus `APPGL_RENDER_PSO_CACHE_LIMIT_TOTAL=360`.
   Duration `210s`, harness exit `143`. RSS `411.656 -> 545.422 MiB`
   (`+133.766 MiB`, slope `36.1852 MiB/min`). Mach ports again stayed flat:
@@ -2521,7 +2521,7 @@ Controlled harness Mach-port A/B:
   blocker; next capture should monitor the actual manual gameplay launch or add
   in-process `mach_port_names` counters.
 - Added manual-path monitor:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/monitor-warzone-mach-ports.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/monitor-warzone-mach-ports.sh`.
   It waits for or accepts a Warzone PID, samples `top` ports/msgsent/msgrecv/
   sysmach/RSS into `mach-ports-top.csv`, writes `SUMMARY.txt`, and captures
   best-effort non-blocking `sudo -n lsmp` snapshots. Self-test against a shell
@@ -2548,7 +2548,7 @@ Controlled harness Mach-port A/B:
   non-repro alone; next capture must target the actual manual gameplay route
   that showed the climb.
 - PID-aligned manual monitor artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports/20260609T174842Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports/20260609T174842Z/`.
   Target PID `35637`, monitor duration `210s`, target alive at monitor end.
   This confirms the manual Mach-port climb in the monitor CSV, not just
   Activity Monitor: ports `336 -> 29,813`, delta `29,477`, slope
@@ -2589,24 +2589,24 @@ C42 in-process Mach-port classifier:
   `SPREQUEST_DELAYED=1`, `unknownTypeNames=0`, `unknownTypeMask=0`.
   `appglLiveDiagnosticsJSON` emitted no `processMachPort*` keys.
 - Live pin rotated after a clean process/lsof check:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
   Current live UUID `DCC4AD4B-CA56-352D-92E3-B4C228A5E7CE`, signed SHA256
   `855e7b935d97e96c96524f016bf89e22eca4ae6cacd24c1fa875ea83b2eecc1a`,
   install-name `@rpath/libAppGL.dylib`, codesign valid.
   Pre-C42 backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-pre-c42-mach-port-classifier-20260609T180509Z.dylib`,
+  `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-pre-c42-mach-port-classifier-20260609T180509Z.dylib`,
   UUID `53FC202F-2C5E-3F82-9562-3E86DA4B4444`, SHA256
   `83fb9ecd3e405754b347cfffc535ce5a3add593fa2cb0ebf2475585f7c36671b`.
 - Canonical launcher remains unchanged at cap64/slot256 with total cap off:
   `APPGL_RENDER_PSO_CACHE_LIMIT_PER_PROGRAM=64`,
   `APPGL_TRANSLATED_DRAW_MSL_SLOT_CACHE_LIMIT=256`.
   Added classifier helper launcher:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-machports.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-machports.sh`.
   It sets `APPGL_DIAG_MACH_PORTS=1`, ensures a full diagnostics JSON path,
   unsets `APPGL_BRIDGE_DIAG_LIVE_ONLY`, records `launch-env.txt`, and then
   execs the canonical launcher. `sh -n` passed and the script is executable.
 - Controlled live Warzone bridge proof:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/20260609T180852Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/20260609T180852Z-skip-on/`.
   Env included `APPGL_DIAG_MACH_PORTS=1`,
   `APPGL_BRIDGE_DIAG_FRAME_INTERVAL=30`, cap64/slot256 defaults, and C42 live
   UUID/SHA above. The 60s harness wrote `221` full diagnostics rows and `12`
@@ -2637,7 +2637,7 @@ C42 in-process Mach-port classifier:
   should compare 30/90/180/end deltas and classify by slopes, not absolute
   right-count sums.
 - Added analyzer:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/analyze-mach-port-classifier.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/analyze-mach-port-classifier.sh`.
   It accepts a run directory, finds `appgl-diagnostics.jsonl` and
   `mach-ports-top.csv`, writes `mach-port-classifier-diag.csv` and
   `mach-port-classifier-summary.txt`, reports external/diagnostic endpoint
@@ -2647,7 +2647,7 @@ C42 in-process Mach-port classifier:
   script is executable. On the controlled `20260609T180852Z-skip-on` artifact,
   endpoint alignment was exact: diagnostic `355` minus external `355` = `0`.
 - Added exact-PID proof wrapper:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/run-warzone-appgl-machport-proof.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/run-warzone-appgl-machport-proof.sh`.
   It creates a shared run directory, launches
   `launch-warzone-appgl-machports.sh` in the background, captures the resulting
   exec-preserved Warzone/AppGL PID, runs `monitor-warzone-mach-ports.sh` with
@@ -2692,9 +2692,9 @@ C42 in-process Mach-port classifier:
 C42 manual proof result:
 
 - User ran the exact-PID wrapper for about 3 minutes. Artifact root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T182153Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T182153Z/`.
   External monitor artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T182153Z/external/20260609T182158Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T182153Z/external/20260609T182158Z/`.
   PID was `42071`. `launch-env.txt` confirms `APPGL_DIAG_MACH_PORTS=1`,
   full diagnostics JSON path, and `APPGL_BRIDGE_DIAG_FRAME_INTERVAL=60`.
   Process scan was clear after analysis.
@@ -2747,9 +2747,9 @@ C43 command-buffer autorelease force-drain result:
 - Zero-patch A/B used the already-present runtime knob
   `APPGL_COMMAND_BUFFER_FORCE_DRAIN_AUTORELEASE=1` against the C42 live pin.
   Artifact root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess-force-drain/20260609T183525Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess-force-drain/20260609T183525Z/`.
   External monitor artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess-force-drain/20260609T183525Z/external/20260609T183530Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess-force-drain/20260609T183525Z/external/20260609T183530Z/`.
   Exact PID was `45111`; process scan was clear after manual exact-PID
   termination.
 - A/B result collapsed the Mach-port growth:
@@ -2765,7 +2765,7 @@ C43 command-buffer autorelease force-drain result:
   scene with lower FPS and higher RSS, keep the crown gate on a fresh manual
   soak before treating the Mach-port blocker as fully closed.
 - Launcher hardening:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl.sh`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl.sh`
   now enables `APPGL_COMMAND_BUFFER_FORCE_DRAIN_AUTORELEASE=1` by default,
   with escape hatch
   `APPGL_DISABLE_COMMAND_BUFFER_FORCE_DRAIN_AUTORELEASE=1`.
@@ -2780,11 +2780,11 @@ C43 command-buffer autorelease force-drain result:
   Only the pre-existing `MTLResourceUsageSample` deprecation warnings and
   duplicate-library linker warning appeared.
 - Live pin rotated after clean process check:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
   Current live UUID `ED65E893-A296-39B4-8D88-D273A41A4DB3`, signed SHA256
   `5f15d2f2a8264c56a5a75180e4dd6109c02900a9c9399fc980206216d296eb46`,
   install-name `@rpath/libAppGL.dylib`, codesign valid. Pre-rotation backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned-DCC4AD4B-pre-ED65E893.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned-DCC4AD4B-pre-ED65E893.dylib`.
 - Crown gate: memory is stable in the user's manual soak and the Mach-port
   force-drain candidate is installed as the live launcher default, but
   crown/checkpoint should wait for one fresh user/manual soak on the current
@@ -2806,7 +2806,7 @@ C43 command-buffer autorelease force-drain result:
   frame `60` and stayed flat through frame `29400`, but agrees the manual
   gameplay soak on `ED65E893` remains the crown gate.
 - Short rotated-pin sanity proof:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess-ed65-sanity/20260609T184735Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess-ed65-sanity/20260609T184735Z/`.
   This used live pin `ED65E893`, exact PID `48069`, 90s monitor duration, and
   the canonical launcher path with force-drain defaulted on. External monitor:
   `41` rows over `91.864s`, ports `336 -> 335`, peak `336`, delta `-1`, slope
@@ -2836,7 +2836,7 @@ C43 command-buffer autorelease force-drain result:
   present-frequency/frame-pacing A/B and no-op/redundant flush coalescing, not
   cross-present command-buffer coalescing.
 - Added helper analyzer:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/analyze-command-buffer-reasons.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/analyze-command-buffer-reasons.sh`.
   It accepts a run directory, finds `appgl-diagnostics.jsonl`, writes
   `command-buffer-reasons.csv` and `command-buffer-reason-deltas.tsv`, and
   emits `command-buffer-reasons-summary.txt`. It handles older artifacts
@@ -2893,7 +2893,7 @@ C44 present-source attribution lane (rotated live diagnostic pin):
   before the final diagnostics dump; the live/manual route will provide nonzero
   values after pin rotation and a fresh run.
 - Analyzer follow-up:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/analyze-command-buffer-reasons.sh`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/analyze-command-buffer-reasons.sh`
   now also emits `present-source-counters.csv` and `present_source_*` deltas
   from `metalResources.frameGraph`. It also prints
   `present_source_available=0/1` so pre-C44 artifacts are not mistaken for
@@ -2916,14 +2916,14 @@ C44 present-source attribution lane (rotated live diagnostic pin):
   sees no behavioral safety blocker and agrees this is acceptable as the next
   diagnostic live pin.
 - Live pin rotated after clean process check:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned.dylib`.
   Current live UUID `86BE8A4B-ABBA-3891-B738-9668E8355330`, signed SHA256
   `d34eae6de8cca5802d2925894b1495201417771c682546dd5fba06d17679c989`,
   install-name `@rpath/libAppGL.dylib`, codesign valid. Pre-rotation backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned-ED65E893-pre-86BE8A4B.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned-ED65E893-pre-86BE8A4B.dylib`.
   Launcher syntax checks passed and force-drain remains default-on.
 - Short C44 automated sanity artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c44-present-attribution-sanity/20260609T191024Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/c44-present-attribution-sanity/20260609T191024Z-skip-on/`.
   Exit code `0`, loaded pin UUID `86BE8A4B`, no leftover process after run.
   This autogame/highground path completed quickly (`Game ended (duration: 5)`),
   so treat it as pin/diagnostic sanity only, not the manual gameplay crown gate.
@@ -2960,9 +2960,9 @@ C44 present-source attribution lane (rotated live diagnostic pin):
 C44 manual gameplay soak result:
 
 - Artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T194309Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T194309Z/`.
   External monitor:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T194309Z/external/20260609T194314Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T194309Z/external/20260609T194314Z/`.
   Exact PID `55466`; monitor duration `181.599s`; target was alive at monitor
   end. Launch env points at the canonical launcher, in-process Mach-port
   diagnostics enabled, and frame interval `60`.
@@ -3034,9 +3034,9 @@ C45 command-wait semaphore owner fix:
   `85C5B354-12D6-39C0-B50B-79935A84AA95`; SHA256
   `b2937c485236a727e8467424d96c9a46bbe4cffe8922bf43759c0d77037ae838`;
   install-name `@rpath/libAppGL.dylib`; codesign valid. Backup:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-pinned-86BE8A4B-pre-85C5B354.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-pinned-86BE8A4B-pre-85C5B354.dylib`.
 - Short launcher smoke artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c45-semaphore-owner-sanity/20260609T200850Z-skip-on/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/c45-semaphore-owner-sanity/20260609T200850Z-skip-on/`.
   Exit code `0`; Warzone initialized AppGL (`OpenGL Vendor: AppGL`,
   renderer `AppGL on Metal (Apple M1 Max)`, version `4.6 AppGL core`).
   The 2s `lsof` snapshot proves the process mapped both
@@ -3061,7 +3061,7 @@ C45 command-wait semaphore owner fix:
   verify external ports/in-process send rights stay flat through the
   three-minute gameplay window while memory remains steady.
   Command:
-  `cd "/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge" && APPGL_WARZONE_MACH_PORT_DURATION=180 APPGL_WARZONE_MACH_PORT_INTERVAL=2 APPGL_WARZONE_MACH_PORT_SAMPLES=30,90,180 APPGL_WARZONE_MACH_PORT_LSMP=0 APPGL_WARZONE_MACH_PORT_STOP_AFTER_MONITOR=0 ./run-warzone-appgl-machport-proof.sh --window --resolution=1280x720`.
+  `cd "$PROJECT_ROOT/live-targets/appgl-bridge" && APPGL_WARZONE_MACH_PORT_DURATION=180 APPGL_WARZONE_MACH_PORT_INTERVAL=2 APPGL_WARZONE_MACH_PORT_SAMPLES=30,90,180 APPGL_WARZONE_MACH_PORT_LSMP=0 APPGL_WARZONE_MACH_PORT_STOP_AFTER_MONITOR=0 ./run-warzone-appgl-machport-proof.sh --window --resolution=1280x720`.
   After the monitor completes, quit the game normally if the wrapper reports it
   is still running.
 - Peer ACKs: AppGL-Worker (`c16270d1-42cf-4ff6-b738-1255b3ab7af7`) verified
@@ -3076,9 +3076,9 @@ C45 command-wait semaphore owner fix:
 C45 manual crown result:
 
 - Artifact:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T203253Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T203253Z/`.
   External monitor:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T203253Z/external/20260609T203258Z/`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/manual-mach-ports-inprocess/20260609T203253Z/external/20260609T203258Z/`.
   Exact PID `61129`; external monitor captured `84` samples over
   `192.926s`; target exited by monitor end. Launch env points at the canonical
   `launch-warzone-appgl.sh`, with in-process Mach-port diagnostics enabled and
@@ -3179,7 +3179,7 @@ C46 layered-clear async CPU-lane prototype:
     `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`,
     codesign valid.
   - C45 backup:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T205432Z-C45-85C5B354-pre-C46-A8483891.dylib`.
+    `$PROJECT_ROOT/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T205432Z-C45-85C5B354-pre-C46-A8483891.dylib`.
   - The canonical launcher still leaves C46 disabled unless
     `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1` is explicitly exported.
 - Profile-on live autogame A/B artifacts:
@@ -3270,7 +3270,7 @@ C46 layered-clear async CPU-lane prototype:
   proving LC/LCDC sync waits remain removed.
 - Measured manual A/B gate result, single paired run:
   artifact root
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c46-layered-clear-async-manual-ab`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/c46-layered-clear-async-manual-ab`.
   Default-off run `20260609T232142Z-c46-default` and async run
   `20260609T232531Z-c46-async` used the same C46-capable live pin
   `A8483891` / SHA256
@@ -3312,7 +3312,7 @@ not whether skip ON helps; it is why residual FFR submits remain after skip ON.
 Valid manual scene capture matrix, pre-C48 live pin `A8483891`:
 
 - `async+skipON`:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T014238Z-c46-async`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T014238Z-c46-async`.
   Duration `210.41s`, Studio Display drawable `2560x1440`, scene markers
   `startMultiplayerGame` and `multiplay/maps/4c-rush.gam`. Approx present
   rate `24.65/sec`. Producer-token counters: sampler
@@ -3321,7 +3321,7 @@ Valid manual scene capture matrix, pre-C48 live pin `A8483891`:
   average `0.425 us`. CB census: `FlushForReadback=4611`, but only `4`
   FFR completion waits totaling `3.21 ms`.
 - `async+skipOFF`:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T014808Z-c46-async`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T014808Z-c46-async`.
   Duration `210.25s`, same scene/drawable posture. Approx present rate
   `18.50/sec`. Producer-token counters: sampler `flush_candidates=6730`,
   `gpu_order_skips=0`, `drain_flushes=6730`.
@@ -3329,7 +3329,7 @@ Valid manual scene capture matrix, pre-C48 live pin `A8483891`:
   CB census: `FlushForReadback=10099`; FFR completion waits `6734`,
   totaling `33418.58 ms`, p95 `9325.29 us`.
 - `default+skipON`:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T015217Z-c46-default`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T015217Z-c46-default`.
   Duration `210.03s`, same scene/drawable posture. Approx present rate
   `20.69/sec`. Producer-token counters: sampler
   `flush_candidates=97801`, `gpu_order_skips=97801`, `blocked=0`,
@@ -3392,14 +3392,14 @@ C48 live/preview posture:
   `A8483891-2FC0-3D00-BE42-94978B713DB0`, SHA256
   `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`.
 - Separate unswept preview pin:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-c48-preview-bdd2c14-B52F0178.dylib`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-c48-preview-bdd2c14-B52F0178.dylib`.
   UUID `B52F0178-6F29-345B-BD50-FD5E405120D1`, SHA256
   `8606e4a8faecc95fb09925203148712fe8cc1f2246d1842ae4266772193c8528`,
   ad-hoc/linker-signed CDHash
   `5c3a085c7cdc42df354afcac5b3551a990c200af`, install-name
   `@rpath/libAppGL.dylib`.
 - Preview wrapper:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-preview.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-c48-preview.sh`.
   It exports `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1` and
   `APPGL_ENABLE_FBO_CLEAR_FOLDING=1`, follows canonical sampler-skip posture
   unless explicitly disabled, and injects the preview dylib without touching
@@ -3495,14 +3495,14 @@ C48 live/preview posture:
   operator window unless a true unattended scene driver is found.
 - Short autogame C48 census A/B, informal engagement proof only:
   - Control current pin/C46 async root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c48-autogame-census-ab/20260610T020743Z-c46-async`.
+    `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/c48-autogame-census-ab/20260610T020743Z-c46-async`.
     Proved canonical pin `A8483891` /
     `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`.
     Highground autogame produced `113` presents, `LayeredClearAsync=350`,
     `LayeredClearDrainCurrentAsync=140`, `FlushForReadback=75`,
     `PressureFlush=11`, about `6.12` CB submits per present.
   - Candidate C48 preview/fold root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c48-autogame-census-ab/20260610T020806Z-c48-preview`.
+    `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/c48-autogame-census-ab/20260610T020806Z-c48-preview`.
     Proved preview pin `B52F0178` /
     `8606e4a8faecc95fb09925203148712fe8cc1f2246d1842ae4266772193c8528`.
     Same autogame posture produced `116` presents, `LayeredClear*=0`,
@@ -3517,29 +3517,29 @@ C48 live/preview posture:
 - Post-Sweep-1 live triage matrix is pre-staged but cancelled as a gate because
   the deterministic headless repro supersedes screenshots:
   - Arm A canonical control:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-a-canonical.sh`;
+    `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-a-canonical.sh`;
     canonical pin `A8483891`, folding/trace unset.
   - Arm B `00fde11` discriminator:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-b-00fde11.sh`;
+    `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-b-00fde11.sh`;
     dylib
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-c48-armb-00fde11-7FEDBB3C.dylib`,
+    `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-c48-armb-00fde11-7FEDBB3C.dylib`,
     UUID `7FEDBB3C-93D8-3B0B-AC4C-16EEAE34D1F3`, SHA256
     `70d7093c339f0a8bd8a1132ec64026676e8ff259dd10777b9e6b3dfbc4934701`,
     valid on disk, install-name `@rpath/libAppGL.dylib`; async forced OFF and
     `APPGL_ENABLE_FBO_CLEAR_FOLDING=0` / `APPGL_TRACE_FBO_CLEAR_FOLDING=0`
     exported explicitly while preserving canonical skip/drop/cache posture.
   - Arm C C48 preview forward config:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-c-preview-fold.sh`;
+    `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-c-preview-fold.sh`;
     preview `B52F0178`, async ON, sampler skip ON, folding ON.
   - Arm D optional trace:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-d-preview-fold-trace.sh`;
+    `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-d-preview-fold-trace.sh`;
     Arm C plus `APPGL_TRACE_FBO_CLEAR_FOLDING=1`.
   Do not spend the post-Sweep-1 slot on this matrix unless Clerk reopens it for
   the 00:00 operator package. Screenshot mechanics are nevertheless proven for
   this shell: CoreGraphics window-ID enumeration works, and
   `screencapture -x -o -l<WID>` produced a real iTerm window PNG rather than
   wallpaper-only output. A reusable launch/capture helper is staged at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/run-c48-triage-screenshot-arm.sh`;
+  `$PROJECT_ROOT/live-targets/appgl-bridge/run-c48-triage-screenshot-arm.sh`;
   it waits for the Warzone `[gameLoad]` marker, discovers the Warzone window ID,
   and captures fixed offsets/bursts per arm.
 
@@ -3570,7 +3570,7 @@ Scout retarget rationale:
 - Sweep 2 dispatch:
   - Source `35df142`, default/no-forward-env config.
   - Build proof:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/build-release-fp64on/libAppGL.dylib`,
+    `$PROJECT_ROOT/appgl-runtime/build-release-fp64on/libAppGL.dylib`,
     UUID `B30E9F60-43A2-36B5-BA7D-8981FEA98792`, SHA256
     `0fb708248842698dea1b4fd0f9388891b5217d85058dbc7798bbd0103dc27978`,
     codesign valid on disk, install-name `@rpath/libAppGL.dylib`. Build
@@ -3597,17 +3597,17 @@ Scout retarget rationale:
     proof in the result report.
   - Scout progress update `2b0fec79-3771-4814-ac2d-b15bb5d2082a` confirmed the
     standing rule is in effect. Sweep 2 is running from isolated checkout
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-c48-sweep2-35df142`,
+    `$PROJECT_ROOT/scout-worktree/checkouts/appgl-c48-sweep2-35df142`,
     pinned to full SHA `35df14294132a421b49cce55f75e49933684fb88`, with clean
     pre-build `git status --short`. Scout populated ignored vendored
     third-party dirs from the local main tree for build only. Release fp64-on
     artifact:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-c48-sweep2-35df142/gate-artifacts/35df142-s24-c48-sweep2-default-off/libAppGL.dylib`,
+    `$PROJECT_ROOT/scout-worktree/checkouts/appgl-c48-sweep2-35df142/gate-artifacts/35df142-s24-c48-sweep2-default-off/libAppGL.dylib`,
     SHA256 `90e84aa4bc7ada5cec72e3161a71b5b474e5599cfe0e80ba595450e7c6a95a98`,
     UUID `5D196FE0-5C29-31FA-AB06-2568EE376BA1`, release-shape PASS. Full CTS
     default/no-forward-env is running with C48 flags explicitly unset inside
     GLCTS subshells. Report root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/full-cts-s24-c48-sweep2-35df142-default-off`.
+    `$PROJECT_ROOT/scout-worktree/reports/full-cts-s24-c48-sweep2-35df142-default-off`.
   - Sweep 1 disposition from Scout
     `7f8da07b-c2e8-4f3c-8e0c-8f7764bd5b35`: skipped/not completed. Scout had
     only held/read the original Sweep 1 dispatch and inspected/preflighted
@@ -3730,19 +3730,19 @@ Sweep A dispatch:
   Foreman/Fable-Clerk dispatch it.
 - Scout ACK/progress `69f888d5-d2d8-488f-aef9-b74e5c588133`: Sweep A is in
   progress from isolated checkout
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default`,
+  `$PROJECT_ROOT/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default`,
   full SHA `d73c6e1f94ec382476433efcf583ab9344f78f71`, tracked pre-build
   status clean. Ignored vendored `third_party/glslang` and `SPIRV-Cross` were
   populated from the local main tree for `APPGL_VENDOR_THIRD_PARTY=ON` build
   input. Report root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/full-cts-s24-d73c6e1-sweepA-default-off`.
+  `$PROJECT_ROOT/scout-worktree/reports/full-cts-s24-d73c6e1-sweepA-default-off`.
   Release fp64-on build is underway with only expected
   `MTLResourceUsageSample` warnings so far; default CTS will explicitly unset
   async, sampler skip, and FBO folding in GLCTS subshells. Sweep B remains
   held.
 - Scout artifact proof `9afbb2e6-f1a9-41cd-902d-3cf31762e084`: release fp64-on
   build completed and gate artifact was published at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default/gate-artifacts/d73c6e1-s24-sweepA-default-off/libAppGL.dylib`,
+  `$PROJECT_ROOT/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default/gate-artifacts/d73c6e1-s24-sweepA-default-off/libAppGL.dylib`,
   SHA256 `08418657e3395a2963e28d4f93e98e4477b86406b730a3fd2aebc6bbc13e9dab`,
   UUID `42FF9E75-3374-33CF-85A1-29682C6D5A90`, release shape PASS. Build
   warnings only the expected `MTLResourceUsageSample` deprecations and
@@ -3768,20 +3768,20 @@ Sweep A dispatch:
   incomplete chunks `0`, and `status_maps_identical=1`.
 - Sweep A final proof:
   - checkout:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default`;
+    `$PROJECT_ROOT/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default`;
     source `d73c6e1f94ec382476433efcf583ab9344f78f71`; baseline
     `d28b15056c104c50cae9fb9a766a48471065d843`; source status clean before
     build and post-build tracked tree unchanged except expected untracked
     `gate-artifacts/`.
   - artifact:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default/gate-artifacts/d73c6e1-s24-sweepA-default-off/libAppGL.dylib`,
+    `$PROJECT_ROOT/scout-worktree/checkouts/appgl-d73c6e1-sweepA-default/gate-artifacts/d73c6e1-s24-sweepA-default-off/libAppGL.dylib`,
     SHA256 `08418657e3395a2963e28d4f93e98e4477b86406b730a3fd2aebc6bbc13e9dab`,
     UUID `42FF9E75-3374-33CF-85A1-29682C6D5A90`, install name
     `@rpath/libAppGL.dylib`, ad-hoc/linker-signed codesign, release shape
     PASS. Config was Release, fp64 ON, vendor third-party ON, ASAN OFF, DCR
     sentinel hooks OFF.
   - report root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/full-cts-s24-d73c6e1-sweepA-default-off`;
+    `$PROJECT_ROOT/scout-worktree/reports/full-cts-s24-d73c6e1-sweepA-default-off`;
     candidate QPA
     `scout-sweep-s24-sweepA-candidate-d73c6e1-default-off-2026-06-10.qpa`,
     SHA256
@@ -3823,13 +3823,13 @@ Sweep A dispatch:
     bookkeeping and not promote/pin automatically.
   - Scout ACK/startup `abacda0a-f61a-406c-80e6-0d04a1e68c45`: Sweep B is
     running from isolated checkout
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-d73c6e1-sweepB-forward`,
+    `$PROJECT_ROOT/scout-worktree/checkouts/appgl-d73c6e1-sweepB-forward`,
     HEAD `d73c6e1f94ec382476433efcf583ab9344f78f71`, pre-build tracked status
     clean. Ignored vendor inputs `third_party/SPIRV-Cross/` and
     `third_party/glslang/` were populated from the local main tree. Runner:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/scout-scripts/full_cts_s24_d73c6e1_sweepB_forward.sh`;
+    `$PROJECT_ROOT/scout-worktree/scout-scripts/full_cts_s24_d73c6e1_sweepB_forward.sh`;
     report root:
-    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/full-cts-s24-d73c6e1-sweepB-forward`.
+    `$PROJECT_ROOT/scout-worktree/reports/full-cts-s24-d73c6e1-sweepB-forward`.
     Forward env check passed inside GLCTS subshells for layered-clear async,
     sampler GPU-order skip, and FBO clear folding. Baseline source is the
     available `d28b150` crown default-off QPA reused from Sweep A; Scout has no
@@ -3837,11 +3837,11 @@ Sweep A dispatch:
     expected `MTLResourceUsageSample` deprecation warnings so far.
 - Scout artifact proof `b4118e12-c2c5-4177-ac9f-d33164763dbc`: build/artifact
   complete and CTS started. Artifact
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-d73c6e1-sweepB-forward/gate-artifacts/d73c6e1-s24-sweepB-forward/libAppGL.dylib`,
+  `$PROJECT_ROOT/scout-worktree/checkouts/appgl-d73c6e1-sweepB-forward/gate-artifacts/d73c6e1-s24-sweepB-forward/libAppGL.dylib`,
   SHA256 `244f3978c0d1c1140312f6c9bbe356aacf1a0938f69db2ca3d9f7dd2000d5226`,
   UUID `0B4B1965-ACEB-3CED-A6BF-9E2F695EA182`, release shape PASS, provenance
   log at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/full-cts-s24-d73c6e1-sweepB-forward/provenance.log`.
+  `$PROJECT_ROOT/scout-worktree/reports/full-cts-s24-d73c6e1-sweepB-forward/provenance.log`.
   CTS is now running with 12 ns15 chunks and 80 shader shards; forward
   toggles remain exported inside the `run_one` GLCTS subshells.
 - Scout progress `e21bb595-01ee-4763-a4ba-c7aa3eacda94`: Sweep B CTS remains
@@ -3896,14 +3896,14 @@ It remains documented as an informal unswept artifact with canonical pin
 untouched:
 
 - Preview dylib:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-e2a876d-preview-9F9A494B.dylib`,
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-e2a876d-preview-9F9A494B.dylib`,
   UUID `9F9A494B-CBEE-368A-8F31-5A1C89541830`, SHA256
   `60f4bc5cd46b1449de27718c901ab56ddd09a40f7b1edfd4a38ffabe56e73681`,
   codesign valid on disk, install-name `@rpath/libAppGL.dylib`.
 - Canonical `libAppGL-pinned.dylib` remains `A8483891` /
   `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`.
 - Operator launcher:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-e2a876d-operator-preview.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-e2a876d-operator-preview.sh`.
   It sets forward config (`APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1`,
   `APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP=1`,
   `APPGL_ENABLE_FBO_CLEAR_FOLDING=1`), diagnostics JSON, and
@@ -3913,7 +3913,7 @@ untouched:
   `APPGL_ALLOW_WITHDRAWN_E2A876D_PREVIEW=1` is explicitly exported. This is a
   safety guard only; do not use the override for operator acceptance.
 - Build provenance for the withdrawn preview:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/build-release-fp64on`,
+  `$PROJECT_ROOT/appgl-runtime/build-release-fp64on`,
   source HEAD `e2a876d`, built with
   `cmake --build .../build-release-fp64on --target AppGL -j 10`.
   Cache proof: `CMAKE_BUILD_TYPE=Release`,
@@ -3931,7 +3931,7 @@ untouched:
   beachball/unresponsive. The known-good informal preview for play meanwhile is
   still `launch-warzone-appgl-c48-preview.sh` / B52F0178.
 - Confirmatory discriminator artifacts:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/e2a876d-regression-discriminator/20260610T065012Z`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/e2a876d-regression-discriminator/20260610T065012Z`.
   Arm A (`e2a876d` + preview env) reproduced the stall:
   `bridgeFrame=1` at `30s` and `60s`, final `bridgeFrame=1` /
   `flushBuffer=55` over `120s`. Arm B (`e2a876d` + canonical env, diagnostics
@@ -3946,12 +3946,12 @@ untouched:
 package; crown gates remain pending:
 
 - Preview dylib:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-d73c6e1-preview-42A8548D.dylib`,
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-d73c6e1-preview-42A8548D.dylib`,
   UUID `42A8548D-5775-30DA-BA00-A1C60A7EE427`, SHA256
   `754310432eb14c6e18ab2556469cf3405ecdbc23b8fc399f6a8210ac8378c933`,
   codesign valid on disk, install-name `@rpath/libAppGL.dylib`.
 - Build provenance:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/build-release-fp64on`,
+  `$PROJECT_ROOT/appgl-runtime/build-release-fp64on`,
   source HEAD `d73c6e1f94ec382476433efcf583ab9344f78f71`,
   built with `cmake --build .../build-release-fp64on --target AppGL -j 10`.
   Cache proof: `CMAKE_BUILD_TYPE=Release`,
@@ -3963,7 +3963,7 @@ package; crown gates remain pending:
 - Canonical `libAppGL-pinned.dylib` remains `A8483891` /
   `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`.
 - Operator launcher:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-d73c6e1-operator-preview.sh`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/launch-warzone-appgl-d73c6e1-operator-preview.sh`.
   It sets forward config (`APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1`,
   `APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP=1`,
   `APPGL_ENABLE_FBO_CLEAR_FOLDING=1`), diagnostics JSON with interval `60`,
@@ -3980,7 +3980,7 @@ package; crown gates remain pending:
   gone, viewport-shadow gone, far cascades correct for the first time in
   project history.
 - C49 kill-switch artifact root:
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/d73c6e1-operator-preview/20260610T072054Z`.
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/d73c6e1-operator-preview/20260610T072054Z`.
   Primary payload is `appgl-diagnostics.jsonl` (`48` samples, `8,501,872`
   bytes, bridgeFrame `1 -> 2820`) plus proof files under `proofs/`. The
   launcher-owned artifact tree has diagnostics/proofs only; no stdout/stderr
@@ -4196,7 +4196,7 @@ package; crown gates remain pending:
   now staged on disk as `launch-warzone-appgl-1104215-operator-control.sh`
   and `launch-warzone-appgl-1104215-operator-candidate.sh`, both using the
   frozen operator pin
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-1104215-preview-FAD51B6F.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-1104215-preview-FAD51B6F.dylib`
   rather than any scout-worktree path. That frozen copy is verified with
   `UUID FAD51B6F-87E0-3F74-B9CE-82304BDBAFFE`,
   `SHA256 7496f476119064a73718823d92d3a741f1bf3d342ca9bfbb9ac24e6611218e40`,
@@ -4257,7 +4257,7 @@ package; crown gates remain pending:
   profile shows a very large BAR-B drop relative to the old defaults, while the
   hover-flicker discriminator remains staged separately.
 - c23aa37 discriminator staging: the current build was refreshed and frozen as
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-c23aa37-preview-1AF20FDC.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-c23aa37-preview-1AF20FDC.dylib`
   with UUID `1AF20FDC-8D4B-3C84-A193-4A88A3EDC8C1`, SHA256
   `ed9ff82bf7c74c433c806864feb30f51baf5d7b58eb42fd54ed626fa9a06e983`,
   codesign valid on disk, and install-name `@rpath/libAppGL.dylib`.
@@ -4273,7 +4273,7 @@ package; crown gates remain pending:
   operator's next sitting.
 - Scout artifact `c46685cb-09dc-437c-b3df-afc3edfb426c`: the c23aa37
   default-verification build/artifact has been published at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-c23aa37-default-verify/gate-artifacts/c23aa37-s24-default-verify/libAppGL.dylib`,
+  `$PROJECT_ROOT/scout-worktree/checkouts/appgl-c23aa37-default-verify/gate-artifacts/c23aa37-s24-default-verify/libAppGL.dylib`,
   SHA256 `a8c69530915417ed387db8015e616ca0003566467d204ed1eadc8cdff4c356ad`,
   UUID `CE7A7D04-98AD-30F0-955B-BABAB99A3F45`, release shape PASS, with CTS now
   running 12 ns15 chunks plus 80 shader shards. GLCTS launches clear ambient
@@ -4312,8 +4312,8 @@ package; crown gates remain pending:
   better responsiveness and the click-lag gone. The pre-existing hover-break
   on build-menu mini models still needs attribution split; the operator was
   asked to hover-test in control. The live pair run roots are under
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/1104215-operator-session/control/20260610T115039Z`
-  and `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/1104215-operator-session/candidate/20260610T115636Z`,
+  `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/1104215-operator-session/control/20260610T115039Z`
+  and `$PROJECT_ROOT/live-targets/appgl-bridge/memory-runs/1104215-operator-session/candidate/20260610T115636Z`,
   with diagnostics, proofs/run-env.txt, and stderr.log in each root. Worker
   analysis has been handed those paths with the frozen live-targets pin, and
   the canonical pin remains untouched.
@@ -4371,7 +4371,7 @@ package; crown gates remain pending:
   has its own headless deterministic probes from Worker.
 - Rename-on-write landing `7613a14cda771146e1a4d43eb0950bcc344c6d88`: the
   fixed preview pin is frozen at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-7613a14-preview-28AA5ED5.dylib`
+  `$PROJECT_ROOT/live-targets/appgl-bridge/libAppGL-7613a14-preview-28AA5ED5.dylib`
   with UUID `28AA5ED5-BD3A-3EDA-B54C-7562A3D9B1BC`, SHA256
   `8aca8582c70ab27edd25327e91350a6c6f6c08b8eacaa360a4baac8048598d7a`, and
   install-name `@rpath/libAppGL.dylib`. The full default sweep is now in flight
@@ -4402,7 +4402,7 @@ package; crown gates remain pending:
 - Scout startup `dea877f0-53bc-4d72-9410-72169eea895a`: the isolated
   `7613a14` build artifact is published and CTS has started. The gate artifact
   under test is
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/checkouts/appgl-7613a14-default-verify/gate-artifacts/7613a14-s24-default-verify/libAppGL.dylib`
+  `$PROJECT_ROOT/scout-worktree/checkouts/appgl-7613a14-default-verify/gate-artifacts/7613a14-s24-default-verify/libAppGL.dylib`
   with SHA256 `a352037f79875ea28352e6adb17fb224cd2c5b3c517597b565098a9ee32327fc`
   and UUID `04C4EA14-877D-346B-9AE8-77C9F0305FB1`. The frozen preview pin
   identity was separately verified as
@@ -4452,7 +4452,7 @@ package; crown gates remain pending:
   left on the verified `7613a14` lineage instead of repinning to `5c9fcac`
   directly.
 - Foreman context export written at
-  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/contexts/AppGL-Foreman-context-20260610.md`.
+  `$PROJECT_ROOT/contexts/AppGL-Foreman-context-20260610.md`.
   The lazy-arm sweep is now the active next action and Clerk asked for this
   tracker to stay in lockstep with the export.
 
@@ -6701,7 +6701,7 @@ Fable-Worker has landed two C49 draft artifacts in `specs-worker-docs/`:
   counters to confirm directly. (3) PROTOCOL NOTE (standing, BANNED):
   sudo'd wrappers = settings-profile confound. The sudo-scoped shape is now
   IN THE SAMPLER: `sudo -n /usr/bin/powermetrics` alone (one sudoers line:
-  `excalibur ALL=(root) NOPASSWD: /usr/bin/powermetrics`), temp_c column
+  `<your-account> ALL=(root) NOPASSWD: /usr/bin/powermetrics`), temp_c column
   added, wrapper itself NEVER under sudo. (4) HYGIENE: root-owned files in
   candidate/20260612T045904Z + control/20260612T044858Z — chown needs the
   operator (no passwordless sudo on this shell); flagged in the packet.
@@ -6742,7 +6742,7 @@ Fable-Worker has landed two C49 draft artifacts in `specs-worker-docs/`:
 
 - TELEMETRY SHAKEDOWN VERDICT: PASS 7/8 columns + one bug found-and-fixed
   + one blocked-on-operator. (1) CHOWN CLOSURE verified: both sitting-3 dirs
-  excalibur:staff, zero root-owned files remain. (2) Shakedown runs (canonical
+  <your-account>:staff, zero root-owned files remain. (2) Shakedown runs (canonical
   autogame, no sudo, /tmp/telem-shakedown{,2}): PID-arg matching ✓ (rows
   from t+1, no pgrep dependence), cpu_pct ✓, gpu device/renderer ✓, rss_mb ✓
   (the 76→1118MB load curve plainly visible — the leak instrument works),
@@ -6754,7 +6754,7 @@ Fable-Worker has landed two C49 draft artifacts in `specs-worker-docs/`:
   the powermetrics sudoers line was NEVER INSTALLED — sudo -n -l shows only
   the pmset disablesleep entries; the sampler's probe correctly degrades to
   blank. Operator one-liner needed:
-  `echo 'excalibur ALL=(root) NOPASSWD: /usr/bin/powermetrics' | sudo tee /etc/sudoers.d/powermetrics`
+  `echo '<your-account> ALL=(root) NOPASSWD: /usr/bin/powermetrics' | sudo tee /etc/sudoers.d/powermetrics`
   then temp_c populates with zero further changes.
 
 - TWO OPERATOR RECORDS (Clerk `1a9b8127`): (1) powermetrics sudoers line

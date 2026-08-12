@@ -54,8 +54,8 @@ Focused post-DCR inventory uses:
 
 Full-sweep context uses historical GREAT QPAs:
 
-- `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/scout-sweep-s22-great-off-2026-05-23.qpa`
-- `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/scout-worktree/reports/scout-sweep-s22-great-on-2026-05-23.qpa`
+- `$PROJECT_ROOT/scout-worktree/reports/scout-sweep-s22-great-off-2026-05-23.qpa`
+- `$PROJECT_ROOT/scout-worktree/reports/scout-sweep-s22-great-on-2026-05-23.qpa`
 
 The QPA-derived counts exactly reproduce the GREAT close memo:
 

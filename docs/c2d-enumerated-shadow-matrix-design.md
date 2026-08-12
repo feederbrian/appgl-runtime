@@ -381,7 +381,7 @@ requires `PASS`.
 Build the probe engine with:
 
 ```sh
-cmake --build /Users/excalibur/Documents/Developer/OpenGL\ 4.6\ Mac/specs/piglit/build \
+cmake --build "$PROJECT_ROOT"/specs/piglit/build \
   --target tex-miplevel-selection -j8
 ```
 
@@ -390,9 +390,9 @@ Run a flavor with:
 ```sh
 python3 tools/c2d_shadow_matrix.py \
   --manifest tools/c2d_shadow_matrix_manifest.json \
-  --binary /Users/excalibur/Documents/Developer/OpenGL\ 4.6\ Mac/specs/piglit/build/bin/tex-miplevel-selection \
+  --binary "$PROJECT_ROOT"/specs/piglit/build/bin/tex-miplevel-selection \
   --library /absolute/path/to/frozen/libAppGL.dylib \
-  --bridge /Users/excalibur/Documents/Developer/OpenGL\ 4.6\ Mac/live-targets/appgl-bridge/libappgl_bridge.dylib \
+  --bridge "$PROJECT_ROOT"/live-targets/appgl-bridge/libappgl_bridge.dylib \
   --out /new/output/directory --flavor default
 ```
 

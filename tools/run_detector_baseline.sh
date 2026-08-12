@@ -17,8 +17,13 @@
 
 set -euo pipefail
 
-REPO_ROOT="/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac"
-APPGL_RUNTIME="${REPO_ROOT}/appgl-runtime"
+# Locate the project root from this script's own location rather than a
+# hardcoded absolute path, so the tool works from any checkout and for any
+# user. Layout assumed: <project-root>/appgl-runtime/tools/<this script>
+# Override with APPGL_PROJECT_ROOT if the tree is arranged differently.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+APPGL_RUNTIME="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="${APPGL_PROJECT_ROOT:-$(cd -- "${APPGL_RUNTIME}/.." && pwd)}"
 CTS_DIR="${REPO_ROOT}/specs/VK-GL-CTS/build-appgl/external/openglcts/modules"
 GLCTS="${CTS_DIR}/glcts"
 CLASSIFY="${APPGL_RUNTIME}/tools/detector_classify.py"
@@ -42,7 +47,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 DATE="$(date +%Y-%m-%d)"
-OUT_JSONL="${APPGL_RUNTIME}/../specs-worker-docs/detector-baseline-${DATE}.jsonl"
+OUT_JSONL="${REPO_ROOT}/specs-worker-docs/detector-baseline-${DATE}.jsonl"
 mkdir -p "$(dirname "$OUT_JSONL")"
 : > "$OUT_JSONL"
 
