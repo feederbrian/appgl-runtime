@@ -322,6 +322,10 @@ bool GLContext::bindAttribLocation(GLuint program, GLuint index, const GLchar* n
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (std::strncmp(name, "gl_", 3) == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     object->requestedAttribLocations[std::string(name)] = index;
     return true;
 }
@@ -362,9 +366,12 @@ GLint GLContext::getAttribLocation(GLuint program, const GLchar* name) {
     }
     for (const auto& attrib : object->attributes) {
         if (attrib.name == lookup) {
-            return attrib.location;
+            return attrib.conventionalBuiltin ? -1 : attrib.location;
         }
         if (attrib.name == baseName) {
+            if (attrib.conventionalBuiltin) {
+                return -1;
+            }
             auto arrayElementLocationStride = [](GLenum type) -> GLint {
                 switch (type) {
                     case GL_FLOAT_MAT2:    case GL_DOUBLE_MAT2:

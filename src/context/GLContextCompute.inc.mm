@@ -194,7 +194,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             programObject->computeReflection, programObject->uniforms);
         programObject->uniformLayoutComputed = true;
     }
-    if (pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState)) {
+    if (pushSynthesizedMatrixUniforms(
+            *programObject, impl_->matrixState, false)) {
         programObject->markUniformsDirty();
     }
     buildStageUniformBuffer(computeUniformScratch,
@@ -1144,7 +1145,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             programObject->computeReflection, programObject->uniforms);
         programObject->uniformLayoutComputed = true;
     }
-    if (pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState)) {
+    if (pushSynthesizedMatrixUniforms(
+            *programObject, impl_->matrixState, false)) {
         programObject->markUniformsDirty();
     }
     buildStageUniformBuffer(computeUniformScratchIndirect,

@@ -368,6 +368,222 @@ public:
         gl.glScissor(0, 0, framebufferSize().width, framebufferSize().height);
         gl.glDepthRange(0.0, 1.0);
         gl.glDepthRangef(0.0f, 1.0f);
+
+        // R0.8 legacy secondary-color state regression. These compatibility
+        // enums are intentionally absent from the core-only public header, so
+        // keep their values local to the test rather than widening AppGL's
+        // advertised API surface.
+        constexpr GLenum kVertexProgramTwoSide = 0x8643;
+        constexpr GLenum kColorSum = 0x8458;
+        constexpr GLenum kSecondaryColorArray = 0x845E;
+        constexpr GLenum kSecondaryColorArraySize = 0x845A;
+        constexpr GLenum kSecondaryColorArrayType = 0x845B;
+        constexpr GLenum kSecondaryColorArrayStride = 0x845C;
+
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        GLboolean twoSideBoolean = GL_TRUE;
+        GLint twoSideInteger = -1;
+        expectCondition(
+            gl.glIsEnabled(kVertexProgramTwoSide) == GL_FALSE,
+            "GL_VERTEX_PROGRAM_TWO_SIDE defaults disabled");
+        gl.glGetBooleanv(kVertexProgramTwoSide, &twoSideBoolean);
+        gl.glGetIntegerv(kVertexProgramTwoSide, &twoSideInteger);
+        expectCondition(
+            twoSideBoolean == GL_FALSE && twoSideInteger == 0,
+            "GL_VERTEX_PROGRAM_TWO_SIDE default state is queryable");
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "GL_VERTEX_PROGRAM_TWO_SIDE default queries");
+
+        gl.glEnable(kVertexProgramTwoSide);
+        twoSideBoolean = GL_FALSE;
+        twoSideInteger = 0;
+        expectCondition(
+            gl.glIsEnabled(kVertexProgramTwoSide) == GL_TRUE,
+            "GL_VERTEX_PROGRAM_TWO_SIDE enable is observable");
+        gl.glGetBooleanv(kVertexProgramTwoSide, &twoSideBoolean);
+        gl.glGetIntegerv(kVertexProgramTwoSide, &twoSideInteger);
+        expectCondition(
+            twoSideBoolean == GL_TRUE && twoSideInteger == 1,
+            "GL_VERTEX_PROGRAM_TWO_SIDE enabled state round-trips");
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "GL_VERTEX_PROGRAM_TWO_SIDE enabled queries");
+
+        gl.glDisable(kVertexProgramTwoSide);
+        twoSideBoolean = GL_TRUE;
+        twoSideInteger = -1;
+        expectCondition(
+            gl.glIsEnabled(kVertexProgramTwoSide) == GL_FALSE,
+            "GL_VERTEX_PROGRAM_TWO_SIDE disable is observable");
+        gl.glGetBooleanv(kVertexProgramTwoSide, &twoSideBoolean);
+        gl.glGetIntegerv(kVertexProgramTwoSide, &twoSideInteger);
+        expectCondition(
+            twoSideBoolean == GL_FALSE && twoSideInteger == 0,
+            "GL_VERTEX_PROGRAM_TWO_SIDE disabled state round-trips");
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "GL_VERTEX_PROGRAM_TWO_SIDE disabled queries");
+
+        const auto expectColorSumState = [&](bool expected,
+                                             const char* label) {
+            GLboolean booleanValue = expected ? GL_FALSE : GL_TRUE;
+            GLint integerValue = expected ? 0 : -1;
+            GLint64 integer64Value = expected ? 0 : -1;
+            GLfloat floatValue = expected ? 0.0f : -1.0f;
+            GLdouble doubleValue = expected ? 0.0 : -1.0;
+            gl.glGetBooleanv(kColorSum, &booleanValue);
+            gl.glGetIntegerv(kColorSum, &integerValue);
+            gl.glGetInteger64v(kColorSum, &integer64Value);
+            gl.glGetFloatv(kColorSum, &floatValue);
+            gl.glGetDoublev(kColorSum, &doubleValue);
+            const GLint numericExpected = expected ? 1 : 0;
+            expectCondition(
+                booleanValue == (expected ? GL_TRUE : GL_FALSE) &&
+                    integerValue == numericExpected &&
+                    integer64Value == numericExpected &&
+                    floatValue == static_cast<GLfloat>(numericExpected) &&
+                    doubleValue == static_cast<GLdouble>(numericExpected),
+                std::string("GL_COLOR_SUM ") + label +
+                    " state is exposed by all scalar glGet forms");
+            expectGLError(
+                gl, GL_NO_ERROR,
+                std::string("GL_COLOR_SUM ") + label + " queries");
+        };
+        expectCondition(
+            gl.glIsEnabled(kColorSum) == GL_FALSE,
+            "GL_COLOR_SUM defaults disabled");
+        expectColorSumState(false, "default");
+        gl.glEnable(kColorSum);
+        expectGLError(gl, GL_NO_ERROR, "glEnable(GL_COLOR_SUM)");
+        expectCondition(
+            gl.glIsEnabled(kColorSum) == GL_TRUE,
+            "GL_COLOR_SUM enable is observable");
+        expectColorSumState(true, "enabled");
+        gl.glDisable(kColorSum);
+        expectGLError(gl, GL_NO_ERROR, "glDisable(GL_COLOR_SUM)");
+        expectCondition(
+            gl.glIsEnabled(kColorSum) == GL_FALSE,
+            "GL_COLOR_SUM disable is observable");
+        expectColorSumState(false, "disabled");
+
+        using SecondaryColorPointerFn =
+            void(APIENTRY *)(GLint, GLenum, GLsizei, const void*);
+        using ClientStateFn = void(APIENTRY *)(GLenum);
+        SecondaryColorPointerFn secondaryColorPointer =
+            reinterpret_cast<SecondaryColorPointerFn>(
+                appglGetProcAddress("glSecondaryColorPointer"));
+        ClientStateFn enableClientState = reinterpret_cast<ClientStateFn>(
+            appglGetProcAddress("glEnableClientState"));
+        ClientStateFn disableClientState = reinterpret_cast<ClientStateFn>(
+            appglGetProcAddress("glDisableClientState"));
+        expectCondition(
+            secondaryColorPointer != nullptr &&
+                enableClientState != nullptr &&
+                disableClientState != nullptr,
+            "secondary-color client-array entry points resolve");
+        expectCondition(
+            !context.isLegacyClientArrayEnabled(kSecondaryColorArray),
+            "GL_SECONDARY_COLOR_ARRAY defaults disabled");
+
+        const GLfloat secondaryColors[8] = {
+            0.25f, 0.5f, 0.75f, 0.0f,
+            0.75f, 0.5f, 0.25f, 0.0f,
+        };
+        secondaryColorPointer(
+            3, GL_FLOAT, 4 * static_cast<GLsizei>(sizeof(GLfloat)),
+            secondaryColors);
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "glSecondaryColorPointer accepts size-3 float input");
+        secondaryColorPointer(
+            4, GL_FLOAT, 4 * static_cast<GLsizei>(sizeof(GLfloat)),
+            secondaryColors);
+        expectGLError(
+            gl, GL_INVALID_VALUE,
+            "glSecondaryColorPointer rejects size 4");
+
+        const GLshort secondaryColorShorts[12] = {};
+        secondaryColorPointer(
+            3, GL_SHORT, 32, secondaryColorShorts);
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "glSecondaryColorPointer accepts size-3 short input with explicit stride");
+        struct SecondaryColorArrayQueryCase {
+            GLenum pname;
+            GLint expected;
+            const char* label;
+        };
+        static constexpr std::array<SecondaryColorArrayQueryCase, 3>
+            kSecondaryColorArrayQueries = {{
+                {
+                    kSecondaryColorArraySize,
+                    3,
+                    "GL_SECONDARY_COLOR_ARRAY_SIZE",
+                },
+                {
+                    kSecondaryColorArrayType,
+                    static_cast<GLint>(GL_SHORT),
+                    "GL_SECONDARY_COLOR_ARRAY_TYPE",
+                },
+                {
+                    kSecondaryColorArrayStride,
+                    32,
+                    "GL_SECONDARY_COLOR_ARRAY_STRIDE",
+                },
+            }};
+        for (const SecondaryColorArrayQueryCase& queryCase :
+             kSecondaryColorArrayQueries) {
+            GLboolean booleanValue = GL_FALSE;
+            GLint integerValue = -1;
+            GLfloat floatValue = -1.0f;
+            GLdouble doubleValue = -1.0;
+            gl.glGetBooleanv(queryCase.pname, &booleanValue);
+            gl.glGetIntegerv(queryCase.pname, &integerValue);
+            gl.glGetFloatv(queryCase.pname, &floatValue);
+            gl.glGetDoublev(queryCase.pname, &doubleValue);
+            expectCondition(
+                booleanValue == GL_TRUE,
+                std::string(queryCase.label) +
+                    " converts nonzero state to GL_TRUE");
+            expectCondition(
+                integerValue == queryCase.expected,
+                std::string(queryCase.label) +
+                    " preserves the exact integer state");
+            expectCondition(
+                floatValue == static_cast<GLfloat>(queryCase.expected),
+                std::string(queryCase.label) +
+                    " casts exactly to GLfloat");
+            expectCondition(
+                doubleValue == static_cast<GLdouble>(queryCase.expected),
+                std::string(queryCase.label) +
+                    " casts exactly to GLdouble");
+            expectGLError(
+                gl, GL_NO_ERROR,
+                std::string(queryCase.label) +
+                    " accepts all four glGet query forms");
+        }
+
+        enableClientState(kSecondaryColorArray);
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "glEnableClientState(GL_SECONDARY_COLOR_ARRAY)");
+        expectCondition(
+            context.isLegacyClientArrayEnabled(kSecondaryColorArray),
+            "GL_SECONDARY_COLOR_ARRAY enabled state is queryable");
+        disableClientState(kSecondaryColorArray);
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "glDisableClientState(GL_SECONDARY_COLOR_ARRAY)");
+        expectCondition(
+            !context.isLegacyClientArrayEnabled(kSecondaryColorArray),
+            "GL_SECONDARY_COLOR_ARRAY disabled state is queryable");
+        secondaryColorPointer(3, GL_FLOAT, 0, nullptr);
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "glSecondaryColorPointer state cleanup");
+
         gl.glClearDepth(0.875);
         gl.glClearStencil(3);
         gl.glEnable(GL_DEPTH_TEST);
@@ -7663,6 +7879,17 @@ public:
             gl.glDeleteShader(shader);
             expectCondition(compileStatus == GL_TRUE, assertion);
         };
+        const auto compileCompatStage = [&](GLenum stage,
+                                            const char* source,
+                                            const char* assertion) {
+            const GLuint shader = gl.glCreateShader(stage);
+            gl.glShaderSource(shader, 1, &source, nullptr);
+            gl.glCompileShader(shader);
+            GLint compileStatus = GL_FALSE;
+            gl.glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
+            gl.glDeleteShader(shader);
+            expectCondition(compileStatus == GL_TRUE, assertion);
+        };
 
         // Cover both legacy entry shapes that occur in Piglit: an explicit
         // GLSL 1.10 version and the no-version default (also GLSL 1.10).
@@ -7814,10 +8041,721 @@ public:
                 legacyBuiltinOutputsRewrite.source.find(
                     "out vec4 appgl_BackSecondaryColor;") != std::string::npos,
             "legacy back and secondary color outputs are synthesized");
+        expectCondition(
+            legacyBuiltinOutputsRewrite.source.find(
+                "out vec4 appgl_FrontColorToGeometry;") !=
+                    std::string::npos &&
+                legacyBuiltinOutputsRewrite.source.find(
+                    "out vec4 appgl_FrontColorToTessControl;") !=
+                    std::string::npos &&
+                legacyBuiltinOutputsRewrite.source.find(
+                    "out vec4 appgl_FrontColorToTessEvaluation;") !=
+                    std::string::npos &&
+                legacyBuiltinOutputsRewrite.source.find(
+                    "appgl_FrontColorToGeometry = appgl_FrontColor;") !=
+                    std::string::npos &&
+                legacyBuiltinOutputsRewrite.source.find(
+                    "appgl_BackSecondaryColorToTessControl = "
+                    "appgl_BackSecondaryColor;") != std::string::npos,
+            "legacy vertex colors fan out to standard geometry and tessellation boundaries");
         const char* legacyBuiltinOutputsShader = legacyBuiltinOutputsSource.c_str();
         compileCompatFtransformVertex(
             legacyBuiltinOutputsShader,
             "legacy transform-feedback builtin outputs compile after rewrite");
+
+        // Compatibility secondary-color input lowering. Keep these checks at
+        // the source-rewriter boundary: they pin the conventional attribute
+        // location and the source-profile gate without coupling the scene to
+        // client-array or draw-time state plumbing.
+        static constexpr std::string_view kSecondaryColorAttribDecl =
+            "layout(location = 4) in vec4 appgl_SecondaryColor;";
+        const auto countTextOccurrences = [](std::string_view text,
+                                             std::string_view needle) {
+            std::size_t count = 0;
+            std::size_t cursor = 0;
+            while (!needle.empty() &&
+                   (cursor = text.find(needle, cursor)) !=
+                       std::string_view::npos) {
+                ++count;
+                cursor += needle.size();
+            }
+            return count;
+        };
+        const auto compactShaderText = [](std::string_view text) {
+            std::string compact;
+            compact.reserve(text.size());
+            for (const char ch : text) {
+                if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+                    compact.push_back(ch);
+                }
+            }
+            return compact;
+        };
+        const auto countQualifiedVec4Inputs = [](std::string_view text,
+                                                 std::string_view qualifier,
+                                                 std::string_view name) {
+            std::size_t count = 0;
+            std::size_t lineStart = 0;
+            while (lineStart < text.size()) {
+                const std::size_t lineEnd = text.find('\n', lineStart);
+                const std::string_view line = text.substr(
+                    lineStart,
+                    lineEnd == std::string_view::npos
+                        ? text.size() - lineStart
+                        : lineEnd - lineStart);
+                if (line.find(qualifier) != std::string_view::npos &&
+                    line.find("in") != std::string_view::npos &&
+                    line.find("vec4") != std::string_view::npos &&
+                    line.find(name) != std::string_view::npos &&
+                    line.find(';') != std::string_view::npos) {
+                    ++count;
+                }
+                if (lineEnd == std::string_view::npos) {
+                    break;
+                }
+                lineStart = lineEnd + 1;
+            }
+            return count;
+        };
+
+        struct SecondaryColorVertexRewriteCase {
+            const char* label;
+            const char* source;
+        };
+        static constexpr std::array<SecondaryColorVertexRewriteCase, 3>
+            kSecondaryColorVertexRewriteCases = {{
+                {
+                    "no-version",
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                },
+                {
+                    "GLSL 1.10",
+                    "#version 110\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                },
+                {
+                    "GLSL 1.30",
+                    "#version 130\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                },
+            }};
+        for (const SecondaryColorVertexRewriteCase& rewriteCase :
+             kSecondaryColorVertexRewriteCases) {
+            const CompatShaderRewriteResult rewrite =
+                rewriteCompatShader(rewriteCase.source, GL_VERTEX_SHADER);
+            expectCondition(
+                countTextOccurrences(rewrite.source,
+                                     kSecondaryColorAttribDecl) == 1,
+                std::string(rewriteCase.label) +
+                    " gl_SecondaryColor emits one conventional location-4 input");
+            expectCondition(
+                rewrite.source.find(
+                    "gl_Position = appgl_SecondaryColor") != std::string::npos,
+                std::string(rewriteCase.label) +
+                    " gl_SecondaryColor expression is lowered");
+        }
+
+        const char* secondaryColorAttributeVertexSource =
+            "#version 110\n"
+            "void main() { gl_Position = gl_SecondaryColor; }\n";
+        const char* secondaryColorAttributeFragmentSource =
+            "#version 110\n"
+            "void main() { gl_FragColor = vec4(1.0); }\n";
+        const GLuint secondaryColorAttributeVertex =
+            gl.glCreateShader(GL_VERTEX_SHADER);
+        gl.glShaderSource(secondaryColorAttributeVertex, 1,
+                          &secondaryColorAttributeVertexSource, nullptr);
+        gl.glCompileShader(secondaryColorAttributeVertex);
+        const GLuint secondaryColorAttributeFragment =
+            gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(secondaryColorAttributeFragment, 1,
+                          &secondaryColorAttributeFragmentSource, nullptr);
+        gl.glCompileShader(secondaryColorAttributeFragment);
+        const GLuint secondaryColorAttributeProgram = gl.glCreateProgram();
+        gl.glAttachShader(secondaryColorAttributeProgram,
+                          secondaryColorAttributeVertex);
+        gl.glAttachShader(secondaryColorAttributeProgram,
+                          secondaryColorAttributeFragment);
+        gl.glLinkProgram(secondaryColorAttributeProgram);
+        GLint secondaryColorAttributeLinkStatus = GL_FALSE;
+        gl.glGetProgramiv(secondaryColorAttributeProgram, GL_LINK_STATUS,
+                          &secondaryColorAttributeLinkStatus);
+        expectCondition(
+            secondaryColorAttributeLinkStatus == GL_TRUE,
+            "legacy secondary-color attribute program links");
+
+        GLint secondaryColorActiveAttributes = -1;
+        gl.glGetProgramiv(secondaryColorAttributeProgram,
+                          GL_ACTIVE_ATTRIBUTES,
+                          &secondaryColorActiveAttributes);
+        expectCondition(
+            secondaryColorActiveAttributes == 1,
+            "legacy secondary color contributes exactly one active attribute");
+        char secondaryColorActiveName[64] = {};
+        GLsizei secondaryColorActiveNameLength = 0;
+        GLint secondaryColorActiveSize = 0;
+        GLenum secondaryColorActiveType = 0;
+        if (secondaryColorActiveAttributes > 0) {
+            gl.glGetActiveAttrib(
+                secondaryColorAttributeProgram, 0,
+                static_cast<GLsizei>(sizeof(secondaryColorActiveName)),
+                &secondaryColorActiveNameLength,
+                &secondaryColorActiveSize,
+                &secondaryColorActiveType,
+                secondaryColorActiveName);
+        }
+        expectCondition(
+            std::string_view(secondaryColorActiveName) ==
+                    "gl_SecondaryColor" &&
+                secondaryColorActiveNameLength ==
+                    static_cast<GLsizei>(
+                        std::strlen("gl_SecondaryColor")) &&
+                secondaryColorActiveSize == 1 &&
+                secondaryColorActiveType == GL_FLOAT_VEC4,
+            "active secondary-color attribute exposes only its reserved public name");
+        expectCondition(
+            gl.glGetAttribLocation(secondaryColorAttributeProgram,
+                                   "gl_SecondaryColor") == -1 &&
+                gl.glGetAttribLocation(secondaryColorAttributeProgram,
+                                       "appgl_SecondaryColor") == -1,
+            "secondary-color backend location 4 is not exposed as a generic attribute location");
+
+        const GLuint secondaryColorPublicResource =
+            gl.glGetProgramResourceIndex(
+                secondaryColorAttributeProgram, GL_PROGRAM_INPUT,
+                "gl_SecondaryColor");
+        const GLuint secondaryColorInternalResource =
+            gl.glGetProgramResourceIndex(
+                secondaryColorAttributeProgram, GL_PROGRAM_INPUT,
+                "appgl_SecondaryColor");
+        GLint secondaryColorPublicLocation = 0;
+        if (secondaryColorPublicResource != GL_INVALID_INDEX) {
+            const GLenum property = GL_LOCATION;
+            gl.glGetProgramResourceiv(
+                secondaryColorAttributeProgram, GL_PROGRAM_INPUT,
+                secondaryColorPublicResource, 1, &property, 1,
+                nullptr, &secondaryColorPublicLocation);
+        }
+        expectCondition(
+            secondaryColorPublicResource != GL_INVALID_INDEX &&
+                secondaryColorInternalResource == GL_INVALID_INDEX &&
+                secondaryColorPublicLocation == -1,
+            "program-input reflection retags secondary color without leaking its internal resource");
+        gl.glDeleteProgram(secondaryColorAttributeProgram);
+        gl.glDeleteShader(secondaryColorAttributeFragment);
+        gl.glDeleteShader(secondaryColorAttributeVertex);
+
+        const std::string secondaryColorTokenBoundarySource =
+            "#version 130\n"
+            "// gl_SecondaryColor in a comment must remain source text.\n"
+            "const vec4 user_gl_SecondaryColorSuffix = vec4(0.25);\n"
+            "void main() {\n"
+            "    gl_Position = gl_SecondaryColor + "
+            "user_gl_SecondaryColorSuffix;\n"
+            "}\n";
+        const CompatShaderRewriteResult secondaryColorTokenBoundaryRewrite =
+            rewriteCompatShader(secondaryColorTokenBoundarySource,
+                                GL_VERTEX_SHADER);
+        expectCondition(
+            secondaryColorTokenBoundaryRewrite.source.find(
+                "// gl_SecondaryColor in a comment must remain source text.") !=
+                std::string::npos &&
+                secondaryColorTokenBoundaryRewrite.source.find(
+                    "user_gl_SecondaryColorSuffix") != std::string::npos &&
+                secondaryColorTokenBoundaryRewrite.source.find(
+                    "gl_Position = appgl_SecondaryColor +") !=
+                    std::string::npos,
+            "secondary-color rewrite is code-aware and preserves comments and prefixed identifiers");
+
+        const std::string fragmentColorSelectionSource =
+            "#version 130\n"
+            "void main() {\n"
+            "    gl_FragColor = gl_Color + gl_SecondaryColor;\n"
+            "}\n";
+        const CompatShaderRewriteResult fragmentColorSelectionRewrite =
+            rewriteCompatShader(fragmentColorSelectionSource,
+                                GL_FRAGMENT_SHADER);
+        const std::string& fragmentSelectionText =
+            fragmentColorSelectionRewrite.source;
+        const std::string compactFragmentSelectionText =
+            compactShaderText(fragmentSelectionText);
+        expectCondition(
+            fragmentSelectionText.find("appgl_VertexProgramTwoSide") !=
+                    std::string::npos &&
+                fragmentSelectionText.find("!gl_FrontFacing") !=
+                    std::string::npos &&
+                fragmentSelectionText.find("appgl_FrontColor") !=
+                    std::string::npos &&
+                fragmentSelectionText.find("appgl_BackColor") !=
+                    std::string::npos &&
+                fragmentSelectionText.find("appgl_FrontSecondaryColor") !=
+                    std::string::npos &&
+                fragmentSelectionText.find("appgl_BackSecondaryColor") !=
+                    std::string::npos,
+            "fragment primary and secondary colors synthesize dynamic front/back selection");
+        expectCondition(
+            compactFragmentSelectionText.find(
+                "?appgl_BackColor:appgl_FrontColor") != std::string::npos &&
+                compactFragmentSelectionText.find(
+                    "?appgl_BackSecondaryColor:appgl_FrontSecondaryColor") !=
+                    std::string::npos,
+            "fragment color selectors choose back only on the conditional branch");
+
+        const char* subsetGeometryColorSource =
+            "#version 150 compatibility\n"
+            "layout(triangles) in;\n"
+            "layout(triangle_strip, max_vertices = 3) out;\n"
+            "void main() {\n"
+            "    gl_Position = gl_in[0].gl_Position;\n"
+            "    gl_FrontSecondaryColor = vec4(0.25);\n"
+            "    EmitVertex();\n"
+            "}\n";
+        CompatShaderRewriteResult subsetGeometryColorRewrite =
+            rewriteCompatShader(subsetGeometryColorSource,
+                                GL_GEOMETRY_SHADER);
+        const CompatColorInterfaceLocations subsetLocations = {4, 7, 9, 12};
+        ensureCompatColorProducerOutputs(
+            subsetGeometryColorRewrite.source, true, true, {}, {},
+            subsetLocations);
+        expectCondition(
+            subsetGeometryColorRewrite.source.find(
+                "layout(location = 4) out vec4 appgl_FrontColor;") !=
+                    std::string::npos &&
+                subsetGeometryColorRewrite.source.find(
+                    "layout(location = 7) out vec4 appgl_BackColor;") !=
+                    std::string::npos &&
+                subsetGeometryColorRewrite.source.find(
+                    "layout(location = 9) out vec4 "
+                    "appgl_FrontSecondaryColor;") != std::string::npos &&
+                subsetGeometryColorRewrite.source.find(
+                    "layout(location = 12) out vec4 "
+                    "appgl_BackSecondaryColor;") != std::string::npos &&
+                countTextOccurrences(
+                    subsetGeometryColorRewrite.source,
+                    "appgl_FrontSecondaryColor = vec4(0.25)") == 1 &&
+                subsetGeometryColorRewrite.source.find(
+                    "appgl_FrontColor =") == std::string::npos &&
+                subsetGeometryColorRewrite.source.find(
+                    "appgl_BackColor =") == std::string::npos &&
+                subsetGeometryColorRewrite.source.find(
+                    "appgl_BackSecondaryColor =") == std::string::npos,
+            "subset geometry final producer is declaration-padded without values");
+
+        const char* subsetTessEvaluationColorSource =
+            "#version 150 compatibility\n"
+            "#extension GL_ARB_tessellation_shader: require\n"
+            "layout(quads) in;\n"
+            "void main() {\n"
+            "    gl_Position = gl_in[0].gl_Position;\n"
+            "    gl_BackColor = vec4(0.5);\n"
+            "}\n";
+        CompatShaderRewriteResult subsetTessEvaluationColorRewrite =
+            rewriteCompatShader(subsetTessEvaluationColorSource,
+                                GL_TESS_EVALUATION_SHADER);
+        ensureCompatColorProducerOutputs(
+            subsetTessEvaluationColorRewrite.source, true, true, {}, {},
+            subsetLocations);
+        expectCondition(
+            subsetTessEvaluationColorRewrite.source.find(
+                "layout(location = 4) out vec4 appgl_FrontColor;") !=
+                    std::string::npos &&
+                subsetTessEvaluationColorRewrite.source.find(
+                    "layout(location = 7) out vec4 appgl_BackColor;") !=
+                    std::string::npos &&
+                subsetTessEvaluationColorRewrite.source.find(
+                    "layout(location = 9) out vec4 "
+                    "appgl_FrontSecondaryColor;") != std::string::npos &&
+                subsetTessEvaluationColorRewrite.source.find(
+                    "layout(location = 12) out vec4 "
+                    "appgl_BackSecondaryColor;") != std::string::npos &&
+                countTextOccurrences(
+                    subsetTessEvaluationColorRewrite.source,
+                    "appgl_BackColor = vec4(0.5)") == 1 &&
+                subsetTessEvaluationColorRewrite.source.find(
+                    "appgl_FrontColor =") == std::string::npos &&
+                subsetTessEvaluationColorRewrite.source.find(
+                    "appgl_FrontSecondaryColor =") == std::string::npos &&
+                subsetTessEvaluationColorRewrite.source.find(
+                    "appgl_BackSecondaryColor =") == std::string::npos,
+            "subset tess-eval final producer is declaration-padded without values");
+
+        struct SecondaryColorProfileGateCase {
+            const char* label;
+            const char* source;
+            bool shouldLower;
+        };
+        static constexpr std::array<SecondaryColorProfileGateCase, 12>
+            kSecondaryColorProfileGateCases = {{
+                {
+                    "bare GLSL 1.40",
+                    "#version 140\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+                {
+                    "GLSL 1.40 with GL_ARB_compatibility",
+                    "#version 140\n"
+                    "#extension GL_ARB_compatibility : enable\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    true,
+                },
+                {
+                    "GLSL 1.40 with later compatibility disable",
+                    "#version 140\n"
+                    "#extension GL_ARB_compatibility : enable\n"
+                    "#extension GL_ARB_compatibility : disable\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+                {
+                    "GLSL 1.50 compatibility",
+                    "#version 150 compatibility\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    true,
+                },
+                {
+                    "bare GLSL 1.50",
+                    "#version 150\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+                {
+                    "bare GLSL 1.50 with GL_ARB_compatibility",
+                    "#version 150\n"
+                    "#extension GL_ARB_compatibility : enable\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    true,
+                },
+                {
+                    "bare GLSL 1.50 with spaced compatibility warning",
+                    "#version 150\n"
+                    "# extension GL_ARB_compatibility : warn\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    true,
+                },
+                {
+                    "bare GLSL 1.50 with later all-disable",
+                    "#version 150\n"
+                    "#extension GL_ARB_compatibility : enable\n"
+                    "#extension all : disable\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+                {
+                    "bare GLSL 1.50 with compatibility re-enabled",
+                    "#version 150\n"
+                    "#extension all : disable\n"
+                    "#extension GL_ARB_compatibility : require\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    true,
+                },
+                {
+                    "GLSL 1.50 core",
+                    "#version 150 core\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+                {
+                    "GLSL 1.50 core with GL_ARB_compatibility",
+                    "#version 150 core\n"
+                    "#extension GL_ARB_compatibility : enable\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+                {
+                    "ESSL 3.00 with GL_ARB_compatibility",
+                    "#version 300 es\n"
+                    "#extension GL_ARB_compatibility : enable\n"
+                    "void main() { gl_Position = gl_SecondaryColor; }\n",
+                    false,
+                },
+            }};
+        for (const SecondaryColorProfileGateCase& gateCase :
+             kSecondaryColorProfileGateCases) {
+            const CompatShaderRewriteResult rewrite =
+                rewriteCompatShader(gateCase.source, GL_VERTEX_SHADER);
+            const bool didLower =
+                rewrite.source.find(kSecondaryColorAttribDecl) !=
+                std::string::npos;
+            expectCondition(
+                didLower == gateCase.shouldLower,
+                std::string(gateCase.label) +
+                    " applies the gl_SecondaryColor compatibility gate");
+        }
+
+        const std::string orderedCompatibilityPreambleSource =
+            "#version 150\n"
+            "#extension GL_ARB_compatibility : enable\n"
+            "#extension GL_ARB_shader_bit_encoding : enable\n"
+            "void main() { gl_Position = gl_SecondaryColor; }\n";
+        const CompatShaderRewriteResult orderedCompatibilityPreambleRewrite =
+            rewriteCompatShader(orderedCompatibilityPreambleSource,
+                                GL_VERTEX_SHADER);
+        const std::size_t laterExtensionPos =
+            orderedCompatibilityPreambleRewrite.source.find(
+                "#extension GL_ARB_shader_bit_encoding : enable");
+        const std::size_t secondaryDeclarationPos =
+            orderedCompatibilityPreambleRewrite.source.find(
+                kSecondaryColorAttribDecl);
+        expectCondition(
+            laterExtensionPos != std::string::npos &&
+                secondaryDeclarationPos != std::string::npos &&
+                laterExtensionPos < secondaryDeclarationPos,
+            "stripped GL_ARB_compatibility keeps synthesized declarations after later extensions");
+
+        const std::string compatibilityColorCommentSource =
+            "#version 150 compatibility\n"
+            "// gl_Color gl_SecondaryColor gl_FrontColor gl_BackColor\n"
+            "/* gl_FrontSecondaryColor gl_BackSecondaryColor */\n"
+            "const vec4 user_gl_FrontColorSuffix = vec4(0.0);\n"
+            "void main() { gl_Position = user_gl_FrontColorSuffix; }\n";
+        const CompatShaderRewriteResult compatibilityColorCommentRewrite =
+            rewriteCompatShader(compatibilityColorCommentSource,
+                                GL_VERTEX_SHADER);
+        expectCondition(
+            !compatibilityColorCommentRewrite.legacy.attrColor &&
+                !compatibilityColorCommentRewrite.legacy.attrSecondaryColor &&
+                !compatibilityColorCommentRewrite.legacy.usesFrontColor &&
+                !compatibilityColorCommentRewrite.legacy.usesBackColor &&
+                !compatibilityColorCommentRewrite.legacy
+                     .usesFrontSecondaryColor &&
+                !compatibilityColorCommentRewrite.legacy
+                     .usesBackSecondaryColor,
+            "comments and prefixed identifiers do not activate any legacy color scan");
+
+        const std::string coreLegacyColorSource =
+            "#version 330 core\n"
+            "void main() {\n"
+            "    gl_Position = gl_Color + gl_SecondaryColor;\n"
+            "    gl_FrontColor = gl_BackColor;\n"
+            "    gl_FrontSecondaryColor = gl_BackSecondaryColor;\n"
+            "}\n";
+        const CompatShaderRewriteResult coreLegacyColorRewrite =
+            rewriteCompatShader(coreLegacyColorSource, GL_VERTEX_SHADER);
+        expectCondition(
+            !coreLegacyColorRewrite.legacy.attrColor &&
+                !coreLegacyColorRewrite.legacy.attrSecondaryColor &&
+                !coreLegacyColorRewrite.legacy.usesFrontColor &&
+                !coreLegacyColorRewrite.legacy.usesBackColor &&
+                !coreLegacyColorRewrite.legacy.usesFrontSecondaryColor &&
+                !coreLegacyColorRewrite.legacy.usesBackSecondaryColor &&
+                coreLegacyColorRewrite.source == coreLegacyColorSource,
+            "core-profile primary, secondary, front, and back colors remain illegal and untouched");
+
+        const std::string coreFragmentLegacyColorSource =
+            "#version 330 core\n"
+            "out vec4 resultColor;\n"
+            "void main() { resultColor = gl_Color + gl_SecondaryColor; }\n";
+        const CompatShaderRewriteResult coreFragmentLegacyColorRewrite =
+            rewriteCompatShader(coreFragmentLegacyColorSource,
+                                GL_FRAGMENT_SHADER);
+        expectCondition(
+            !coreFragmentLegacyColorRewrite.legacy.usesFragmentColor &&
+                !coreFragmentLegacyColorRewrite.legacy
+                     .usesFragmentSecondaryColor &&
+                coreFragmentLegacyColorRewrite.source ==
+                    coreFragmentLegacyColorSource,
+            "core-profile fragment colors remain illegal and untouched");
+
+        // GLSL compatibility permits the built-in color varyings to be
+        // redeclared with an interpolation qualifier. The lowering must
+        // carry that qualifier to both front and back transport values and
+        // suppress its otherwise-unqualified synthesized declarations.
+        static constexpr std::array<std::string_view, 3>
+            kColorInterpolationQualifiers = {
+                "flat",
+                "smooth",
+                "noperspective",
+            };
+        for (const std::string_view qualifier :
+             kColorInterpolationQualifiers) {
+            const std::string source =
+                "#version 150 compatibility\n" +
+                std::string(qualifier) + " in vec4 gl_Color;\n" +
+                std::string(qualifier) +
+                " in vec4 gl_SecondaryColor;\n"
+                "void main() {\n"
+                "    gl_FragColor = gl_Color + gl_SecondaryColor;\n"
+                "}\n";
+            const CompatShaderRewriteResult rewrite =
+                rewriteCompatShader(source, GL_FRAGMENT_SHADER);
+            static constexpr std::array<std::string_view, 4>
+                kExpectedColorInputs = {
+                    "appgl_FrontColor",
+                    "appgl_BackColor",
+                    "appgl_FrontSecondaryColor",
+                    "appgl_BackSecondaryColor",
+            };
+            for (const std::string_view inputName : kExpectedColorInputs) {
+                expectCondition(
+                    countQualifiedVec4Inputs(rewrite.source,
+                                             qualifier,
+                                             inputName) == 1,
+                    std::string(qualifier) +
+                        " color redeclaration is preserved exactly once on " +
+                        std::string(inputName));
+            }
+            expectCondition(
+                rewrite.source.find(std::string(qualifier) +
+                                    " in vec4 gl_Color;") ==
+                        std::string::npos &&
+                    rewrite.source.find(std::string(qualifier) +
+                                        " in vec4 gl_SecondaryColor;") ==
+                        std::string::npos,
+                std::string(qualifier) +
+                    " legacy color redeclarations are removed after lowering");
+        }
+
+        // Piglit's vertex-program-two-side coverage emits the four legacy
+        // color channels from every programmable pre-fragment stage. Pin
+        // both the ordinary varying transport and real glslang acceptance
+        // for its gl_in/gl_out source shapes.
+        const char* standardGeometryColorSource =
+            "#version 150 compatibility\n"
+            "layout(triangles) in;\n"
+            "layout(triangle_strip, max_vertices = 3) out;\n"
+            "void main() {\n"
+            "    for (int i = 0; i < 3; ++i) {\n"
+            "        gl_Position = gl_in[i].gl_Position;\n"
+            "        gl_FrontColor = gl_in[i].gl_FrontColor;\n"
+            "        gl_BackColor = gl_in[i].gl_BackColor;\n"
+            "        gl_FrontSecondaryColor = "
+            "gl_in[i].gl_FrontSecondaryColor;\n"
+            "        gl_BackSecondaryColor = "
+            "gl_in[i].gl_BackSecondaryColor;\n"
+            "        EmitVertex();\n"
+            "    }\n"
+            "    EndPrimitive();\n"
+            "}\n";
+        const CompatShaderRewriteResult standardGeometryColorRewrite =
+            rewriteCompatShader(standardGeometryColorSource,
+                                GL_GEOMETRY_SHADER);
+        const std::string compactGeometryColorText =
+            compactShaderText(standardGeometryColorRewrite.source);
+        expectCondition(
+            standardGeometryColorRewrite.source.find(
+                "in vec4 appgl_FrontColorToGeometry[];") !=
+                    std::string::npos &&
+                standardGeometryColorRewrite.source.find(
+                    "in vec4 appgl_BackSecondaryColorToGeometry[];") !=
+                    std::string::npos &&
+                standardGeometryColorRewrite.source.find(
+                    "out vec4 appgl_FrontColor;") != std::string::npos &&
+                standardGeometryColorRewrite.source.find(
+                    "out vec4 appgl_BackSecondaryColor;") !=
+                    std::string::npos &&
+                compactGeometryColorText.find(
+                    "appgl_FrontColor=appgl_FrontColorToGeometry[i]") !=
+                    std::string::npos &&
+                compactGeometryColorText.find(
+                    "appgl_BackSecondaryColor="
+                    "appgl_BackSecondaryColorToGeometry[i]") !=
+                    std::string::npos &&
+                standardGeometryColorRewrite.source.find(
+                    "gl_in[i].gl_FrontColor") == std::string::npos,
+            "standard geometry gl_in colors lower to the VS-to-GS boundary");
+        compileCompatStage(
+            GL_GEOMETRY_SHADER, standardGeometryColorSource,
+            "standard geometry legacy front/back colors compile after transport lowering");
+
+        const char* tessControlColorSource =
+            "#version 150 compatibility\n"
+            "#extension GL_ARB_tessellation_shader: require\n"
+            "layout(vertices = 4) out;\n"
+            "void main() {\n"
+            "    gl_out[gl_InvocationID].gl_Position = "
+            "gl_in[gl_InvocationID].gl_Position;\n"
+            "    gl_TessLevelOuter = "
+            "float[4](1.0, 1.0, 1.0, 1.0);\n"
+            "    gl_TessLevelInner = float[2](1.0, 1.0);\n"
+            "    gl_out[gl_InvocationID].gl_FrontColor = "
+            "gl_in[gl_InvocationID].gl_FrontColor;\n"
+            "    gl_out[gl_InvocationID].gl_BackColor = "
+            "gl_in[gl_InvocationID].gl_BackColor;\n"
+            "    gl_out[gl_InvocationID].gl_FrontSecondaryColor = "
+            "gl_in[gl_InvocationID].gl_FrontSecondaryColor;\n"
+            "    gl_out[gl_InvocationID].gl_BackSecondaryColor = "
+            "gl_in[gl_InvocationID].gl_BackSecondaryColor;\n"
+            "}\n";
+        const CompatShaderRewriteResult tessControlColorRewrite =
+            rewriteCompatShader(tessControlColorSource,
+                                GL_TESS_CONTROL_SHADER);
+        const std::string compactTessControlColorText =
+            compactShaderText(tessControlColorRewrite.source);
+        expectCondition(
+            tessControlColorRewrite.source.find(
+                "in vec4 appgl_FrontColorToTessControl[];") !=
+                    std::string::npos &&
+                tessControlColorRewrite.source.find(
+                    "out vec4 appgl_FrontColorToTessEvaluation[];") !=
+                    std::string::npos &&
+                tessControlColorRewrite.source.find(
+                    "in vec4 appgl_BackSecondaryColorToTessControl[];") !=
+                    std::string::npos &&
+                tessControlColorRewrite.source.find(
+                    "out vec4 appgl_BackSecondaryColorToTessEvaluation[];") !=
+                    std::string::npos &&
+                compactTessControlColorText.find(
+                    "appgl_FrontColorToTessEvaluation[gl_InvocationID]="
+                    "appgl_FrontColorToTessControl[gl_InvocationID]") !=
+                    std::string::npos &&
+                tessControlColorRewrite.source.find(
+                    "gl_out[gl_InvocationID].gl_FrontColor") ==
+                    std::string::npos,
+            "tess-control gl_in/gl_out colors lower across distinct stage boundaries");
+        compileCompatStage(
+            GL_TESS_CONTROL_SHADER, tessControlColorSource,
+            "tess-control legacy front/back colors compile after transport lowering");
+
+        const char* tessEvaluationColorSource =
+            "#version 150 compatibility\n"
+            "#extension GL_ARB_tessellation_shader: require\n"
+            "layout(quads) in;\n"
+            "#define INTERP_QUAD(INi, OUT) do { \\\n"
+            "    vec4 v[4]; \\\n"
+            "    for (int i = 0; i < 4; ++i) v[i] = INi; \\\n"
+            "    OUT = mix(mix(v[0], v[1], gl_TessCoord[0]), \\\n"
+            "              mix(v[2], v[3], gl_TessCoord[0]), \\\n"
+            "              gl_TessCoord[1]); \\\n"
+            "} while (false);\n"
+            "void main() {\n"
+            "    INTERP_QUAD(gl_in[i].gl_Position, gl_Position);\n"
+            "    INTERP_QUAD(gl_in[0].gl_FrontColor, gl_FrontColor);\n"
+            "    INTERP_QUAD(gl_in[0].gl_BackColor, gl_BackColor);\n"
+            "    INTERP_QUAD(gl_in[0].gl_FrontSecondaryColor, "
+            "gl_FrontSecondaryColor);\n"
+            "    INTERP_QUAD(gl_in[0].gl_BackSecondaryColor, "
+            "gl_BackSecondaryColor);\n"
+            "}\n";
+        const CompatShaderRewriteResult tessEvaluationColorRewrite =
+            rewriteCompatShader(tessEvaluationColorSource,
+                                GL_TESS_EVALUATION_SHADER);
+        const std::string compactTessEvaluationColorText =
+            compactShaderText(tessEvaluationColorRewrite.source);
+        expectCondition(
+            tessEvaluationColorRewrite.source.find("#version 420 core") !=
+                    std::string::npos &&
+                tessEvaluationColorRewrite.source.find(
+                "in vec4 appgl_FrontColorToTessEvaluation[];") !=
+                    std::string::npos &&
+                tessEvaluationColorRewrite.source.find(
+                    "out vec4 appgl_FrontColor;") != std::string::npos &&
+                tessEvaluationColorRewrite.source.find(
+                    "out vec4 appgl_FrontColorToGeometry;") !=
+                    std::string::npos &&
+                compactTessEvaluationColorText.find(
+                    "INTERP_QUAD(appgl_FrontColorToTessEvaluation[0],"
+                    "appgl_FrontColor)") !=
+                    std::string::npos &&
+                compactTessEvaluationColorText.find(
+                    "appgl_BackSecondaryColorToGeometry="
+                    "appgl_BackSecondaryColor") != std::string::npos &&
+                tessEvaluationColorRewrite.source.find(
+                    "gl_in[0].gl_FrontColor") == std::string::npos,
+            "tess-evaluation colors lower from TCS input and fan out to a following GS");
+        compileCompatStage(
+            GL_TESS_EVALUATION_SHADER, tessEvaluationColorSource,
+            "tess-evaluation legacy front/back colors compile after transport lowering");
 
         const char* mixedClipOutputsSource =
             "#version 130\n"
@@ -16829,16 +17767,69 @@ TestResult runLazyShadowInterleavedGpuProbe() {
         gl.glDrawArrays(GL_TRIANGLES, 0, 3);
         gl.glBindVertexArray(0);
         gl.glUseProgram(0);
+        // Follow the GPU-only draw with a partial CPU-shadow-capable draw.
+        // The latter must not promote stale clear bytes back to an
+        // authoritative whole-framebuffer mirror and hide the green draw.
+        glBegin(GL_TRIANGLES);
+        glColor3f(1.0f, 0.0f, 0.0f);
+        glVertex2f(-0.9f, -0.9f);
+        glVertex2f(-0.3f, -0.9f);
+        glVertex2f(-0.9f, -0.3f);
+        glEnd();
+
+        using VertexPointerFn =
+            void(APIENTRY *)(GLint, GLenum, GLsizei, const void*);
+        using ClientStateFn = void(APIENTRY *)(GLenum);
+        const auto vertexPointer = reinterpret_cast<VertexPointerFn>(
+            appglGetProcAddress("glVertexPointer"));
+        const auto enableClientState = reinterpret_cast<ClientStateFn>(
+            appglGetProcAddress("glEnableClientState"));
+        const auto disableClientState = reinterpret_cast<ClientStateFn>(
+            appglGetProcAddress("glDisableClientState"));
+        expectCondition(
+            vertexPointer != nullptr && enableClientState != nullptr &&
+                disableClientState != nullptr,
+            "lazy-shadow interleaved: legacy client-array entry points resolve");
+        constexpr GLenum kVertexArray = 0x8074;
+        const GLfloat rectVertices[] = {
+            -0.9f, 0.3f,
+            -0.3f, 0.3f,
+            -0.9f, 0.9f,
+            -0.3f, 0.9f,
+        };
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        vertexPointer(2, GL_FLOAT, 0, rectVertices);
+        enableClientState(kVertexArray);
+        gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        disableClientState(kVertexArray);
         std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
         gl.glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-        expectApproxByte(px[1], 255u, 4u, "lazy-shadow interleaved: GPU draw wins over deferred clear");
+        expectApproxByte(
+            px[1], 255u, 4u,
+            "lazy-shadow interleaved: prior GPU draw survives partial immediate draw");
+        px = {0, 0, 0, 0};
+        gl.glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(
+            px[0], 255u, 4u,
+            "lazy-shadow interleaved: partial immediate draw reaches framebuffer");
+        expectApproxByte(
+            px[1], 0u, 4u,
+            "lazy-shadow interleaved: partial immediate draw keeps red color");
+        px = {0, 0, 0, 0};
+        gl.glReadPixels(2, 13, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(
+            px[0], 255u, 4u,
+            "lazy-shadow interleaved: partial client-array rectangle reaches framebuffer");
+        expectApproxByte(
+            px[1], 0u, 4u,
+            "lazy-shadow interleaved: partial client-array rectangle keeps red color");
         expectGLError(gl, GL_NO_ERROR, "lazy-shadow interleaved");
         gl.glDeleteVertexArrays(1, &vao);
         gl.glDeleteBuffers(1, &vbo);
         gl.glDeleteProgram(program);
     });
     if (result.status == "passed") {
-        result.message = "deferred-clear/GPU-draw/readback ordering correct (refresh-from-Metal supersedes)";
+        result.message = "partial immediate and client-array draws preserve prior GPU-only FB0 content and remain visible at readback";
     }
     return result;
 }

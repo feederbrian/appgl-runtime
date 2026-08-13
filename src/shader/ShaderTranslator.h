@@ -215,6 +215,17 @@ struct LinkedProgramSpirv {
     std::string linkLog;
 };
 
+// Link/mapIO result for a final pre-fragment producer (VS, TES, or GS)
+// paired directly with its fragment consumer. Used by compatibility
+// interface repair when intermediate stages make the ordinary VS/FS pair an
+// inaccurate location oracle.
+struct LinkedStagePairSpirv {
+    std::vector<std::uint32_t> producerSpirv;
+    std::vector<std::uint32_t> fragmentSpirv;
+    bool linkSucceeded = false;
+    std::string linkLog;
+};
+
 // Tessellation execution mode properties extracted from SPIR-V.
 struct TessellationModes {
     int outputVertices = 0;           // from TCS ExecutionModeOutputVertices
@@ -512,6 +523,12 @@ public:
                                            std::string_view fragmentSource,
                                            int version,
                                            std::string* log) const;
+    LinkedStagePairSpirv compileGLSLStagePair(
+        std::string_view producerSource,
+        GLenum producerStage,
+        std::string_view fragmentSource,
+        int version,
+        std::string* log) const;
 };
 
 }  // namespace appgl

@@ -48,6 +48,10 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->pipelineEmulationStageUniformValues;
     const auto priorPipelineEmulationStageUniformsValid =
         programObject->pipelineEmulationStageUniformsValid;
+    const auto priorSynthesizedMatrixSlots =
+        programObject->synthesizedMatrixSlots;
+    const GLint priorPipelineEmulationFragmentVertexProgramTwoSideSlot =
+        programObject->pipelineEmulationFragmentVertexProgramTwoSideSlot;
     const GLbitfield priorLinkedStageBits = programObject->linkedStageBits;
     const std::uint32_t priorAdvancedBlendSupportMask =
         programObject->advancedBlendSupportMask;
@@ -229,6 +233,9 @@ bool GLContext::linkProgram(GLuint program) {
             priorPipelineEmulationStageUniformValues;
         programObject->pipelineEmulationStageUniformsValid =
             priorPipelineEmulationStageUniformsValid;
+        programObject->synthesizedMatrixSlots = priorSynthesizedMatrixSlots;
+        programObject->pipelineEmulationFragmentVertexProgramTwoSideSlot =
+            priorPipelineEmulationFragmentVertexProgramTwoSideSlot;
         programObject->linkedStageBits = priorLinkedStageBits;
         programObject->advancedBlendSupportMask = priorAdvancedBlendSupportMask;
         programObject->advancedBlendSupportAll = priorAdvancedBlendSupportAll;
@@ -315,6 +322,7 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->pipelineEmulationStageUniformValues[stage].clear();
         programObject->pipelineEmulationStageUniformsValid[stage] = false;
     }
+    programObject->pipelineEmulationFragmentVertexProgramTwoSideSlot = -1;
     programObject->linkLog.clear();
     programObject->lastLinkSucceeded = false;
     programObject->linked = false;
@@ -419,6 +427,8 @@ bool GLContext::linkProgram(GLuint program) {
     std::vector<GLShaderObject*> computeShaderObjects;
     GLShaderObject geometryShader4LinkObject;
     GLShaderObject geometryShader4VertexLinkObject;
+    GLShaderObject compatColorFinalProducerLinkObject;
+    GLShaderObject compatColorFragmentLinkObject;
     GeometryShader4LinkPlan geometryShader4LinkPlan;
     GeometryShader4LegacyInputUsage geometryShader4LegacyInputs;
     bool hasGeometryShader4LinkView = false;
@@ -1750,6 +1760,8 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kFogScale);
         programObject->synthesizedMatrixSlots.legacyClipPlanes =
             findLocByName(SUN::kLegacyClipPlanes);
+        programObject->synthesizedMatrixSlots.vertexProgramTwoSide =
+            findLocByName(SUN::kVertexProgramTwoSide);
         programObject->shaderDrawIDUniformLocation =
             findLocByName("_appgl_DrawID");
         programObject->shaderBaseVertexUniformLocation =
@@ -3900,7 +3912,10 @@ bool GLContext::linkProgram(GLuint program) {
                              // canonical name (e.g. "gl_SampleMask[0]")
             table.push_back(std::move(entry));
         };
-        auto addActiveBuiltInAttribute = [&](const std::string& name, GLenum type) {
+        auto addActiveBuiltInAttribute = [&](const std::string& name,
+                                             GLenum type,
+                                             GLint backendLocation = -1,
+                                             bool conventional = false) {
             for (const auto& attrib : programObject->attributes) {
                 if (attrib.name == name) {
                     return;
@@ -3909,7 +3924,9 @@ bool GLContext::linkProgram(GLuint program) {
             GLProgramAttributeInfo attrib;
             attrib.name = name;
             attrib.type = type;
-            attrib.location = -1;
+            attrib.location = backendLocation;
+            attrib.locationExplicit = backendLocation >= 0;
+            attrib.conventionalBuiltin = conventional;
             attrib.arraySize = 1;
             attrib.isArray = false;
             programObject->attributes.push_back(std::move(attrib));
@@ -3924,6 +3941,59 @@ bool GLContext::linkProgram(GLuint program) {
         }
         if (vsShader != nullptr) {
             const auto& src = vsShader->source;
+            const CompatShaderRewriteResult legacyVertexView =
+                rewriteCompatShader(src, GL_VERTEX_SHADER);
+            if (legacyVertexView.legacy.attrSecondaryColor) {
+                // The compat rewrite has already reflected its backend
+                // location-4 input as `appgl_SecondaryColor`. Retag that
+                // entry in place for the GL-facing active-attribute view;
+                // appending a second synthetic entry would double
+                // GL_ACTIVE_ATTRIBUTES and leak the internal name. Keep the
+                // backend location on the attribute record for vertex
+                // binding, while conventionalBuiltin makes
+                // glGetAttribLocation("gl_SecondaryColor") return -1.
+                bool exposedAttribute = false;
+                for (auto& attrib : programObject->attributes) {
+                    if (attrib.name != "appgl_SecondaryColor" &&
+                        attrib.name != "_appgl_SecondaryColor" &&
+                        attrib.name != "gl_SecondaryColor") {
+                        continue;
+                    }
+                    attrib.name = "gl_SecondaryColor";
+                    attrib.type = GL_FLOAT_VEC4;
+                    attrib.location = 4;
+                    attrib.locationExplicit = true;
+                    attrib.conventionalBuiltin = true;
+                    exposedAttribute = true;
+                    break;
+                }
+                if (!exposedAttribute) {
+                    addActiveBuiltInAttribute(
+                        "gl_SecondaryColor", GL_FLOAT_VEC4, 4, true);
+                }
+
+                bool exposedResource = false;
+                for (auto& input : programObject->resourceInputs) {
+                    if (input.name != "appgl_SecondaryColor" &&
+                        input.name != "_appgl_SecondaryColor" &&
+                        input.name != "gl_SecondaryColor") {
+                        continue;
+                    }
+                    input.name = "gl_SecondaryColor";
+                    input.type = GL_FLOAT_VEC4;
+                    input.location = -1;
+                    input.arraySize = 1;
+                    input.isArray = false;
+                    input.referencedBy |= 0x01;  // vertex
+                    exposedResource = true;
+                    break;
+                }
+                if (!exposedResource) {
+                    addBuiltIn(programObject->resourceInputs,
+                        "gl_SecondaryColor", GL_FLOAT_VEC4,
+                        0x01 /*vertex*/);
+                }
+            }
             if (sourceUsesIdent(src, "gl_VertexID")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_VertexID", GL_INT, 0x01 /*vertex*/);
@@ -4656,6 +4726,156 @@ bool GLContext::linkProgram(GLuint program) {
     const bool fp64EmulationAvailable =
         extensions::fp64::shaderTranslationSupported(fp64ExtensionContext);
 
+    // R08 secondary/two-side: fragment compatibility lowering consumes a
+    // complete four-slot front/back primary/secondary interface even when a
+    // Piglit producer writes only one requested member. Per-shader compilation
+    // cannot see that consumer, so rebuild only the actual final GLSL producer
+    // (GS, otherwise TES, otherwise VS) with declaration-only padding at the
+    // locations coordinated with the rewritten fragment inputs. Do not append
+    // assignments: unwritten legacy outputs retain their ordinary undefined
+    // value semantics.
+    bool hasCompatColorFinalProducerPair = false;
+    auto padCompatColorFinalProducer = [&]() -> bool {
+        if (fragmentShader == nullptr || fragmentShader->isSpirvBinary) {
+            return true;
+        }
+        const CompatShaderRewriteResult fsRewrite =
+            rewriteCompatShader(fragmentShader->source, GL_FRAGMENT_SHADER);
+        const bool needsPrimary = fsRewrite.legacy.usesFragmentColor;
+        const bool needsSecondary =
+            fsRewrite.legacy.usesFragmentSecondaryColor;
+        if (!needsPrimary && !needsSecondary) {
+            return true;
+        }
+
+        GLShaderObject* producer = geometryShader != nullptr
+            ? geometryShader
+            : (tessEvalShader != nullptr ? tessEvalShader : vertexShader);
+        if (producer == nullptr || producer->isSpirvBinary) {
+            return true;
+        }
+
+        const GLenum producerStage = producer->stage;
+        CompatShaderRewriteResult producerRewrite;
+        std::string paddedSource;
+        if (hasGeometryShader4LinkView &&
+            producerStage == GL_GEOMETRY_SHADER) {
+            paddedSource = producer->source;
+        } else {
+            producerRewrite = rewriteCompatShader(
+                producer->source, producerStage);
+            paddedSource = producerRewrite.didRewrite
+                ? std::move(producerRewrite.source)
+                : producer->source;
+        }
+        // First pad declarations without forcing locations. Pair the actual
+        // final producer directly with the rewritten fragment shader in one
+        // glslang program; link+mapIO then assigns a collision-free shared
+        // location table that includes unrelated user varyings.
+        ensureCompatColorProducerOutputs(
+            paddedSource, needsPrimary, needsSecondary,
+            fsRewrite.legacy.fragmentColorInterpolationQualifier,
+            fsRewrite.legacy.fragmentSecondaryColorInterpolationQualifier);
+        paddedSource = rewriteShaderDrawParametersForSpirv(
+            paddedSource, producerStage);
+        paddedSource = rewriteUnsizedUniformArrayInitializersForSpirv(
+            paddedSource);
+        paddedSource = rewriteImageSamplesForSpirv(paddedSource);
+        paddedSource = rewriteSsboConsecutiveRuntimeArraysForSpirv(
+            paddedSource);
+        paddedSource = rewrite420packImplicitConversionsForSpirv(
+            paddedSource);
+        paddedSource = rewrite420packQualifierOrderInvariantInputsForSpirv(
+            paddedSource);
+        if (producerStage == GL_VERTEX_SHADER) {
+            paddedSource = rewriteDuplicateVertexInputLocationsForSpirv(
+                std::move(paddedSource));
+        }
+
+        std::string fragmentLinkSource = fsRewrite.didRewrite
+            ? fsRewrite.source
+            : fragmentShader->source;
+        fragmentLinkSource = rewriteShaderDrawParametersForSpirv(
+            fragmentLinkSource, GL_FRAGMENT_SHADER);
+        fragmentLinkSource = rewriteUnsizedUniformArrayInitializersForSpirv(
+            fragmentLinkSource);
+        fragmentLinkSource = rewriteImageSamplesForSpirv(fragmentLinkSource);
+        fragmentLinkSource = rewriteSsboConsecutiveRuntimeArraysForSpirv(
+            fragmentLinkSource);
+        fragmentLinkSource = rewrite420packImplicitConversionsForSpirv(
+            fragmentLinkSource);
+        fragmentLinkSource =
+            rewrite420packQualifierOrderInvariantInputsForSpirv(
+                fragmentLinkSource);
+
+        std::string compileLog;
+        LinkedStagePairSpirv linkedPair = translator.compileGLSLStagePair(
+            paddedSource, producerStage, fragmentLinkSource, 330, &compileLog);
+        if (!linkedPair.linkSucceeded) {
+            programObject->linkLog =
+                "compatibility color final-producer padding failed";
+            if (!compileLog.empty()) {
+                programObject->linkLog += ": " + compileLog;
+            }
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-compat-color-final-producer", "link",
+                quickHash(paddedSource), linkVertexHash, linkFragmentHash,
+                programObject->linkLog, "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+        GLShaderObject* sharedProducer = producer;
+        compatColorFinalProducerLinkObject = *sharedProducer;
+        compatColorFinalProducerLinkObject.spirv =
+            std::move(linkedPair.producerSpirv);
+        compatColorFinalProducerLinkObject.compiled = true;
+        compatColorFinalProducerLinkObject.compileLog.clear();
+        producer = &compatColorFinalProducerLinkObject;
+        auto replaceFinalProducerView = [&](GLShaderObject*& selected,
+                                            std::vector<GLShaderObject*>& stages) {
+            if (selected != sharedProducer) {
+                return;
+            }
+            selected = producer;
+            stages.clear();
+            stages.push_back(producer);
+        };
+        replaceFinalProducerView(geometryShader, geometryShaderObjects);
+        replaceFinalProducerView(tessEvalShader, tessEvalShaderObjects);
+        replaceFinalProducerView(vertexShader, vertexShaderObjects);
+        for (GLShaderObject*& stage : attachedShaderObjects) {
+            if (stage == sharedProducer) {
+                stage = producer;
+            }
+        }
+        GLShaderObject* sharedFragment = fragmentShader;
+        compatColorFragmentLinkObject = *sharedFragment;
+        compatColorFragmentLinkObject.spirv =
+            std::move(linkedPair.fragmentSpirv);
+        compatColorFragmentLinkObject.compiled = true;
+        compatColorFragmentLinkObject.compileLog.clear();
+        fragmentShader = &compatColorFragmentLinkObject;
+        fragmentShaderObjects.clear();
+        fragmentShaderObjects.push_back(fragmentShader);
+        for (GLShaderObject*& stage : attachedShaderObjects) {
+            if (stage == sharedFragment) {
+                stage = fragmentShader;
+            }
+        }
+        hasCompatColorFinalProducerPair = true;
+        Runtime::shared().recordShaderTranslation({
+            programTag + "-compat-color-final-producer", "link",
+            quickHash(paddedSource), linkVertexHash, linkFragmentHash,
+            "ok", "", true
+        });
+        return true;
+    };
+
+    if (!padCompatColorFinalProducer()) {
+        return false;
+    }
+
     auto linkSameStageSourceObjects =
         [&](std::vector<GLShaderObject*>& stageObjects,
             GLenum stage,
@@ -5242,10 +5462,16 @@ bool GLContext::linkProgram(GLuint program) {
             rewriteCompatShader(vsStage->source, GL_VERTEX_SHADER);
         CompatShaderRewriteResult fsRewrite =
             rewriteCompatShader(fsStage->source, GL_FRAGMENT_SHADER);
-        const std::string& vsLinkSource =
+        std::string vsLinkSource =
             vsRewrite.didRewrite ? vsRewrite.source : vsStage->source;
-        const std::string& fsLinkSource =
+        std::string fsLinkSource =
             fsRewrite.didRewrite ? fsRewrite.source : fsStage->source;
+        ensureCompatColorProducerOutputs(
+            vsLinkSource,
+            fsRewrite.legacy.usesFragmentColor,
+            fsRewrite.legacy.usesFragmentSecondaryColor,
+            fsRewrite.legacy.fragmentColorInterpolationQualifier,
+            fsRewrite.legacy.fragmentSecondaryColorInterpolationQualifier);
         std::string vsDrawIDLinkSource =
             rewriteShaderDrawParametersForSpirv(vsLinkSource, GL_VERTEX_SHADER);
         std::string fsDrawIDLinkSource =
@@ -5401,7 +5627,9 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexShader != nullptr && fragmentShader != nullptr &&
                 !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
             LinkedProgramSpirv linked = canLinkGlslSources
-                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                ? (!hasCompatColorFinalProducerPair
+                       ? compileLinkedVsFs(vertexShader, fragmentShader)
+                       : LinkedProgramSpirv{})
                 : LinkedProgramSpirv{};
             // Sprint 8 B Cluster F F1 Day 7 (CKPT79): cross-stage link-
             // validation gating. When glslang's link() rejects with a
@@ -5422,7 +5650,9 @@ bool GLContext::linkProgram(GLuint program) {
                     lg.find("Layout location qualifier must match") != std::string::npos ||
                     lg.find("Layout offset qualifier must match")   != std::string::npos ||
                     lg.find("Layout component qualifier must match") != std::string::npos ||
-                    lg.find("Layout index qualifier must match")    != std::string::npos;
+                    lg.find("Layout index qualifier must match")    != std::string::npos ||
+                    lg.find("Interpolation and auxiliary storage qualifiers must match") !=
+                        std::string::npos;
                 if (hasSpecMismatch) {
                     APPGL_LOG(SHADER, @"[GL] linkProgram-fail program=%u reason=cross-stage-spec-mismatch log=%s",
                           program, lg.c_str());
@@ -5734,6 +5964,12 @@ bool GLContext::linkProgram(GLuint program) {
                     std::string fsLinkSource = fsRewrite.didRewrite
                         ? std::move(fsRewrite.source)
                         : std::string(kCompatVertexOnlyFragment);
+                    ensureCompatColorProducerOutputs(
+                        vsLinkSource,
+                        fsRewrite.legacy.usesFragmentColor,
+                        fsRewrite.legacy.usesFragmentSecondaryColor,
+                        fsRewrite.legacy.fragmentColorInterpolationQualifier,
+                        fsRewrite.legacy.fragmentSecondaryColorInterpolationQualifier);
                     vsLinkSource = rewriteShaderDrawParametersForSpirv(
                         vsLinkSource, GL_VERTEX_SHADER);
                     fsLinkSource = rewriteShaderDrawParametersForSpirv(
@@ -6130,6 +6366,12 @@ bool GLContext::linkProgram(GLuint program) {
                         "vec4(piglit_texcoord, 0.0, 1.0);\n";
                 }
                 compatFragmentOnlyVertexSource += "}\n";
+                ensureCompatColorProducerOutputs(
+                    compatFragmentOnlyVertexSource,
+                    fsRewrite.legacy.usesFragmentColor,
+                    fsRewrite.legacy.usesFragmentSecondaryColor,
+                    fsRewrite.legacy.fragmentColorInterpolationQualifier,
+                    fsRewrite.legacy.fragmentSecondaryColorInterpolationQualifier);
                 std::string vsLinkSource =
                     rewriteShaderDrawParametersForSpirv(
                         compatFragmentOnlyVertexSource, GL_VERTEX_SHADER);
@@ -6375,7 +6617,9 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexShader != nullptr && fragmentShader != nullptr &&
                 !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
             LinkedProgramSpirv linked = canLinkGlslSources
-                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                ? (!hasCompatColorFinalProducerPair
+                       ? compileLinkedVsFs(vertexShader, fragmentShader)
+                       : LinkedProgramSpirv{})
                 : LinkedProgramSpirv{};
             const std::uint32_t* vsSpirvData;
             std::size_t vsSpirvWords;
@@ -7393,7 +7637,9 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexShader != nullptr && fragmentShader != nullptr &&
                 !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
             LinkedProgramSpirv linked = canLinkGlslSources
-                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                ? (!hasCompatColorFinalProducerPair
+                       ? compileLinkedVsFs(vertexShader, fragmentShader)
+                       : LinkedProgramSpirv{})
                 : LinkedProgramSpirv{};
             const std::uint32_t* vsSpirvData;
             std::size_t vsSpirvWords;

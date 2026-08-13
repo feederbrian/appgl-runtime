@@ -1200,15 +1200,6 @@ extern "C" void APIENTRY glSecondaryColorP3uiv(GLenum type, const GLuint *color)
     return;
 }
 
-extern "C" void APIENTRY glSecondaryColorPointer(GLint size, GLenum type, GLsizei stride, const void *pointer) {
-    (void)size;
-    (void)type;
-    (void)stride;
-    (void)pointer;
-    appgl::Runtime::shared().recordFixedFunctionStub("glSecondaryColorPointer");
-    return;
-}
-
 extern "C" void APIENTRY glTexCoord1d(GLdouble s) {
     (void)s;
     appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord1d");

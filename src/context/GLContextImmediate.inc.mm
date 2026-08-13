@@ -777,6 +777,17 @@ void GLContext::setWindowRasterPosition(GLfloat x, GLfloat y, GLfloat z) {
 }
 
 void GLContext::setSecondaryColorCompat(GLfloat r, GLfloat g, GLfloat b) {
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::SecondaryColor;
+        command.values[0] = r;
+        command.values[1] = g;
+        command.values[2] = b;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
     impl_->fixedFunctionCurrentSecondaryColor[0] = r;
     impl_->fixedFunctionCurrentSecondaryColor[1] = g;
     impl_->fixedFunctionCurrentSecondaryColor[2] = b;
@@ -3683,6 +3694,12 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
             maxSize = 4;
             label = "glColorPointer";
             break;
+        case GL_SECONDARY_COLOR_ARRAY:
+            state = &impl_->legacySecondaryColorArray;
+            minSize = 3;
+            maxSize = 3;
+            label = "glSecondaryColorPointer";
+            break;
         case GL_TEXTURE_COORD_ARRAY:
             state = &impl_->legacyTexCoordArray;
             minSize = 1;
@@ -3691,7 +3708,7 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
             break;
         default:
             pushError(GL_INVALID_ENUM, "glClientArrayPointer",
-                      "array is not GL_VERTEX_ARRAY, GL_COLOR_ARRAY, or GL_TEXTURE_COORD_ARRAY");
+                      "array is not GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_SECONDARY_COLOR_ARRAY, or GL_TEXTURE_COORD_ARRAY");
             return false;
     }
     if (size < minSize || size > maxSize) {
@@ -3718,6 +3735,9 @@ bool GLContext::setLegacyClientArrayEnabled(GLenum array, bool enabled) {
         case GL_COLOR_ARRAY:
             impl_->legacyColorArray.enabled = enabled;
             return true;
+        case GL_SECONDARY_COLOR_ARRAY:
+            impl_->legacySecondaryColorArray.enabled = enabled;
+            return true;
         case GL_TEXTURE_COORD_ARRAY:
             impl_->legacyTexCoordArray.enabled = enabled;
             return true;
@@ -3727,7 +3747,7 @@ bool GLContext::setLegacyClientArrayEnabled(GLenum array, bool enabled) {
             return true;
         default:
             pushError(GL_INVALID_ENUM, enabled ? "glEnableClientState" : "glDisableClientState",
-                      "array is not GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY, or GL_NORMAL_ARRAY");
+                      "array is not GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_SECONDARY_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY, or GL_NORMAL_ARRAY");
             return false;
     }
 }
@@ -3738,6 +3758,8 @@ bool GLContext::isLegacyClientArrayEnabled(GLenum array) const {
             return impl_->legacyVertexArray.enabled;
         case GL_COLOR_ARRAY:
             return impl_->legacyColorArray.enabled;
+        case GL_SECONDARY_COLOR_ARRAY:
+            return impl_->legacySecondaryColorArray.enabled;
         case GL_TEXTURE_COORD_ARRAY:
             return impl_->legacyTexCoordArray.enabled;
         default:
@@ -3844,6 +3866,14 @@ void GLContext::immediateVertex(float x, float y, float z, float w) {
     v.color[1] = impl_->immediate.currentColor[1];
     v.color[2] = impl_->immediate.currentColor[2];
     v.color[3] = impl_->immediate.currentColor[3];
+    if (impl_->state->isEnabled(GL_COLOR_SUM)) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            v.color[channel] = std::clamp(
+                v.color[channel] +
+                    impl_->fixedFunctionCurrentSecondaryColor[channel],
+                0.0f, 1.0f);
+        }
+    }
     v.texcoord[0] = impl_->immediate.currentTexcoord[0];
     v.texcoord[1] = impl_->immediate.currentTexcoord[1];
     v.texcoord[2] = impl_->immediate.currentTexcoord[2];
@@ -5870,14 +5900,14 @@ void GLContext::endImmediate() {
         };
 
         if (impl_->state->boundDrawFramebuffer() == 0) {
-            const bool hadValidShadow =
-                impl_->defaultFramebufferShadowValid &&
-                !impl_->defaultFramebufferRGBA8.empty();
-            impl_->ensureDefaultFramebufferShadow(
-                /*materializePendingClear=*/hadValidShadow);
-            if (!hadValidShadow) {
-                impl_->materializeDefaultFbShadowClear();
+            // A partial CPU mirror cannot become authoritative again after a
+            // GPU-only draw invalidated it.  Re-seeding from the stale clear
+            // bytes here would discard every earlier GPU-only primitive.
+            if (!impl_->defaultFramebufferShadowValid ||
+                impl_->defaultFramebufferRGBA8.empty()) {
+                return false;
             }
+            impl_->materializeDefaultFbShadowClear();
             const bool paintedDefault = paintTriangles(
                 impl_->defaultFramebufferShadowWidth,
                 impl_->defaultFramebufferShadowHeight,
@@ -6333,6 +6363,11 @@ void GLContext::callListCompat(GLuint list) {
                                command.values[1],
                                command.values[2],
                                command.values[3]);
+                break;
+            case Impl::DisplayListCommand::Kind::SecondaryColor:
+                setSecondaryColorCompat(command.values[0],
+                                        command.values[1],
+                                        command.values[2]);
                 break;
             case Impl::DisplayListCommand::Kind::TexCoord:
                 immediateTexCoord(0,
@@ -7465,6 +7500,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     (void)debugLabel;
     const auto& vertexArray = impl_->legacyVertexArray;
     const auto& colorArray = impl_->legacyColorArray;
+    const auto& secondaryColorArray = impl_->legacySecondaryColorArray;
     const auto& texCoordArray = impl_->legacyTexCoordArray;
     const bool colorArrayHasSource =
         colorArray.pointer != nullptr || colorArray.bufferName != 0;
@@ -7473,6 +7509,14 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         colorArrayHasSource &&
         colorArray.type == GL_FLOAT &&
         colorArray.size >= 3 && colorArray.size <= 4;
+    const bool secondaryColorArrayHasSource =
+        secondaryColorArray.pointer != nullptr ||
+        secondaryColorArray.bufferName != 0;
+    const bool secondaryColorArrayUsable =
+        secondaryColorArray.enabled &&
+        secondaryColorArrayHasSource &&
+        secondaryColorArray.type == GL_FLOAT &&
+        secondaryColorArray.size == 3;
     const bool texCoordArrayHasSource =
         texCoordArray.pointer != nullptr || texCoordArray.bufferName != 0;
     const bool texCoordArrayUsable =
@@ -7578,6 +7622,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     const std::size_t colorStride = colorArray.stride > 0
         ? static_cast<std::size_t>(colorArray.stride)
         : static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat);
+    const std::size_t secondaryColorStride = secondaryColorArray.stride > 0
+        ? static_cast<std::size_t>(secondaryColorArray.stride)
+        : 3u * sizeof(GLfloat);
     const std::size_t texCoordStride = texCoordArray.stride > 0
         ? static_cast<std::size_t>(texCoordArray.stride)
         : static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat);
@@ -7617,6 +7664,15 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     std::size_t colorAvailableBytes = 0;
     if (colorArrayUsable &&
         !resolveArraySource(colorArray, "glColorPointer", colorBase, colorAvailableBytes)) {
+        return false;
+    }
+    const std::uint8_t* secondaryColorBase = nullptr;
+    std::size_t secondaryColorAvailableBytes = 0;
+    if (secondaryColorArrayUsable &&
+        !resolveArraySource(secondaryColorArray,
+                            "glSecondaryColorPointer",
+                            secondaryColorBase,
+                            secondaryColorAvailableBytes)) {
         return false;
     }
     const std::uint8_t* texCoordBase = nullptr;
@@ -7678,6 +7734,20 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             }
             cp = reinterpret_cast<const GLfloat*>(colorBase + colorOffset);
         }
+        const GLfloat* sp = nullptr;
+        if (secondaryColorArrayUsable) {
+            const std::size_t secondaryColorOffset =
+                static_cast<std::size_t>(srcIndex) * secondaryColorStride;
+            constexpr std::size_t kSecondaryColorBytes =
+                3u * sizeof(GLfloat);
+            if (secondaryColorOffset > secondaryColorAvailableBytes ||
+                kSecondaryColorBytes >
+                    secondaryColorAvailableBytes - secondaryColorOffset) {
+                return false;
+            }
+            sp = reinterpret_cast<const GLfloat*>(
+                secondaryColorBase + secondaryColorOffset);
+        }
         const GLfloat* tp = nullptr;
         if (texCoordArrayUsable) {
             const std::size_t texCoordOffset =
@@ -7701,6 +7771,16 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         v.color[3] = (cp != nullptr && colorArray.size >= 4)
             ? cp[3]
             : impl_->immediate.currentColor[3];
+        if (impl_->state->isEnabled(GL_COLOR_SUM)) {
+            const GLfloat* secondary = sp != nullptr
+                ? sp
+                : impl_->fixedFunctionCurrentSecondaryColor;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                v.color[channel] = std::clamp(
+                    v.color[channel] + secondary[channel],
+                    0.0f, 1.0f);
+            }
+        }
         v.texcoord[0] = tp != nullptr ? tp[0] : impl_->immediate.currentTexcoord[0];
         v.texcoord[1] = (tp != nullptr && texCoordArray.size >= 2)
             ? tp[1]
@@ -8789,15 +8869,14 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 		                default:
 		                    return current;
 		            }
-		        };
+	        };
 
 	        if (impl_->state->boundDrawFramebuffer() == 0) {
             if (!impl_->defaultFramebufferShadowValid ||
                 impl_->defaultFramebufferRGBA8.empty()) {
-                impl_->ensureDefaultFramebufferShadow();
-            } else {
-                impl_->materializeDefaultFbShadowClear();
+                return false;
             }
+            impl_->materializeDefaultFbShadowClear();
             const GLint px0 = std::max<GLint>(0, x0);
             const GLint py0 = std::max<GLint>(0, y0);
             const GLint px1 = std::min<GLint>(

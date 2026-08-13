@@ -15,6 +15,9 @@ namespace appgl {
 
 namespace {
 
+std::string maskCommentsAndStrings(std::string_view source);
+std::string_view trimAscii(std::string_view text);
+
 bool isIdentChar(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
 }
@@ -1138,6 +1141,150 @@ bool usesLegacyCompatProfile(const std::string& source) {
     return versionNumber > 0 && versionNumber < 150;
 }
 
+bool parseExtensionDirective(std::string_view line,
+                             std::string_view& extension,
+                             std::string_view& behavior) {
+    line = trimAscii(line);
+    if (line.empty() || line.front() != '#') {
+        return false;
+    }
+    std::size_t pos = 1;
+    while (pos < line.size() &&
+           std::isspace(static_cast<unsigned char>(line[pos]))) {
+        ++pos;
+    }
+    const std::size_t directiveStart = pos;
+    while (pos < line.size() && isIdentChar(line[pos])) {
+        ++pos;
+    }
+    if (line.substr(directiveStart, pos - directiveStart) != "extension") {
+        return false;
+    }
+    while (pos < line.size() &&
+           std::isspace(static_cast<unsigned char>(line[pos]))) {
+        ++pos;
+    }
+    const std::size_t extensionStart = pos;
+    while (pos < line.size() && isIdentChar(line[pos])) {
+        ++pos;
+    }
+    if (extensionStart == pos) {
+        return false;
+    }
+    extension = line.substr(extensionStart, pos - extensionStart);
+    while (pos < line.size() &&
+           std::isspace(static_cast<unsigned char>(line[pos]))) {
+        ++pos;
+    }
+    if (pos >= line.size() || line[pos] != ':') {
+        return false;
+    }
+    ++pos;
+    while (pos < line.size() &&
+           std::isspace(static_cast<unsigned char>(line[pos]))) {
+        ++pos;
+    }
+    const std::size_t behaviorStart = pos;
+    while (pos < line.size() && isIdentChar(line[pos])) {
+        ++pos;
+    }
+    if (behaviorStart == pos) {
+        return false;
+    }
+    behavior = line.substr(behaviorStart, pos - behaviorStart);
+    return trimAscii(line.substr(pos)).empty();
+}
+
+bool effectiveArbCompatibilityEnabled(const std::string& source) {
+    // Ordered extension-state evaluation. A later disable wins, and
+    // `#extension all : disable` clears the state just like the frontend.
+    const std::string masked = maskCommentsAndStrings(source);
+    bool enabled = false;
+    std::size_t lineStart = 0;
+    while (lineStart < masked.size()) {
+        const std::size_t newline = masked.find('\n', lineStart);
+        const std::size_t lineEnd =
+            newline == std::string::npos ? masked.size() : newline;
+        std::string_view extension;
+        std::string_view behavior;
+        if (parseExtensionDirective(
+                std::string_view(masked).substr(
+                    lineStart, lineEnd - lineStart),
+                extension, behavior)) {
+            if (extension == "all" && behavior == "disable") {
+                enabled = false;
+            } else if (extension == "GL_ARB_compatibility") {
+                enabled = behavior == "enable" || behavior == "require" ||
+                          behavior == "warn";
+            }
+        }
+        if (newline == std::string::npos) break;
+        lineStart = newline + 1;
+    }
+    return enabled;
+}
+
+// The conventional primary/secondary color built-ins have a narrower
+// language gate than several older compatibility shims in this file. Bare
+// GLSL 1.40+ only regains them through an effective GL_ARB_compatibility
+// directive; an explicit 1.50+ compatibility profile exposes them directly.
+// ES and explicit core profiles never expose this surface.
+bool usesLegacyColorBuiltinProfile(const std::string& source) {
+    std::size_t versionStart = std::string::npos;
+    const std::size_t versionEol = findVersionLineEnd(source, &versionStart);
+    if (versionEol == std::string::npos) {
+        return true;  // desktop GLSL 1.10 default
+    }
+
+    const std::string_view versionLine(
+        source.data() + versionStart, versionEol - versionStart);
+    const int versionNumber = parseVersionNumber(versionLine);
+    if (versionNumber == 100 || containsIdentifier(versionLine, "es") ||
+        containsIdentifier(versionLine, "core")) {
+        return false;
+    }
+    if (versionNumber >= 150 &&
+        containsIdentifier(versionLine, "compatibility")) {
+        return true;
+    }
+    if (versionNumber >= 110 && versionNumber <= 130) {
+        return true;
+    }
+    if (versionNumber < 140) {
+        return false;
+    }
+    return effectiveArbCompatibilityEnabled(source);
+}
+
+bool stripArbCompatibilityDirectives(std::string& source) {
+    const std::string masked = maskCommentsAndStrings(source);
+    bool changed = false;
+    std::size_t lineStart = 0;
+    while (lineStart < masked.size()) {
+        const std::size_t newline = masked.find('\n', lineStart);
+        const std::size_t lineEnd =
+            newline == std::string::npos ? masked.size() : newline;
+        std::size_t pos = lineStart;
+        while (pos < lineEnd &&
+               std::isspace(static_cast<unsigned char>(masked[pos]))) {
+            ++pos;
+        }
+        std::string_view extension;
+        std::string_view behavior;
+        if (parseExtensionDirective(
+                std::string_view(masked).substr(pos, lineEnd - pos),
+                extension, behavior) &&
+            extension == "GL_ARB_compatibility") {
+            // Same-width comment marker preserves all following offsets.
+            source.replace(pos, 2, "//");
+            changed = true;
+        }
+        if (newline == std::string::npos) break;
+        lineStart = newline + 1;
+    }
+    return changed;
+}
+
 std::string_view trimAscii(std::string_view text) {
     while (!text.empty() &&
            std::isspace(static_cast<unsigned char>(text.front()))) {
@@ -1873,6 +2020,135 @@ std::string maskCommentsAndStrings(std::string_view source) {
     return masked;
 }
 
+struct IndexedInterfaceMemberAccess {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    std::size_t subscriptOpen = 0;
+    std::size_t subscriptClose = 0;
+};
+
+bool findIndexedInterfaceMemberAccess(
+    const std::string& source,
+    std::string_view interfaceName,
+    std::string_view memberName,
+    IndexedInterfaceMemberAccess& access,
+    std::size_t searchFrom = 0)
+{
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = searchFrom;
+    while ((pos = clean.find(interfaceName, pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, interfaceName) ||
+            isPreprocessorDirectiveLine(clean, pos)) {
+            ++pos;
+            continue;
+        }
+        std::size_t cursor = pos + interfaceName.size();
+        while (cursor < clean.size() &&
+               std::isspace(static_cast<unsigned char>(clean[cursor]))) {
+            ++cursor;
+        }
+        if (cursor >= clean.size() || clean[cursor] != '[') {
+            pos += interfaceName.size();
+            continue;
+        }
+        const std::size_t open = cursor;
+        int depth = 1;
+        ++cursor;
+        while (cursor < clean.size() && depth > 0) {
+            if (clean[cursor] == '[') {
+                ++depth;
+            } else if (clean[cursor] == ']') {
+                --depth;
+            }
+            ++cursor;
+        }
+        if (depth != 0) {
+            return false;
+        }
+        const std::size_t close = cursor - 1;
+        while (cursor < clean.size() &&
+               std::isspace(static_cast<unsigned char>(clean[cursor]))) {
+            ++cursor;
+        }
+        if (cursor >= clean.size() || clean[cursor] != '.') {
+            pos += interfaceName.size();
+            continue;
+        }
+        ++cursor;
+        while (cursor < clean.size() &&
+               std::isspace(static_cast<unsigned char>(clean[cursor]))) {
+            ++cursor;
+        }
+        if (!sourceHasWordAt(clean, cursor, memberName)) {
+            pos += interfaceName.size();
+            continue;
+        }
+        access = {pos, cursor + memberName.size(), open, close};
+        return true;
+    }
+    return false;
+}
+
+bool containsIndexedInterfaceMemberAccess(
+    const std::string& source,
+    std::string_view interfaceName,
+    std::string_view memberName)
+{
+    IndexedInterfaceMemberAccess access;
+    return findIndexedInterfaceMemberAccess(
+        source, interfaceName, memberName, access);
+}
+
+bool rewriteIndexedInterfaceMemberAccess(
+    std::string& source,
+    std::string_view interfaceName,
+    std::string_view memberName,
+    std::string_view replacementArray)
+{
+    bool changed = false;
+    IndexedInterfaceMemberAccess access;
+    while (findIndexedInterfaceMemberAccess(
+               source, interfaceName, memberName, access)) {
+        std::string replacement(replacementArray);
+        replacement.append(source,
+                           access.subscriptOpen,
+                           access.subscriptClose - access.subscriptOpen + 1);
+        source.replace(access.begin, access.end - access.begin, replacement);
+        changed = true;
+    }
+    return changed;
+}
+
+bool containsUnqualifiedCodeIdentifier(const std::string& source,
+                                       std::string_view identifier) {
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while ((pos = clean.find(identifier, pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, identifier) ||
+            isPreprocessorDirectiveLine(clean, pos)) {
+            ++pos;
+            continue;
+        }
+        std::size_t before = pos;
+        while (before > 0 &&
+               std::isspace(static_cast<unsigned char>(clean[before - 1]))) {
+            --before;
+        }
+        if (before == 0 || clean[before - 1] != '.') {
+            return true;
+        }
+        pos += identifier.size();
+    }
+    return false;
+}
+
+std::string legacyColorTransportName(std::string_view baseName,
+                                     std::string_view destination) {
+    std::string name(baseName);
+    name.append("To").append(destination);
+    return name;
+}
+
 struct GeometryShader4DirectiveRecord {
     std::size_t hash = 0;
     std::size_t lineEnd = 0;
@@ -2082,6 +2358,7 @@ bool findGlobalStorageDeclaration(const std::string& clean,
             }
             hasStorageQualifier = hasStorageQualifier ||
                 sourceHasWordAt(clean, pos, "varying") ||
+                sourceHasWordAt(clean, pos, "attribute") ||
                 sourceHasWordAt(clean, pos, "in") ||
                 sourceHasWordAt(clean, pos, "out");
         }
@@ -2121,6 +2398,39 @@ bool eraseGlobalStorageDeclaration(std::string& source,
         return true;
     }
     return false;
+}
+
+std::string globalStorageInterpolationQualifier(
+    const std::string& source,
+    const char* identifier)
+{
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while ((pos = clean.find(identifier, pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, identifier)) {
+            ++pos;
+            continue;
+        }
+        std::size_t statementStart = 0;
+        std::size_t semicolon = 0;
+        if (!findGlobalStorageDeclaration(clean, pos, statementStart,
+                                          semicolon)) {
+            pos += std::strlen(identifier);
+            continue;
+        }
+        const std::string_view statement(
+            clean.data() + statementStart, semicolon - statementStart);
+        // A legacy color may carry one interpolation qualifier. Preserve
+        // exactly the semantic qualifier; storage and type are rebuilt by
+        // the internal front/back declarations.
+        for (const char* qualifier : {"flat", "smooth", "noperspective"}) {
+            if (containsIdentifier(statement, qualifier)) {
+                return qualifier;
+            }
+        }
+        return {};
+    }
+    return {};
 }
 
 bool parseSimpleGeometryShader4Integer(std::string_view expression,
@@ -3001,6 +3311,119 @@ std::string rewriteGeometryShader4VertexTransport(
     return result;
 }
 
+namespace {
+
+bool findCompatColorOutputDeclaration(std::string& source,
+                                      const char* name,
+                                      std::size_t& statementStart,
+                                      std::size_t& semicolon)
+{
+    const std::string clean = maskCommentsAndStrings(source);
+    std::size_t pos = 0;
+    while ((pos = clean.find(name, pos)) != std::string::npos) {
+        if (!sourceHasWordAt(clean, pos, name)) {
+            ++pos;
+            continue;
+        }
+        if (!findGlobalStorageDeclaration(clean, pos, statementStart,
+                                          semicolon)) {
+            pos += std::strlen(name);
+            continue;
+        }
+        const std::string_view statement(
+            clean.data() + statementStart, semicolon - statementStart);
+        if (containsIdentifier(statement, "out")) {
+            return true;
+        }
+        pos += std::strlen(name);
+    }
+    return false;
+}
+
+void ensureCompatColorProducerOutputsImpl(
+    std::string& rewrittenProducerSource,
+    bool primary,
+    bool secondary,
+    std::string_view primaryInterpolationQualifier,
+    std::string_view secondaryInterpolationQualifier,
+    const CompatColorInterfaceLocations& locations)
+{
+    std::string declarations;
+    auto ensureOutput = [&](std::string_view qualifier,
+                            const char* name,
+                            int location) {
+        std::size_t statementStart = 0;
+        std::size_t semicolon = 0;
+        if (findCompatColorOutputDeclaration(
+                rewrittenProducerSource, name, statementStart, semicolon)) {
+            if (location >= 0) {
+                const std::string clean =
+                    maskCommentsAndStrings(rewrittenProducerSource);
+                const std::string_view statement(
+                    clean.data() + statementStart,
+                    semicolon - statementStart);
+                if (!containsIdentifier(statement, "location")) {
+                    std::size_t insertAt = statementStart;
+                    while (insertAt < semicolon &&
+                           std::isspace(static_cast<unsigned char>(
+                               rewrittenProducerSource[insertAt]))) {
+                        ++insertAt;
+                    }
+                    rewrittenProducerSource.insert(
+                        insertAt,
+                        "layout(location = " + std::to_string(location) +
+                            ") ");
+                }
+            }
+            return;
+        }
+        if (location >= 0) {
+            declarations.append("layout(location = ")
+                .append(std::to_string(location))
+                .append(") ");
+        }
+        if (!qualifier.empty()) {
+            declarations.append(qualifier).append(" ");
+        }
+        declarations.append("out vec4 ").append(name).append(";\n");
+    };
+    if (primary) {
+        ensureOutput(primaryInterpolationQualifier, "appgl_FrontColor",
+                     locations.frontColor);
+        ensureOutput(primaryInterpolationQualifier, "appgl_BackColor",
+                     locations.backColor);
+    }
+    if (secondary) {
+        ensureOutput(secondaryInterpolationQualifier,
+                     "appgl_FrontSecondaryColor",
+                     locations.frontSecondaryColor);
+        ensureOutput(secondaryInterpolationQualifier,
+                     "appgl_BackSecondaryColor",
+                     locations.backSecondaryColor);
+    }
+    if (declarations.empty()) {
+        return;
+    }
+    rewrittenProducerSource.insert(
+        geometryShader4PreambleOffset(rewrittenProducerSource), declarations);
+}
+
+} // namespace
+
+void ensureCompatColorProducerOutputs(
+    std::string& rewrittenProducerSource,
+    bool primary,
+    bool secondary,
+    std::string_view primaryInterpolationQualifier,
+    std::string_view secondaryInterpolationQualifier,
+    const CompatColorInterfaceLocations& locations)
+{
+    ensureCompatColorProducerOutputsImpl(
+        rewrittenProducerSource, primary, secondary,
+        primaryInterpolationQualifier,
+        secondaryInterpolationQualifier, locations);
+}
+
 CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                                               GLenum stage,
                                               CompatShaderRewriteMode mode) {
@@ -3115,12 +3538,18 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     const bool isVertex = (stage == GL_VERTEX_SHADER);
     const bool isFragment = (stage == GL_FRAGMENT_SHADER);
     const bool isGeometry = (stage == GL_GEOMETRY_SHADER);
+    const bool isTessControl = (stage == GL_TESS_CONTROL_SHADER);
+    const bool isTessEvaluation = (stage == GL_TESS_EVALUATION_SHADER);
     const bool isArbGeometryShader4LinkView =
         mode == CompatShaderRewriteMode::ArbGeometryShader4LinkView;
     const bool isArbGeometryStage =
         isGeometry && isArbGeometryShader4LinkView;
+    const bool isStandardGeometryStage =
+        isGeometry && !isArbGeometryShader4LinkView;
     const bool hasGpuShader4Directive =
         result.source.find("GL_EXT_gpu_shader4") != std::string::npos;
+    const bool legacyColorBuiltinsLegal =
+        isArbGeometryStage || usesLegacyColorBuiltinProfile(result.source);
 
     // ---- 1. Identifier scan (against the ORIGINAL, unrewritten source) ---
     // Scan the original source for matrix-family fixed-function builtins.
@@ -3176,7 +3605,12 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             legacy.attrVertex = legacy.usesFtransform ||
                                 containsIdentifier(source, "gl_Vertex");
             legacy.attrNormal = containsIdentifier(source, "gl_Normal");
-            legacy.attrColor = containsIdentifier(source, "gl_Color");
+            legacy.attrColor =
+                legacyColorBuiltinsLegal &&
+                containsCodeIdentifier(result.source, "gl_Color");
+            legacy.attrSecondaryColor =
+                legacyColorBuiltinsLegal &&
+                containsCodeIdentifier(result.source, "gl_SecondaryColor");
             scanMultiTexCoord(source, legacy.attrMultiTexCoord);
         }
         legacy.usesClipVertex = containsIdentifier(source, "gl_ClipVertex");
@@ -3184,7 +3618,22 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (isFragment) {
         legacy.fragColor = containsCodeIdentifier(result.source, "gl_FragColor");
         legacy.fragDataMax = scanFragDataMax(source);
-        legacy.usesFragmentColor = containsIdentifier(source, "gl_Color");
+        legacy.usesFragmentColor =
+            legacyColorBuiltinsLegal &&
+            containsCodeIdentifier(result.source, "gl_Color");
+        legacy.usesFragmentSecondaryColor =
+            legacyColorBuiltinsLegal &&
+            containsCodeIdentifier(result.source, "gl_SecondaryColor");
+        if (legacy.usesFragmentColor) {
+            legacy.fragmentColorInterpolationQualifier =
+                globalStorageInterpolationQualifier(result.source,
+                                                    "gl_Color");
+        }
+        if (legacy.usesFragmentSecondaryColor) {
+            legacy.fragmentSecondaryColorInterpolationQualifier =
+                globalStorageInterpolationQualifier(result.source,
+                                                    "gl_SecondaryColor");
+        }
     }
     legacy.texCoordMax = scanTexCoordMax(source);
     // gl_Fog.* field accesses — individual scan per field so the
@@ -3197,13 +3646,64 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.usesFogFragCoord = containsIdentifier(source, "gl_FogFragCoord");
     legacy.usesFogFragCoordInput =
         isGeometry && containsFogFragCoordInputAccess(source);
-    if (isVertex || isArbGeometryStage) {
-        legacy.usesFrontColor = containsIdentifier(source, "gl_FrontColor");
-        legacy.usesBackColor = containsIdentifier(source, "gl_BackColor");
+    if (legacyColorBuiltinsLegal &&
+        (isStandardGeometryStage || isTessControl || isTessEvaluation)) {
+        legacy.usesFrontColorInput = containsIndexedInterfaceMemberAccess(
+            result.source, "gl_in", "gl_FrontColor");
+        legacy.usesBackColorInput = containsIndexedInterfaceMemberAccess(
+            result.source, "gl_in", "gl_BackColor");
+        legacy.usesFrontSecondaryColorInput =
+            containsIndexedInterfaceMemberAccess(
+                result.source, "gl_in", "gl_FrontSecondaryColor");
+        legacy.usesBackSecondaryColorInput =
+            containsIndexedInterfaceMemberAccess(
+                result.source, "gl_in", "gl_BackSecondaryColor");
+    }
+    if (legacyColorBuiltinsLegal && isTessControl) {
+        legacy.usesFrontColor = containsIndexedInterfaceMemberAccess(
+            result.source, "gl_out", "gl_FrontColor");
+        legacy.usesBackColor = containsIndexedInterfaceMemberAccess(
+            result.source, "gl_out", "gl_BackColor");
         legacy.usesFrontSecondaryColor =
-            containsIdentifier(source, "gl_FrontSecondaryColor");
+            containsIndexedInterfaceMemberAccess(
+                result.source, "gl_out", "gl_FrontSecondaryColor");
         legacy.usesBackSecondaryColor =
-            containsIdentifier(source, "gl_BackSecondaryColor");
+            containsIndexedInterfaceMemberAccess(
+                result.source, "gl_out", "gl_BackSecondaryColor");
+    } else if (legacyColorBuiltinsLegal &&
+               (isVertex || isArbGeometryStage ||
+                isStandardGeometryStage || isTessEvaluation)) {
+        legacy.usesFrontColor = containsUnqualifiedCodeIdentifier(
+            result.source, "gl_FrontColor");
+        legacy.usesBackColor = containsUnqualifiedCodeIdentifier(
+            result.source, "gl_BackColor");
+        legacy.usesFrontSecondaryColor = containsUnqualifiedCodeIdentifier(
+            result.source, "gl_FrontSecondaryColor");
+        legacy.usesBackSecondaryColor = containsUnqualifiedCodeIdentifier(
+            result.source, "gl_BackSecondaryColor");
+    }
+    if (legacy.usesFrontColor || legacy.usesBackColor ||
+        legacy.usesFrontSecondaryColor || legacy.usesBackSecondaryColor) {
+        if (legacy.usesFrontColor) {
+            legacy.frontColorInterpolationQualifier =
+                globalStorageInterpolationQualifier(result.source,
+                                                    "gl_FrontColor");
+        }
+        if (legacy.usesBackColor) {
+            legacy.backColorInterpolationQualifier =
+                globalStorageInterpolationQualifier(result.source,
+                                                    "gl_BackColor");
+        }
+        if (legacy.usesFrontSecondaryColor) {
+            legacy.frontSecondaryColorInterpolationQualifier =
+                globalStorageInterpolationQualifier(
+                    result.source, "gl_FrontSecondaryColor");
+        }
+        if (legacy.usesBackSecondaryColor) {
+            legacy.backSecondaryColorInterpolationQualifier =
+                globalStorageInterpolationQualifier(
+                    result.source, "gl_BackSecondaryColor");
+        }
     }
     legacy.usesTextureEnvColor =
         containsIdentifier(source, "gl_TextureEnvColor");
@@ -3216,6 +3716,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     const bool needsExplicitLocationPreamble =
         (isVertex &&
          (legacy.attrVertex || legacy.attrNormal || legacy.attrColor ||
+          legacy.attrSecondaryColor ||
           legacy.attrMultiTexCoord[0] || legacy.attrMultiTexCoord[1] ||
           legacy.attrMultiTexCoord[2] || legacy.attrMultiTexCoord[3] ||
           legacy.attrMultiTexCoord[4] || legacy.attrMultiTexCoord[5] ||
@@ -3237,21 +3738,35 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         // GLSL accepts as core at 330. Upgrade only when the emitted
         // preamble actually needs those qualifiers so unrelated #version
         // 140/150 shaders keep their original frontend surface.
+        const bool needsLineContinuationFloor =
+            versionNumber > 0 && versionNumber < 420 &&
+            result.source.find("\\\n") != std::string::npos &&
+            (legacy.usesFrontColor || legacy.usesBackColor ||
+             legacy.usesFrontSecondaryColor ||
+             legacy.usesBackSecondaryColor ||
+             legacy.usesFrontColorInput || legacy.usesBackColorInput ||
+             legacy.usesFrontSecondaryColorInput ||
+             legacy.usesBackSecondaryColorInput);
         const bool needsFloorUpgrade =
             versionNumber > 0 &&
             ((versionNumber < 140 && !isCompat) ||
              (hasGpuShader4Directive && versionNumber < 150) ||
-             (needsExplicitLocationPreamble && versionNumber < 330));
+             (needsExplicitLocationPreamble && versionNumber < 330) ||
+             needsLineContinuationFloor);
         if (needsFloorUpgrade) {
             legacy.upgradedVersion = true;
-            // Replace the entire version line with `#version 330 core`
-            // regardless of the original profile token.
-            static constexpr const char kReplacement[] = "#version 330 core";
-            constexpr std::size_t kReplacementLen = sizeof(kReplacement) - 1;
+            // Glslang exposes preprocessor line continuations to its Vulkan
+            // frontend only at GLSL 4.20+. Piglit's compatibility TES uses
+            // a multiline INTERP_QUAD macro, so select that frontend floor
+            // when legacy colors and a continued directive occur together;
+            // ordinary legacy inputs continue to use the 3.30 floor.
+            const std::string_view replacement =
+                needsLineContinuationFloor
+                    ? "#version 420 core"
+                    : "#version 330 core";
             const std::size_t lineLen = versionEol - versionStart;
-            result.source.replace(versionStart, lineLen, kReplacement);
-            // Adjust versionEol: the line now has a fixed known length.
-            versionEol = versionStart + kReplacementLen;
+            result.source.replace(versionStart, lineLen, replacement);
+            versionEol = versionStart + replacement.size();
         } else if (isCompat) {
             result.wasCompatProfile = true;
             // Replace `compatibility` with `core` in-place. Same physical
@@ -3269,6 +3784,15 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 versionEol -= (kCompatLen - kCoreLen);
             }
         }
+    }
+    if (legacy.attrColor || legacy.attrSecondaryColor ||
+        legacy.usesFrontColor || legacy.usesBackColor ||
+        legacy.usesFrontSecondaryColor || legacy.usesBackSecondaryColor ||
+        legacy.usesFrontColorInput || legacy.usesBackColorInput ||
+        legacy.usesFrontSecondaryColorInput ||
+        legacy.usesBackSecondaryColorInput ||
+        legacy.usesFragmentColor || legacy.usesFragmentSecondaryColor) {
+        (void)stripArbCompatibilityDirectives(result.source);
     }
 
     // GLSL 1.30 compatibility exposes gl_MaxClipPlanes, but glslang's
@@ -3720,7 +4244,15 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         replaceIdentifier(result.source, "gl_Normal", "appgl_Normal");
     }
     if (legacy.attrColor) {
-        replaceIdentifier(result.source, "gl_Color", "appgl_Color");
+        (void)eraseGlobalStorageDeclaration(result.source, "gl_Color");
+        replaceCodeIdentifier(result.source, "gl_Color", "appgl_Color");
+    }
+    if (legacy.attrSecondaryColor) {
+        (void)eraseGlobalStorageDeclaration(result.source,
+                                            "gl_SecondaryColor");
+        replaceCodeIdentifier(result.source,
+                              "gl_SecondaryColor",
+                              "appgl_SecondaryColor");
     }
     for (unsigned int i = 0; i < 8; ++i) {
         if (legacy.attrMultiTexCoord[i]) {
@@ -3796,24 +4328,96 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                           "gl_FogFragCoord",
                           "appgl_FogFragCoord");
     }
+
+    // Standard GS/TCS/TES compatibility colors live as gl_in[] / gl_out[]
+    // members. Vulkan-targeted glslang omits those legacy gl_PerVertex
+    // members, so carry them through ordinary, stage-specific varying
+    // arrays. Distinct boundary names avoid an illegal same-scope in/out
+    // declaration collision in TCS and GS sources.
+    const char* colorInputDestination = nullptr;
+    if (isStandardGeometryStage) {
+        colorInputDestination = "Geometry";
+    } else if (isTessControl) {
+        colorInputDestination = "TessControl";
+    } else if (isTessEvaluation) {
+        colorInputDestination = "TessEvaluation";
+    }
+    auto rewriteColorInput = [&](bool used,
+                                 const char* legacyName,
+                                 const char* internalBase) {
+        if (!used || colorInputDestination == nullptr) return;
+        const std::string transport = legacyColorTransportName(
+            internalBase, colorInputDestination);
+        (void)rewriteIndexedInterfaceMemberAccess(
+            result.source, "gl_in", legacyName, transport);
+    };
+    rewriteColorInput(legacy.usesFrontColorInput,
+                      "gl_FrontColor", "appgl_FrontColor");
+    rewriteColorInput(legacy.usesBackColorInput,
+                      "gl_BackColor", "appgl_BackColor");
+    rewriteColorInput(legacy.usesFrontSecondaryColorInput,
+                      "gl_FrontSecondaryColor",
+                      "appgl_FrontSecondaryColor");
+    rewriteColorInput(legacy.usesBackSecondaryColorInput,
+                      "gl_BackSecondaryColor",
+                      "appgl_BackSecondaryColor");
+
+    auto rewriteTessControlColorOutput = [&](bool used,
+                                             const char* legacyName,
+                                             const char* internalBase) {
+        if (!used || !isTessControl) return;
+        const std::string transport = legacyColorTransportName(
+            internalBase, "TessEvaluation");
+        (void)rewriteIndexedInterfaceMemberAccess(
+            result.source, "gl_out", legacyName, transport);
+    };
+    rewriteTessControlColorOutput(legacy.usesFrontColor,
+                                  "gl_FrontColor", "appgl_FrontColor");
+    rewriteTessControlColorOutput(legacy.usesBackColor,
+                                  "gl_BackColor", "appgl_BackColor");
+    rewriteTessControlColorOutput(legacy.usesFrontSecondaryColor,
+                                  "gl_FrontSecondaryColor",
+                                  "appgl_FrontSecondaryColor");
+    rewriteTessControlColorOutput(legacy.usesBackSecondaryColor,
+                                  "gl_BackSecondaryColor",
+                                  "appgl_BackSecondaryColor");
+
     if (legacy.usesFrontColor) {
-        replaceIdentifier(result.source, "gl_FrontColor", "appgl_FrontColor");
+        (void)eraseGlobalStorageDeclaration(result.source, "gl_FrontColor");
+        replaceCodeIdentifier(result.source,
+                              "gl_FrontColor", "appgl_FrontColor");
     }
     if (legacy.usesBackColor) {
-        replaceIdentifier(result.source, "gl_BackColor", "appgl_BackColor");
+        (void)eraseGlobalStorageDeclaration(result.source, "gl_BackColor");
+        replaceCodeIdentifier(result.source,
+                              "gl_BackColor", "appgl_BackColor");
     }
     if (legacy.usesFrontSecondaryColor) {
-        replaceIdentifier(result.source,
-                          "gl_FrontSecondaryColor",
-                          "appgl_FrontSecondaryColor");
+        (void)eraseGlobalStorageDeclaration(result.source,
+                                            "gl_FrontSecondaryColor");
+        replaceCodeIdentifier(result.source,
+                              "gl_FrontSecondaryColor",
+                              "appgl_FrontSecondaryColor");
     }
     if (legacy.usesBackSecondaryColor) {
-        replaceIdentifier(result.source,
-                          "gl_BackSecondaryColor",
-                          "appgl_BackSecondaryColor");
+        (void)eraseGlobalStorageDeclaration(result.source,
+                                            "gl_BackSecondaryColor");
+        replaceCodeIdentifier(result.source,
+                              "gl_BackSecondaryColor",
+                              "appgl_BackSecondaryColor");
     }
     if (legacy.usesFragmentColor) {
-        replaceIdentifier(result.source, "gl_Color", "appgl_FrontColor");
+        (void)eraseGlobalStorageDeclaration(result.source, "gl_Color");
+        replaceCodeIdentifier(result.source,
+                              "gl_Color",
+                              "appgl_LegacyColorValue()");
+    }
+    if (legacy.usesFragmentSecondaryColor) {
+        (void)eraseGlobalStorageDeclaration(result.source,
+                                            "gl_SecondaryColor");
+        replaceCodeIdentifier(result.source,
+                              "gl_SecondaryColor",
+                              "appgl_LegacySecondaryColorValue()");
     }
     if (legacy.anyLight()) {
         rewriteLightSourceSubscripts(result.source);
@@ -3914,7 +4518,8 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
 
     // 5b. fw¹⁹ — legacy attribute declarations (vertex stage only).
     // Location indices follow the NVIDIA-era conventional attribute
-    // aliasing: 0 = Vertex/position, 2 = Normal, 3 = Color, 8+N =
+    // aliasing: 0 = Vertex/position, 2 = Normal, 3 = primary Color,
+    // 4 = SecondaryColor, 8+N =
     // MultiTexCoord[N]. Spring's compat shaders were written against
     // this convention, and Spring's own `glVertexAttribPointer` calls
     // bind data into matching numeric indices (the fw¹⁸-verification
@@ -3939,6 +4544,9 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
         if (legacy.attrColor) {
             addLayoutAttrib(3, "vec4", "appgl_Color");
+        }
+        if (legacy.attrSecondaryColor) {
+            addLayoutAttrib(4, "vec4", "appgl_SecondaryColor");
         }
         for (unsigned int i = 0; i < 8; ++i) {
             if (legacy.attrMultiTexCoord[i]) {
@@ -4043,22 +4651,126 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    if (legacy.usesFrontColor && (isVertex || isArbGeometryStage)) {
-        preamble.append("out vec4 appgl_FrontColor;\n");
-    }
-    if (legacy.usesBackColor && (isVertex || isArbGeometryStage)) {
-        preamble.append("out vec4 appgl_BackColor;\n");
-    }
-    if (legacy.usesFrontSecondaryColor &&
-        (isVertex || isArbGeometryStage)) {
-        preamble.append("out vec4 appgl_FrontSecondaryColor;\n");
-    }
-    if (legacy.usesBackSecondaryColor &&
-        (isVertex || isArbGeometryStage)) {
-        preamble.append("out vec4 appgl_BackSecondaryColor;\n");
-    }
-    if (legacy.usesFragmentColor && isFragment) {
-        preamble.append("in vec4 appgl_FrontColor;\n");
+    std::vector<std::pair<std::string, std::string>>
+        legacyColorFanoutAssignments;
+    auto appendColorOutput = [&](const std::string& qualifier,
+                                 std::string_view name) {
+        if (!qualifier.empty()) {
+            preamble.append(qualifier).append(" ");
+        }
+        preamble.append("out vec4 ").append(name).append(";\n");
+    };
+    auto appendColorArray = [&](const char* storage,
+                                const std::string& qualifier,
+                                const std::string& name) {
+        if (!qualifier.empty()) {
+            preamble.append(qualifier).append(" ");
+        }
+        preamble.append(storage)
+            .append(" vec4 ")
+            .append(name)
+            .append("[];\n");
+    };
+    auto appendLegacyColorTransport =
+        [&](bool usesOutput,
+            bool usesInput,
+            const std::string& qualifier,
+            const char* baseName) {
+            if (usesInput && colorInputDestination != nullptr) {
+                appendColorArray(
+                    "in", qualifier,
+                    legacyColorTransportName(baseName,
+                                             colorInputDestination));
+            }
+            if (!usesOutput) {
+                return;
+            }
+            if (isTessControl) {
+                appendColorArray(
+                    "out", qualifier,
+                    legacyColorTransportName(baseName,
+                                             "TessEvaluation"));
+                return;
+            }
+            if (!(isVertex || isArbGeometryStage ||
+                  isStandardGeometryStage || isTessEvaluation)) {
+                return;
+            }
+
+            appendColorOutput(qualifier, baseName);
+            auto addFanout = [&](const char* destination) {
+                const std::string transport =
+                    legacyColorTransportName(baseName, destination);
+                appendColorOutput(qualifier, transport);
+                legacyColorFanoutAssignments.emplace_back(
+                    transport, baseName);
+            };
+            if (isVertex) {
+                // The next active stage is only known at link time. Emit
+                // every legal VS boundary; unused outputs are harmless.
+                addFanout("Geometry");
+                addFanout("TessControl");
+                // Tessellation control is optional in a tessellation
+                // program, so a VS can feed TES directly.
+                addFanout("TessEvaluation");
+            } else if (isTessEvaluation) {
+                addFanout("Geometry");
+            }
+        };
+    appendLegacyColorTransport(
+        legacy.usesFrontColor, legacy.usesFrontColorInput,
+        legacy.frontColorInterpolationQualifier, "appgl_FrontColor");
+    appendLegacyColorTransport(
+        legacy.usesBackColor, legacy.usesBackColorInput,
+        legacy.backColorInterpolationQualifier, "appgl_BackColor");
+    appendLegacyColorTransport(
+        legacy.usesFrontSecondaryColor,
+        legacy.usesFrontSecondaryColorInput,
+        legacy.frontSecondaryColorInterpolationQualifier,
+        "appgl_FrontSecondaryColor");
+    appendLegacyColorTransport(
+        legacy.usesBackSecondaryColor,
+        legacy.usesBackSecondaryColorInput,
+        legacy.backSecondaryColorInterpolationQualifier,
+        "appgl_BackSecondaryColor");
+    if (isFragment &&
+        (legacy.usesFragmentColor || legacy.usesFragmentSecondaryColor)) {
+        auto appendColorInput = [&](const std::string& qualifier,
+                                    const char* name) {
+            if (!qualifier.empty()) {
+                preamble.append(qualifier).append(" ");
+            }
+            preamble.append("in vec4 ").append(name).append(";\n");
+        };
+        if (legacy.usesFragmentColor) {
+            appendColorInput(legacy.fragmentColorInterpolationQualifier,
+                             "appgl_FrontColor");
+            appendColorInput(legacy.fragmentColorInterpolationQualifier,
+                             "appgl_BackColor");
+        }
+        if (legacy.usesFragmentSecondaryColor) {
+            appendColorInput(
+                legacy.fragmentSecondaryColorInterpolationQualifier,
+                "appgl_FrontSecondaryColor");
+            appendColorInput(
+                legacy.fragmentSecondaryColorInterpolationQualifier,
+                "appgl_BackSecondaryColor");
+        }
+        preamble.append("uniform int ")
+            .append(SUN::kVertexProgramTwoSide)
+            .append(";\n");
+        if (legacy.usesFragmentColor) {
+            preamble.append(
+                "vec4 appgl_LegacyColorValue() { return "
+                "(appgl_VertexProgramTwoSide != 0 && !gl_FrontFacing) ? "
+                "appgl_BackColor : appgl_FrontColor; }\n");
+        }
+        if (legacy.usesFragmentSecondaryColor) {
+            preamble.append(
+                "vec4 appgl_LegacySecondaryColorValue() { return "
+                "(appgl_VertexProgramTwoSide != 0 && !gl_FrontFacing) ? "
+                "appgl_BackSecondaryColor : appgl_FrontSecondaryColor; }\n");
+        }
     }
 
     // 5e. fw¹⁹/R05-2 — fog uniforms. Declaration initializers preserve
@@ -4181,16 +4893,27 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             insertAt += 1;
         }
         while (insertAt < result.source.size()) {
-            std::size_t lineStart = insertAt;
-            while (lineStart < result.source.size() &&
-                   (result.source[lineStart] == ' ' ||
-                    result.source[lineStart] == '\t')) {
-                ++lineStart;
-            }
-            if (result.source.compare(lineStart, 10, "#extension") != 0) {
+            const std::size_t lineEnd =
+                result.source.find('\n', insertAt);
+            const std::size_t boundedLineEnd =
+                lineEnd == std::string::npos
+                    ? result.source.size()
+                    : lineEnd;
+            const std::string_view line = trimAscii(
+                std::string_view(result.source).substr(
+                    insertAt, boundedLineEnd - insertAt));
+            std::string_view extension;
+            std::string_view behavior;
+            const bool isExtension =
+                parseExtensionDirective(line, extension, behavior);
+            // GL_ARB_compatibility directives are replaced with a
+            // same-width line comment before this pass. Continue past
+            // that comment, and past any later extension directives, so
+            // synthesized declarations never split the directive block.
+            if (!line.empty() && line.substr(0, 2) != "//" &&
+                !isExtension) {
                 break;
             }
-            std::size_t lineEnd = result.source.find('\n', lineStart);
             if (lineEnd == std::string::npos) {
                 insertAt = result.source.size();
                 break;
@@ -4222,6 +4945,21 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         injected.append(preamble);
         injected.append("#line 1\n");
         result.source.insert(0, injected);
+    }
+
+    if (!legacyColorFanoutAssignments.empty() &&
+        replaceCodeFunctionIdentifier(
+            result.source, "main", "appgl_LegacyColorMain")) {
+        result.source.append("\nvoid main() {\n");
+        result.source.append("    appgl_LegacyColorMain();\n");
+        for (const auto& assignment : legacyColorFanoutAssignments) {
+            result.source.append("    ")
+                .append(assignment.first)
+                .append(" = ")
+                .append(assignment.second)
+                .append(";\n");
+        }
+        result.source.append("}\n");
     }
 
     if (legacy.synthesizesLegacyClipPlanes &&

@@ -104,7 +104,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             : nullptr;
         if (programUsesCompatVertexInput(program) &&
             !currentGenericVertexArraySuppliesProgramInput(program) &&
-            !programUsesFrontFacing(program)) {
+            (!programUsesFrontFacing(program) ||
+             program->synthesizedMatrixSlots.vertexProgramTwoSide >= 0)) {
             const auto& raster = impl_->state->rasterState();
             routeLegacyClientArrayThroughTranslatedProgram =
                 raster.polygonModeFront == GL_FILL &&
@@ -621,6 +622,20 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
         }
     }
+    constexpr GLuint kLegacyTessClientBufferSentinel =
+        std::numeric_limits<GLuint>::max();
+    std::vector<GLContext::Impl::LegacyCompatClientVertex>
+        legacyTessClientVertices;
+    GLVertexArrayObject legacyTessCpuVertexArray;
+    GLVertexArrayObject legacyTessNativeVertexArray;
+    const bool hasLegacyTessClientVertexArray =
+        routeLegacyClientArrayThroughTranslatedProgram &&
+        tessProgram != nullptr &&
+        tessProgram->hasTessellation &&
+        impl_->materializeLegacyCompatClientVertexArray(
+            *tessProgram, first, count, legacyTessClientVertices,
+            legacyTessCpuVertexArray, &legacyTessNativeVertexArray,
+            kLegacyTessClientBufferSentinel);
     if (tessProgram != nullptr &&
         tessProgram->hasTessellation &&
         tessProgram->metalTessTier != GLProgramObject::MetalTessTier::None &&
@@ -683,7 +698,22 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             APPGL_LOG(SHADER, @"drawArrays metal-tess skipped for storage-image/SSBO/atomic side effects");
         } else {
             if (impl_->tryMetalTessellationDraw(
-                    *tessProgram, tessProgramName, mode, count, first)) {
+                    *tessProgram, tessProgramName, mode, count,
+                    hasLegacyTessClientVertexArray ? 0 : first,
+                    /*instanceCount=*/1, /*baseInstance=*/0,
+                    hasLegacyTessClientVertexArray
+                        ? &legacyTessNativeVertexArray
+                        : nullptr,
+                    hasLegacyTessClientVertexArray
+                        ? legacyTessClientVertices.data()
+                        : nullptr,
+                    hasLegacyTessClientVertexArray
+                        ? legacyTessClientVertices.size() *
+                              sizeof(legacyTessClientVertices.front())
+                        : 0,
+                    hasLegacyTessClientVertexArray
+                        ? kLegacyTessClientBufferSentinel
+                        : 0)) {
                 APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
                           count, first);
                 if (!tessProgram->gsPresent) {
@@ -703,8 +733,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         !tessEmulProgram->geometryEmulated &&
         !pipelineHasEmulatedGeometry) {
         const GLuint vaoName = impl_->state->boundVertexArray();
-        GLVertexArrayObject* tvao = (vaoName != 0)
-            ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        GLVertexArrayObject* tvao = hasLegacyTessClientVertexArray
+            ? &legacyTessCpuVertexArray
+            : ((vaoName != 0)
+                   ? impl_->objects->vertexArrays().get(vaoName)
+                   : nullptr);
         if (tvao != nullptr) {
             // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap. Build
             // per-stage sampler/storage-image maps so TCS/TES bodies
@@ -742,7 +775,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
                 *tessEmulProgram, *tvao, *impl_->objects, *impl_->state,
-                mode, count, first, /*elementIndices=*/nullptr,
+                mode, count,
+                hasLegacyTessClientVertexArray ? 0 : first,
+                /*elementIndices=*/nullptr,
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 tcsSamMap.empty() ? nullptr : &tcsSamMap,
                 tcsImgMap.empty() ? nullptr : &tcsImgMap,
@@ -1099,7 +1134,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             // CPU TF emulation runs before the translated render path packs
             // draw uniforms. Mirror fixed-function matrices now so legacy
             // gl_Position expressions observe the current matrix stacks.
-            if (pushSynthesizedMatrixUniforms(*program, impl_->matrixState)) {
+            if (pushSynthesizedMatrixUniforms(
+                    *program, impl_->matrixState,
+                    impl_->state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE))) {
                 program->markUniformsDirty();
             }
             std::vector<std::uint32_t> tfCaptureIndices;
@@ -1657,10 +1694,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         {
             const auto& legacyVertexArray = impl_->legacyVertexArray;
             const auto& legacyColorArray = impl_->legacyColorArray;
+            const auto& legacySecondaryColorArray =
+                impl_->legacySecondaryColorArray;
             const auto& legacyTexCoordArray = impl_->legacyTexCoordArray;
             const bool programWantsLegacyVertex =
                 programUsesCompatVertexInput(program);
             bool programWantsLegacyColor = false;
+            bool programWantsLegacySecondaryColor = false;
             bool programWantsLegacyTexCoord0 = false;
             for (const auto& input : program->vertexReflection.vertexInputs) {
                 if (input.location == 3 &&
@@ -1673,6 +1713,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                      input.name == "_appgl_MultiTexCoord0")) {
                     programWantsLegacyTexCoord0 = true;
                 }
+                if ((input.location == 4 || input.sourceLocation == 4) &&
+                    (input.name == "appgl_SecondaryColor" ||
+                     input.name == "_appgl_SecondaryColor")) {
+                    programWantsLegacySecondaryColor = true;
+                }
             }
             const bool colorArrayHasSource =
                 legacyColorArray.pointer != nullptr ||
@@ -1683,6 +1728,14 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 legacyColorArray.type == GL_FLOAT &&
                 legacyColorArray.size >= 3 &&
                 legacyColorArray.size <= 4;
+            const bool secondaryColorArrayHasSource =
+                legacySecondaryColorArray.pointer != nullptr ||
+                legacySecondaryColorArray.bufferName != 0;
+            const bool secondaryColorArrayUsable =
+                legacySecondaryColorArray.enabled &&
+                secondaryColorArrayHasSource &&
+                legacySecondaryColorArray.type == GL_FLOAT &&
+                legacySecondaryColorArray.size == 3;
             const bool texCoordArrayHasSource =
                 legacyTexCoordArray.pointer != nullptr ||
                 legacyTexCoordArray.bufferName != 0;
@@ -1742,9 +1795,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.vertexAttributeLayouts.push_back(layout);
             };
             const bool needsLegacyColorInput = programWantsLegacyColor;
+            const bool needsLegacySecondaryColorInput =
+                programWantsLegacySecondaryColor;
             const bool needsLegacyTexCoord0Input = programWantsLegacyTexCoord0;
             if (needsLegacyColorInput && legacyColorArray.enabled &&
                 !colorArrayUsable) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (needsLegacySecondaryColorInput &&
+                legacySecondaryColorArray.enabled &&
+                !secondaryColorArrayUsable) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
@@ -1767,6 +1828,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 const std::size_t colorStride = legacyColorArray.stride > 0
                     ? static_cast<std::size_t>(legacyColorArray.stride)
                     : static_cast<std::size_t>(legacyColorArray.size) * sizeof(GLfloat);
+                const std::size_t secondaryColorStride =
+                    legacySecondaryColorArray.stride > 0
+                        ? static_cast<std::size_t>(
+                              legacySecondaryColorArray.stride)
+                        : 3u * sizeof(GLfloat);
                 const std::size_t texCoordStride = legacyTexCoordArray.stride > 0
                     ? static_cast<std::size_t>(legacyTexCoordArray.stride)
                     : static_cast<std::size_t>(legacyTexCoordArray.size) * sizeof(GLfloat);
@@ -1785,6 +1851,16 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         colorBase, colorAvailableBytes)) {
                     return false;
                 }
+                const std::uint8_t* secondaryColorBase = nullptr;
+                std::size_t secondaryColorAvailableBytes = 0;
+                if (secondaryColorArrayUsable &&
+                    !resolveLegacyArraySource(
+                        legacySecondaryColorArray,
+                        "glSecondaryColorPointer",
+                        secondaryColorBase,
+                        secondaryColorAvailableBytes)) {
+                    return false;
+                }
                 const std::uint8_t* texCoordBase = nullptr;
                 std::size_t texCoordAvailableBytes = 0;
                 if (texCoordArrayUsable &&
@@ -1793,7 +1869,14 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         texCoordBase, texCoordAvailableBytes)) {
                     return false;
                 }
-                std::vector<Impl::ImmediateModeVertex> legacyVertices;
+                struct LegacyTranslatedVertex {
+                    float position[4];
+                    float color[4];
+                    float texcoord[4];
+                    float secondaryColor[4];
+                };
+                static_assert(sizeof(LegacyTranslatedVertex) == 64);
+                std::vector<LegacyTranslatedVertex> legacyVertices;
                 legacyVertices.reserve(static_cast<std::size_t>(count));
                 bool legacyRangeOk = true;
                 for (GLsizei i = 0; i < count; ++i) {
@@ -1814,7 +1897,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                     const auto* src = reinterpret_cast<const GLfloat*>(
                         legacyBase + vertexOffset);
-                    Impl::ImmediateModeVertex v{};
+                    LegacyTranslatedVertex v{};
                     v.position[0] = src[0];
                     v.position[1] = src[1];
                     v.position[2] = legacyVertexArray.size >= 3 ? src[2] : 0.0f;
@@ -1838,6 +1921,28 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         v.color[2] = cp[2];
                         v.color[3] =
                             legacyColorArray.size >= 4 ? cp[3] : v.color[3];
+                    }
+                    std::memcpy(
+                        v.secondaryColor,
+                        impl_->fixedFunctionCurrentSecondaryColor,
+                        sizeof(v.secondaryColor));
+                    if (secondaryColorArrayUsable) {
+                        const std::size_t secondaryColorOffset =
+                            sourceIndex * secondaryColorStride;
+                        if (!legacyArrayElementFits(
+                                secondaryColorOffset,
+                                3u * sizeof(GLfloat),
+                                secondaryColorAvailableBytes)) {
+                            legacyRangeOk = false;
+                            break;
+                        }
+                        const auto* secondary =
+                            reinterpret_cast<const GLfloat*>(
+                                secondaryColorBase + secondaryColorOffset);
+                        v.secondaryColor[0] = secondary[0];
+                        v.secondaryColor[1] = secondary[1];
+                        v.secondaryColor[2] = secondary[2];
+                        v.secondaryColor[3] = 1.0f;
                     }
                     std::memcpy(v.texcoord, impl_->immediate.currentTexcoord,
                                 sizeof(v.texcoord));
@@ -1876,20 +1981,25 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.baseVertex = 0;
                 tdi.vertexData = legacyVertices.data();
                 tdi.vertexDataByteCount =
-                    legacyVertices.size() * sizeof(Impl::ImmediateModeVertex);
-                tdi.vertexStride = sizeof(Impl::ImmediateModeVertex);
+                    legacyVertices.size() * sizeof(LegacyTranslatedVertex);
+                tdi.vertexStride = sizeof(LegacyTranslatedVertex);
                 tdi.vertexAttributeLayouts.clear();
                 addFloatLayout(tdi, 0,
-                               offsetof(Impl::ImmediateModeVertex, position),
+                               offsetof(LegacyTranslatedVertex, position),
                                4);
                 if (programWantsLegacyColor) {
                     addFloatLayout(tdi, 3,
-                                   offsetof(Impl::ImmediateModeVertex, color),
+                                   offsetof(LegacyTranslatedVertex, color),
                                    4);
+                }
+                if (programWantsLegacySecondaryColor) {
+                    addFloatLayout(
+                        tdi, 4,
+                        offsetof(LegacyTranslatedVertex, secondaryColor), 4);
                 }
                 if (programWantsLegacyTexCoord0) {
                     addFloatLayout(tdi, 8,
-                                   offsetof(Impl::ImmediateModeVertex, texcoord),
+                                   offsetof(LegacyTranslatedVertex, texcoord),
                                    4);
                 }
                 populateTranslatedDrawFixedFunctionState(

@@ -18,6 +18,12 @@
 #ifndef GL_ALPHA_TEST_REF
 #define GL_ALPHA_TEST_REF 0x0BC2
 #endif
+#ifndef GL_VERTEX_PROGRAM_TWO_SIDE
+#define GL_VERTEX_PROGRAM_TWO_SIDE 0x8643
+#endif
+#ifndef GL_COLOR_SUM
+#define GL_COLOR_SUM 0x8458
+#endif
 
 namespace appgl {
 namespace {
@@ -180,6 +186,7 @@ bool queryValue(
             return true;
         case GL_BLEND:
         case GL_ALPHA_TEST:
+        case GL_COLOR_SUM:
         case GL_CULL_FACE:
         case GL_DEBUG_OUTPUT:
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
@@ -201,6 +208,7 @@ bool queryValue(
         case GL_PRIMITIVE_RESTART_FIXED_INDEX:
         case GL_TEXTURE_CUBE_MAP_SEAMLESS:
         case GL_PROGRAM_POINT_SIZE:
+        case GL_VERTEX_PROGRAM_TWO_SIDE:
         case GL_SAMPLE_ALPHA_TO_COVERAGE:
         case GL_SAMPLE_ALPHA_TO_ONE:
         case GL_SAMPLE_MASK:
@@ -1141,6 +1149,9 @@ std::uint32_t dirtyBitsForCap(GLenum cap) {
         case GL_DEBUG_OUTPUT:
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
         case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+        case GL_COLOR_SUM:
+        // Selected through a synthesized fragment uniform at draw time.
+        case GL_VERTEX_PROGRAM_TWO_SIDE:
             return 0u;
         default:
             // Unknown caps fall through with no dirty bits set; the validation

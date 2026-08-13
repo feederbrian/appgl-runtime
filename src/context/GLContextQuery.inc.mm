@@ -179,6 +179,12 @@ bool queryCompatAdmissionInteger(const CompatPolicy& policy, GLenum pname, GLint
             return false;
     }
 }
+
+bool isLegacySecondaryColorArrayParameter(GLenum pname) {
+    return pname == GL_SECONDARY_COLOR_ARRAY_SIZE ||
+           pname == GL_SECONDARY_COLOR_ARRAY_TYPE ||
+           pname == GL_SECONDARY_COLOR_ARRAY_STRIDE;
+}
 }  // namespace
 
 bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
@@ -189,6 +195,14 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
     GLint compatAdmissionValue = 0;
     if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, &compatAdmissionValue)) {
         *data = compatAdmissionValue != 0 ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (isLegacySecondaryColorArrayParameter(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = integerValue != 0 ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
@@ -310,6 +324,22 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         return false;
     }
     if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, data)) {
+        return true;
+    }
+    if (isLegacySecondaryColorArrayParameter(pname)) {
+        switch (pname) {
+            case GL_SECONDARY_COLOR_ARRAY_SIZE:
+                *data = impl_->legacySecondaryColorArray.size;
+                break;
+            case GL_SECONDARY_COLOR_ARRAY_TYPE:
+                *data = static_cast<GLint>(impl_->legacySecondaryColorArray.type);
+                break;
+            case GL_SECONDARY_COLOR_ARRAY_STRIDE:
+                *data = static_cast<GLint>(impl_->legacySecondaryColorArray.stride);
+                break;
+            default:
+                return false;
+        }
         return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH) {
@@ -599,6 +629,14 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         *data = static_cast<GLint64>(compatAdmissionValue);
         return true;
     }
+    if (isLegacySecondaryColorArrayParameter(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLint64>(integerValue);
+        return true;
+    }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
@@ -880,6 +918,14 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         *data = static_cast<GLfloat>(compatAdmissionValue);
         return true;
     }
+    if (isLegacySecondaryColorArrayParameter(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLfloat>(integerValue);
+        return true;
+    }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
@@ -964,6 +1010,14 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
     GLint compatAdmissionValue = 0;
     if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, &compatAdmissionValue)) {
         *data = static_cast<GLdouble>(compatAdmissionValue);
+        return true;
+    }
+    if (isLegacySecondaryColorArrayParameter(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLdouble>(integerValue);
         return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {

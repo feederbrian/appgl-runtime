@@ -47,9 +47,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             !currentProgramForLegacyTf->linked ||
             !currentProgramForLegacyTf->hasTranslatedPipeline ||
             currentProgramForLegacyTf->hasTessellation ||
-            currentProgramForLegacyTf->gsPresent ||
-            !programAttachedShaderSourceUsesToken(
-                *currentProgramForLegacyTf, *impl_->objects, "gl_VertexID")) {
+            currentProgramForLegacyTf->gsPresent) {
             return false;
         }
         const auto& vertexArray = impl_->legacyVertexArray;
@@ -65,9 +63,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             const GLuint location = input.location;
             const GLuint sourceLocation = input.sourceLocation;
             const bool supportedLocation =
-                location == 0 || location == 1 || location == 3 || location == 8 ||
+                location == 0 || location == 1 || location == 3 ||
+                location == 4 || location == 8 ||
                 sourceLocation == 0 || sourceLocation == 1 ||
-                sourceLocation == 3 || sourceLocation == 8;
+                sourceLocation == 3 || sourceLocation == 4 ||
+                sourceLocation == 8;
             if (input.containsFp64 || !supportedLocation) {
                 return false;
             }
@@ -673,7 +673,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 }
             }
         }
-        if (pushSynthesizedMatrixUniforms(*program, impl_->matrixState)) {
+        if (pushSynthesizedMatrixUniforms(
+                *program, impl_->matrixState,
+                impl_->state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE))) {
             program->markUniformsDirty();
         }
         // Resolve the post-primitive-restart drawElements stream
