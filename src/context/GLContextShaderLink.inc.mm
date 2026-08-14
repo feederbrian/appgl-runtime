@@ -91,6 +91,8 @@ bool GLContext::linkProgram(GLuint program) {
     const auto priorFragmentReflection = programObject->fragmentReflection;
     const auto priorVertexSourceHash = programObject->vertexSourceHash;
     const auto priorFragmentSourceHash = programObject->fragmentSourceHash;
+    const auto priorCompatVertexOnlyRasterReplaySpirv =
+        programObject->compatVertexOnlyRasterReplaySpirv;
     struct ArbGeometryShader4ExecutableSnapshot {
         ShaderReflection geometryReflection;
         bool geometryEmulated;
@@ -273,6 +275,8 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->fragmentReflection = priorFragmentReflection;
         programObject->vertexSourceHash = priorVertexSourceHash;
         programObject->fragmentSourceHash = priorFragmentSourceHash;
+        programObject->compatVertexOnlyRasterReplaySpirv =
+            priorCompatVertexOnlyRasterReplaySpirv;
         if (priorArbGeometryShader4Executable != nullptr) {
             priorArbGeometryShader4Executable->restore(*programObject);
         }
@@ -432,6 +436,7 @@ bool GLContext::linkProgram(GLuint program) {
     GeometryShader4LinkPlan geometryShader4LinkPlan;
     GeometryShader4LegacyInputUsage geometryShader4LegacyInputs;
     bool hasGeometryShader4LinkView = false;
+    bool synthesizesVertexProgramTwoSideUniform = false;
 
     for (GLuint shaderId : programObject->attachedShaders) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
@@ -499,6 +504,22 @@ bool GLContext::linkProgram(GLuint program) {
             default: break;
         }
         appendDeclarationsAsUniforms(programObject->uniforms, shaderObject->declaredUniforms);
+        if (shaderObject->stage == GL_FRAGMENT_SHADER &&
+            !shaderObject->isSpirvBinary) {
+            const CompatShaderRewriteResult compatUniformRewrite =
+                rewriteCompatShader(shaderObject->source,
+                                    GL_FRAGMENT_SHADER);
+            if (compatUniformRewrite.legacy.usesFragmentColor ||
+                compatUniformRewrite.legacy.usesFragmentSecondaryColor) {
+                synthesizesVertexProgramTwoSideUniform = true;
+                for (auto& uniform : programObject->uniforms) {
+                    if (uniform.name ==
+                        SynthesizedUniformNames::kVertexProgramTwoSide) {
+                        uniform.implementationInternal = true;
+                    }
+                }
+            }
+        }
 
         // GL 4.2 §7.6: harvest `layout(binding = N)` from the original
         // GLSL source across every attached shader. The map is used at
@@ -3678,6 +3699,9 @@ bool GLContext::linkProgram(GLuint program) {
     };
 
     for (const auto& u : programObject->uniforms) {
+        if (u.implementationInternal) {
+            continue;
+        }
         GLProgramResourceEntry entry;
         // GL 4.6 §7.3.1: array uniforms report their name with the
         // "[0]" suffix in the resource interface — EVEN for
@@ -4710,6 +4734,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->vertexSpirv.clear();
     programObject->vertexSpirvEntryPoint.clear();
     programObject->vertexSpirvSpecializationConstants.clear();
+    programObject->compatVertexOnlyRasterReplaySpirv.clear();
     programObject->gsPresent = false;
     programObject->gsInputTopology = 0;
     programObject->gsOutputTopology = 0;
@@ -5612,6 +5637,7 @@ bool GLContext::linkProgram(GLuint program) {
     };
 
     std::string fragmentOnlySyntheticVertexSourceForReflection;
+    std::string vertexOnlySyntheticFragmentSourceForReflection;
     bool rasterTranslationOk = false;
     switch (kind) {
         case ProgramKind::VertexFragment: {
@@ -6038,6 +6064,11 @@ bool GLContext::linkProgram(GLuint program) {
                             programObject->fragmentReflection =
                                 std::move(fsRefl);
                             programObject->hasTranslatedPipeline = true;
+                            programObject->compatVertexOnlyRasterReplaySpirv =
+                                linked.vertexSpirv;
+                            vertexOnlySyntheticFragmentSourceForReflection =
+                                fsLinkSource;
+                            synthesizesVertexProgramTwoSideUniform = true;
                             rasterTranslationOk = true;
                             synthesizedCompatFragment = true;
                         }
@@ -8828,6 +8859,10 @@ bool GLContext::linkProgram(GLuint program) {
                 info.arraySize = (member.arraySize > 0)
                     ? static_cast<GLint>(member.arraySize) : 1;
                 info.isArray = member.isArray;
+                info.implementationInternal =
+                    synthesizesVertexProgramTwoSideUniform &&
+                    member.name ==
+                        SynthesizedUniformNames::kVertexProgramTwoSide;
                 info.explicitLocation = -1;
                 info.explicitBinding = -1;
                 // GL 4.6 §7.6.2.2 — when the scanner already registered
@@ -8947,7 +8982,8 @@ bool GLContext::linkProgram(GLuint program) {
                 // Default-block uniforms: leave offset / blockIndex
                 // / arrayStride / matrixStride at their default -1
                 // sentinels so getResourceProperty reports -1.
-                if (!hideFromPublicUniformResources) {
+                if (!hideFromPublicUniformResources &&
+                    !info.implementationInternal) {
                     programObject->resourceUniforms.push_back(std::move(entry));
                 }
 
@@ -8961,7 +8997,11 @@ bool GLContext::linkProgram(GLuint program) {
             : (!fragmentOnlySyntheticVertexSourceForReflection.empty()
                 ? fragmentOnlySyntheticVertexSourceForReflection
                 : kEmptySrc);
-        const std::string& fsSrc2 = fragmentShader ? fragmentShader->source : kEmptySrc;
+        const std::string& fsSrc2 = fragmentShader
+            ? fragmentShader->source
+            : (!vertexOnlySyntheticFragmentSourceForReflection.empty()
+                ? vertexOnlySyntheticFragmentSourceForReflection
+                : kEmptySrc);
         const std::string& gsSrc2 = geometryShader ? geometryShader->source : kEmptySrc;
         const std::string& csSrc2 = computeShader ? computeShader->source : kEmptySrc;
         supplementFromReflection(programObject->vertexReflection, 0x01, vsSrc2);

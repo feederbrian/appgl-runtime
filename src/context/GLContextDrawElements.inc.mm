@@ -35,8 +35,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         currentProgramNameForLegacyTf != 0
             ? impl_->objects->programs().get(currentProgramNameForLegacyTf)
             : nullptr;
+    const bool transformFeedbackActiveForLegacyDraw =
+        isTransformFeedbackActive();
+    const bool transformFeedbackPausedForLegacyDraw =
+        transformFeedbackActiveForLegacyDraw && isTransformFeedbackPaused();
+    const bool transformFeedbackCaptureActiveForLegacyDraw =
+        transformFeedbackActiveForLegacyDraw &&
+        !transformFeedbackPausedForLegacyDraw;
     const bool requiresTranslatedLegacyTfCapture =
-        isTransformFeedbackActive() &&
+        transformFeedbackCaptureActiveForLegacyDraw &&
         currentProgramForLegacyTf != nullptr &&
         currentProgramForLegacyTf->linked &&
         currentProgramForLegacyTf->hasTranslatedPipeline &&
@@ -92,7 +99,13 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         return raster.polygonModeFront == GL_FILL &&
             raster.polygonModeBack == GL_FILL;
     }();
-    if (!requiresTranslatedLegacyTfCapture &&
+    // The fixed-function legacy-array encoder cannot capture a bound shader's
+    // transform-feedback outputs. Suppress it while capture is live; paused
+    // draws retain the established routing/fallback behavior below.
+    const bool suppressLegacyFixedFunctionForTf =
+        transformFeedbackCaptureActiveForLegacyDraw;
+    if (!suppressLegacyFixedFunctionForTf &&
+        !requiresTranslatedLegacyTfCapture &&
         !routeLegacyClientArrayThroughTranslatedProgram &&
         encodeLegacyClientArrayDraw(mode, 0, count, indices, type,
                                     "glDrawElements")) {
@@ -226,7 +239,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             : nullptr;
         const bool willHitVsOnlyTf =
             p != nullptr &&
-            isTransformFeedbackActive() &&  // CKPT85: per-bound-object
+            isTransformFeedbackActive() &&
+            !isTransformFeedbackPaused() &&  // CKPT85: per-bound-object
             !p->transformFeedbackVaryingNames.empty() &&
             !p->geometryEmulated &&
             !p->tessellationEmulated &&
@@ -621,7 +635,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // with `glDrawElements` to drive TF capture without a bound
     // GL_ELEMENT_ARRAY_BUFFER.
     if (program != nullptr &&
-        isTransformFeedbackActive() &&  // CKPT85: per-bound-object
+        isTransformFeedbackActive() &&
+        !isTransformFeedbackPaused() &&  // CKPT85: per-bound-object
         !program->transformFeedbackVaryingNames.empty() &&
         !program->geometryEmulated &&
         !program->tessellationEmulated &&

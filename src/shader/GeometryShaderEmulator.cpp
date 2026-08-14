@@ -11746,11 +11746,84 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         }
     }
     // Transform-feedback writes only need the requested varyings. A
-    // non-discard CPU replay also feeds the linked fragment stage, so retain
-    // every VS output after the TF-ordered prefix for raster interpolation.
+    // non-discard CPU replay also feeds the linked fragment stage. Vertex-only
+    // compatibility programs can have a separately linked/padded VS interface
+    // for that raster replay; keep interpreting the original VS (the TF source
+    // of truth), but use the linked interface to describe the raster tail.
     if (includeRasterVaryings) {
         for (const auto& v : allOutputs) {
             appendCapturedOnce(captured, v);
+        }
+        if (!program.compatVertexOnlyRasterReplaySpirv.empty()) {
+            SpirvModule rasterMod;
+            if (!rasterMod.parse(
+                    program.compatVertexOnlyRasterReplaySpirv.data(),
+                    program.compatVertexOnlyRasterReplaySpirv.size())) {
+                markFailure();
+                d.diagnostic =
+                    "emulateVsOnlyDrawForTf: raster replay SPIR-V parse: " +
+                    rasterMod.parseError;
+                return d;
+            }
+
+            const std::vector<OutputVaryingDesc> rasterOutputs =
+                gatherOutputVaryings(rasterMod);
+            auto compatibleOutputShape = [](const VsOutputVaryingInfo& a,
+                                            const VsOutputVaryingInfo& b) {
+                return a.width == b.width &&
+                       a.baseType == b.baseType &&
+                       a.scalarByteSize == b.scalarByteSize;
+            };
+            for (const auto& rasterOutput : rasterOutputs) {
+                VsOutputVaryingInfo rasterInfo;
+                rasterInfo.name = rasterOutput.name;
+                rasterInfo.width = rasterOutput.width;
+                rasterInfo.location = rasterOutput.location;
+                rasterInfo.baseType = rasterOutput.baseType;
+                rasterInfo.scalarByteSize = rasterOutput.scalarByteSize;
+
+                const auto original = std::find_if(
+                    allOutputs.begin(), allOutputs.end(),
+                    [&](const VsOutputVaryingInfo& output) {
+                        return output.name == rasterInfo.name;
+                    });
+                if (original != allOutputs.end() &&
+                    !compatibleOutputShape(*original, rasterInfo)) {
+                    markFailure();
+                    d.diagnostic =
+                        "emulateVsOnlyDrawForTf: raster replay output '" +
+                        rasterInfo.name + "' is incompatible with original VS output";
+                    return d;
+                }
+
+                // A TF-captured output may also feed rasterization. Retain its
+                // existing payload position (and therefore the TF prefix/order)
+                // while adopting the linked interface's authoritative metadata.
+                const auto existing = std::find_if(
+                    captured.begin(), captured.end(),
+                    [&](const VsOutputVaryingInfo& output) {
+                        return output.name == rasterInfo.name;
+                    });
+                if (existing != captured.end()) {
+                    if (!compatibleOutputShape(*existing, rasterInfo)) {
+                        markFailure();
+                        d.diagnostic =
+                            "emulateVsOnlyDrawForTf: raster replay output '" +
+                            rasterInfo.name + "' is incompatible with captured VS output";
+                        return d;
+                    }
+                    existing->location = rasterInfo.location;
+                    existing->baseType = rasterInfo.baseType;
+                    existing->scalarByteSize = rasterInfo.scalarByteSize;
+                    continue;
+                }
+
+                // Linked-only declaration padding has no value in the original
+                // module. Interpreter::executeVs already zero-fills requested
+                // output names it cannot find, preserving GLSL's undefined-value
+                // freedom while satisfying the linked Metal stage interface.
+                captured.push_back(std::move(rasterInfo));
+            }
         }
     }
     // Sum total varying widths to size the per-vertex stride. Even

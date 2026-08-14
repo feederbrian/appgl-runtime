@@ -799,6 +799,11 @@ struct GLProgramUniformInfo {
     std::string name;
     GLenum type = 0;
     GLint arraySize = 1;
+    // Driver-control uniforms remain part of the executable's internal
+    // uniform storage, but are not part of the GL-visible uniform interface.
+    // This is provenance metadata, not a name-prefix rule: compatibility
+    // matrix uniforms are intentionally public on this implementation.
+    bool implementationInternal = false;
     // True iff the GLSL source used array syntax (see
     // GLShaderDeclaration::isArray). Propagated so
     // resource-interface queries can append the "[0]" suffix even
@@ -1331,6 +1336,12 @@ struct GLProgramObject {
     std::string vertexSpirvEntryPoint;
     std::unordered_map<std::uint32_t, std::uint32_t>
         vertexSpirvSpecializationConstants;
+    // A vertex-only compatibility program executes the original SPIR-V for
+    // transform-feedback capture.  Its synthesized raster fragment consumer
+    // is linked against a padded producer interface, however, so CPU raster
+    // replay needs this separate interface view without replacing the user
+    // executable above (which may carry TF-only outputs).
+    std::vector<std::uint32_t> compatVertexOnlyRasterReplaySpirv;
     // GS input / output topology from the SPIR-V execution modes —
     // OutputPoints / OutputLineStrip / OutputTriangleStrip, and
     // InputPoints / InputLines / InputTrianglesAdjacency etc.

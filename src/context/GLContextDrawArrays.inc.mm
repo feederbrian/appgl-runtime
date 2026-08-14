@@ -112,7 +112,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 raster.polygonModeBack == GL_FILL;
         }
     }
-    if (!routeLegacyClientArrayThroughTranslatedProgram &&
+    const bool transformFeedbackActiveForLegacyDraw =
+        isTransformFeedbackActive();
+    const bool transformFeedbackCaptureActiveForLegacyDraw =
+        transformFeedbackActiveForLegacyDraw &&
+        !isTransformFeedbackPaused();
+    // The fixed-function legacy-array encoder cannot capture a bound shader's
+    // transform-feedback outputs. Suppress it while capture is live; paused
+    // draws retain the established routing/fallback behavior below.
+    const bool suppressLegacyFixedFunctionForTf =
+        transformFeedbackCaptureActiveForLegacyDraw;
+    if (!suppressLegacyFixedFunctionForTf &&
+        !routeLegacyClientArrayThroughTranslatedProgram &&
         encodeLegacyClientArrayDraw(mode, first, count, nullptr, 0, "glDrawArrays")) {
         return true;
     }
@@ -1107,10 +1118,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     // doesn't have geometryEmulated, and VS-only-TF skipped → no
     // capturedVertexCount accumulation → glDrawTransformFeedbackInstanced
     // gets count=0 → test fails.
-    const bool transformFeedbackActiveForDraw =
-        isTransformFeedbackActive();  // CKPT85: per-bound-object
+    const bool transformFeedbackCaptureActiveForDraw =
+        isTransformFeedbackActive() &&
+        !isTransformFeedbackPaused();  // CKPT85: per-bound-object
     if (program != nullptr &&
-        transformFeedbackActiveForDraw &&
+        transformFeedbackCaptureActiveForDraw &&
         !program->transformFeedbackVaryingNames.empty() &&
         (emulProgram == nullptr || !emulProgram->geometryEmulated) &&
         !program->geometryEmulated &&

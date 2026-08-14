@@ -10120,6 +10120,298 @@ TestResult runDirectSentinel(std::string id, Fn&& fn) {
     return result;
 }
 
+TestResult runR08TwoSideRepairSentinel() {
+    ScopedEnvVar compatProfile("APPGL_COMPAT_PROFILE", "1");
+    auto result = runDirectSentinel("r08.two-side-repair", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+
+        constexpr GLenum kVertexProgramTwoSide = 0x8643;
+        constexpr GLenum kVertexArray = 0x8074;
+        static constexpr const char* kSelectorUniform =
+            "appgl_VertexProgramTwoSide";
+        static constexpr const char* kMvpUniform =
+            "appgl_ModelViewProjectionMatrix";
+
+        static constexpr const char* kCompatVertex =
+            "#version 110\n"
+            "varying float tfValue;\n"
+            "uniform float a;\n"
+            "void main() {\n"
+            "    gl_Position = ftransform();\n"
+            "    tfValue = gl_Vertex.x + 2.0;\n"
+            "    gl_FrontColor = vec4(a, 0.0, 0.0, 1.0);\n"
+            "    gl_BackColor = vec4(a, 0.0, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kCompatFragment =
+            "#version 110\n"
+            "void main() { gl_FragColor = gl_Color; }\n";
+
+        const auto buildCompatProgram = [&](bool attachFragment,
+                                            bool captureTf) {
+            const GLuint vertex = compileRequiredShader(
+                gl, GL_VERTEX_SHADER, kCompatVertex,
+                "R0.8 two-side repair vertex");
+            GLuint fragment = 0;
+            if (attachFragment) {
+                fragment = compileRequiredShader(
+                    gl, GL_FRAGMENT_SHADER, kCompatFragment,
+                    "R0.8 two-side repair fragment");
+            }
+            const GLuint program = gl.glCreateProgram();
+            gl.glAttachShader(program, vertex);
+            if (fragment != 0) {
+                gl.glAttachShader(program, fragment);
+            }
+            if (captureTf) {
+                const char* varying = "tfValue";
+                gl.glTransformFeedbackVaryings(
+                    program, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+            }
+            gl.glLinkProgram(program);
+            gl.glDeleteShader(vertex);
+            if (fragment != 0) {
+                gl.glDeleteShader(fragment);
+            }
+            GLint linkStatus = GL_FALSE;
+            gl.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+            if (linkStatus != GL_TRUE) {
+                const std::string log = programInfoLog(gl, program);
+                gl.glDeleteProgram(program);
+                throw std::runtime_error(
+                    "R0.8 two-side repair program link failed" +
+                    (log.empty() ? std::string{} : ": " + log));
+            }
+            return program;
+        };
+
+        // A real fragment shader that consumes gl_Color synthesizes the
+        // selector uniform. That selector is implementation plumbing, while
+        // the user uniform and compatibility MVP retain their public GL
+        // identities. Pin all three public-query surfaces independently.
+        const GLuint introspectionProgram = buildCompatProgram(true, false);
+        GLint activeUniforms = -1;
+        gl.glGetProgramiv(
+            introspectionProgram, GL_ACTIVE_UNIFORMS, &activeUniforms);
+        expectCondition(
+            activeUniforms == 2,
+            "two-side selector is excluded from GL_ACTIVE_UNIFORMS");
+
+        std::vector<std::string> activeNames;
+        for (GLuint index = 0; index < static_cast<GLuint>(activeUniforms);
+             ++index) {
+            std::array<GLchar, 128> name = {};
+            GLsizei length = 0;
+            GLint size = 0;
+            GLenum type = 0;
+            gl.glGetActiveUniform(
+                introspectionProgram, index,
+                static_cast<GLsizei>(name.size()), &length, &size, &type,
+                name.data());
+            expectCondition(
+                length > 0 && size == 1 && type != 0,
+                "public active-uniform entry has complete metadata");
+            activeNames.emplace_back(
+                name.data(), static_cast<std::size_t>(length));
+        }
+        std::sort(activeNames.begin(), activeNames.end());
+        expectCondition(
+            activeNames == std::vector<std::string>{"a", kMvpUniform},
+            "active-uniform enumeration exposes exactly user a plus compat MVP");
+        expectCondition(
+            gl.glGetUniformLocation(introspectionProgram, "a") >= 0 &&
+                gl.glGetUniformLocation(introspectionProgram, kMvpUniform) >= 0,
+            "user and compatibility MVP uniforms retain public locations");
+        expectCondition(
+            gl.glGetUniformLocation(introspectionProgram, kSelectorUniform) ==
+                -1,
+            "two-side selector has no public uniform location");
+
+        GLint uniformResources = -1;
+        gl.glGetProgramInterfaceiv(
+            introspectionProgram, GL_UNIFORM, GL_ACTIVE_RESOURCES,
+            &uniformResources);
+        expectCondition(
+            uniformResources == 2,
+            "two-side selector is excluded from GL_UNIFORM resources");
+        std::vector<std::string> resourceNames;
+        for (GLuint index = 0; index < static_cast<GLuint>(uniformResources);
+             ++index) {
+            std::array<GLchar, 128> name = {};
+            GLsizei length = 0;
+            gl.glGetProgramResourceName(
+                introspectionProgram, GL_UNIFORM, index,
+                static_cast<GLsizei>(name.size()), &length, name.data());
+            resourceNames.emplace_back(
+                name.data(), static_cast<std::size_t>(length));
+        }
+        std::sort(resourceNames.begin(), resourceNames.end());
+        expectCondition(
+            resourceNames == std::vector<std::string>{"a", kMvpUniform},
+            "uniform-resource enumeration exposes exactly user a plus compat MVP");
+        expectCondition(
+            gl.glGetProgramResourceIndex(
+                introspectionProgram, GL_UNIFORM, kSelectorUniform) ==
+                    GL_INVALID_INDEX &&
+                gl.glGetProgramResourceLocation(
+                    introspectionProgram, GL_UNIFORM, kSelectorUniform) == -1,
+            "two-side selector is absent from indexed and location resource queries");
+        expectGLError(
+            gl, GL_NO_ERROR,
+            "R0.8 two-side public-uniform introspection");
+        gl.glDeleteProgram(introspectionProgram);
+
+        // The 82-row repair also depends on bypassing the fixed-function
+        // client-array fast path while transform feedback is active. A
+        // vertex-only compatibility program forces the synthetic gl_Color
+        // fragment consumer used by those rows. Exercise both indexed and
+        // non-indexed draws with rasterization enabled, then prove discard
+        // suppresses only raster output (not TF capture), and finally prove
+        // the translated route remains usable after glEndTransformFeedback.
+        using LegacyArrayPointerFn =
+            void(APIENTRY *)(GLint, GLenum, GLsizei, const void*);
+        using ClientStateFn = void(APIENTRY *)(GLenum);
+        const auto vertexPointer = reinterpret_cast<LegacyArrayPointerFn>(
+            appglGetProcAddress("glVertexPointer"));
+        const auto enableClientState = reinterpret_cast<ClientStateFn>(
+            appglGetProcAddress("glEnableClientState"));
+        const auto disableClientState = reinterpret_cast<ClientStateFn>(
+            appglGetProcAddress("glDisableClientState"));
+        expectCondition(
+            vertexPointer != nullptr && enableClientState != nullptr &&
+                disableClientState != nullptr,
+            "legacy vertex client-array entry points resolve");
+
+        const GLuint tfProgram = buildCompatProgram(false, true);
+        const GLint userLocation = gl.glGetUniformLocation(tfProgram, "a");
+        expectCondition(
+            userLocation >= 0,
+            "vertex-only TF compatibility program exposes user uniform a");
+
+        const GLfloat vertices[] = {
+            -0.75f, -0.75f, 0.0f, 1.0f,
+             0.75f, -0.75f, 0.0f, 1.0f,
+             0.00f,  0.75f, 0.0f, 1.0f,
+        };
+        const GLushort indices[] = {0, 1, 2};
+        const std::array<float, 3> expectedTf = {1.25f, 2.75f, 2.0f};
+
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        vertexPointer(4, GL_FLOAT, 0, vertices);
+        enableClientState(kVertexArray);
+
+        GLuint tfBuffer = 0;
+        gl.glGenBuffers(1, &tfBuffer);
+        GLuint tfObject = 0;
+        gl.glGenTransformFeedbacks(1, &tfObject);
+        gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tfObject);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
+        gl.glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, tfBuffer);
+
+        gl.glUseProgram(tfProgram);
+        gl.glUniform1f(userLocation, 1.0f);
+        gl.glEnable(kVertexProgramTwoSide);
+        gl.glViewport(0, 0, 32, 32);
+
+        const auto resetTfBuffer = [&] {
+            const std::array<float, 3> zeros = {};
+            gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
+            gl.glBufferData(
+                GL_TRANSFORM_FEEDBACK_BUFFER,
+                static_cast<GLsizeiptr>(sizeof(zeros)), zeros.data(),
+                GL_DYNAMIC_DRAW);
+            gl.glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, tfBuffer);
+        };
+        const auto expectTfCapture = [&](std::string_view label) {
+            std::array<float, 3> captured = {};
+            gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
+            gl.glGetBufferSubData(
+                GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                static_cast<GLsizeiptr>(sizeof(captured)), captured.data());
+            for (std::size_t index = 0; index < captured.size(); ++index) {
+                expectCondition(
+                    std::fabs(captured[index] - expectedTf[index]) < 0.001f,
+                    std::string(label) + " captures tfValue[" +
+                        std::to_string(index) + "]");
+            }
+        };
+        const auto readCenter = [&] {
+            std::array<std::uint8_t, 4> pixel = {};
+            gl.glReadPixels(
+                16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+            return pixel;
+        };
+        const auto expectRed = [&](const std::array<std::uint8_t, 4>& pixel,
+                                   std::string_view label) {
+            expectCondition(
+                pixel[0] >= 180 && pixel[1] <= 40 && pixel[2] <= 40 &&
+                    pixel[3] >= 240,
+                label);
+        };
+
+        resetTfBuffer();
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glBeginTransformFeedback(GL_TRIANGLES);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glEndTransformFeedback();
+        expectTfCapture("active-TF legacy DrawArrays");
+        expectRed(
+            readCenter(),
+            "active-TF legacy DrawArrays preserves synthetic-fragment raster output");
+
+        resetTfBuffer();
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glBeginTransformFeedback(GL_TRIANGLES);
+        gl.glDrawElements(
+            GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, indices);
+        gl.glEndTransformFeedback();
+        expectTfCapture("active-TF legacy DrawElements");
+        expectRed(
+            readCenter(),
+            "active-TF legacy DrawElements preserves synthetic-fragment raster output");
+
+        resetTfBuffer();
+        gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glEnable(GL_RASTERIZER_DISCARD);
+        gl.glBeginTransformFeedback(GL_TRIANGLES);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glEndTransformFeedback();
+        gl.glDisable(GL_RASTERIZER_DISCARD);
+        expectTfCapture("raster-discard legacy DrawArrays");
+        const auto discardPixel = readCenter();
+        expectCondition(
+            discardPixel[0] <= 40 && discardPixel[1] <= 40 &&
+                discardPixel[2] >= 180 && discardPixel[3] >= 240,
+            "raster discard preserves the framebuffer while TF capture remains live");
+
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, indices);
+        expectRed(
+            readCenter(),
+            "post-TF legacy DrawElements stays on the translated two-side route");
+        expectGLError(gl, GL_NO_ERROR, "R0.8 vertex-only legacy-array TF draws");
+
+        gl.glDisable(kVertexProgramTwoSide);
+        disableClientState(kVertexArray);
+        vertexPointer(4, GL_FLOAT, 0, nullptr);
+        gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteTransformFeedbacks(1, &tfObject);
+        gl.glDeleteBuffers(1, &tfBuffer);
+        gl.glDeleteProgram(tfProgram);
+    });
+    if (result.status == "passed") {
+        result.message =
+            "two-side selector stays private and vertex-only legacy TF draws preserve capture/raster routing";
+    }
+    return result;
+}
+
 TestResult runDCR2FlushFinishSentinel() {
     return runDirectSentinel("dcr2.glflush-vs-glfinish", [] {
         ScopedSentinelContext scoped(32, 32);
@@ -22397,6 +22689,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "dsa-state-preservation") {
         tests.push_back(runDSAStatePreservationSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "r08-two-side-repair-probes") {
+        tests.push_back(runR08TwoSideRepairSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
