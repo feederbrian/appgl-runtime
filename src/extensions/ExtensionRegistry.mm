@@ -1,5 +1,6 @@
 #include "ExtensionRegistry.h"
 
+#include "ExtensionAdvertising.h"
 #include "ExtensionContext.h"
 
 #include "../runtime/AppGLProfile.h"
@@ -159,6 +160,8 @@ RegistryState& registryState() {
     return state;
 }
 
+void appendExtensionIfMissing(RegistryState& state, const char* extension);
+
 void rebuildExtensionBlob(RegistryState& state) {
     state.extensionBlob.clear();
     for (std::size_t i = 0; i < state.activeExtensions.size(); ++i) {
@@ -171,6 +174,11 @@ void rebuildExtensionBlob(RegistryState& state) {
 
 void seedBaseExtensions(RegistryState& state) {
     state.activeExtensions.assign(kBaseExtensions.begin(), kBaseExtensions.end());
+    for (const ExtensionAdvertisingState& advertising : extensionAdvertisingSnapshot()) {
+        if (advertising.resolution.enabled) {
+            appendExtensionIfMissing(state, advertising.extensionName);
+        }
+    }
     if (appglAdvertiseCompatProfile()) {
         state.activeExtensions.push_back("GL_ARB_compatibility");
     }

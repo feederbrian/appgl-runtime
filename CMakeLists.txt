@@ -88,6 +88,7 @@ set(APPGL_SOURCES
   src/context/GLContext.mm
   src/context/GLContextTextureHelpers.mm
   src/context/MetalFrameGraph.mm
+  src/extensions/ExtensionAdvertising.mm
   src/extensions/ExtensionContext.mm
   src/extensions/ExtensionRegistry.mm
   src/extensions/fp64/Fp64Extension.mm
