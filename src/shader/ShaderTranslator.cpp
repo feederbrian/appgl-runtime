@@ -4,6 +4,8 @@
 
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/Public/ResourceLimits.h>
+#include <glslang/Include/intermediate.h>
+#include <glslang/MachineIndependent/localintermediate.h>
 #include <SPIRV/GlslangToSpv.h>
 #include <spirv_msl.hpp>
 
@@ -7626,13 +7628,22 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSLStageProgram(
     return std::vector<std::uint32_t>(spirv.begin(), spirv.end());
 }
 
-LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
-    std::string_view vertexSource, std::string_view fragmentSource,
-    int version, std::string* log) const {
-    LinkedProgramSpirv result;
+LinkedStagePairSpirv ShaderTranslator::compileGLSLStagePair(
+    std::string_view producerSource, GLenum producerStage,
+    std::string_view fragmentSource, int version, std::string* log) const {
+    LinkedStagePairSpirv result;
     ensureGlslangInit();
 
-    glslang::TShader vsShader(EShLangVertex);
+    const EShLanguage producerLanguage = glStageToEsh(producerStage);
+    if (producerLanguage != EShLangVertex &&
+        producerLanguage != EShLangTessEvaluation &&
+        producerLanguage != EShLangGeometry) {
+        if (log != nullptr) {
+            *log = "producer stage must be vertex, tess-evaluation, or geometry";
+        }
+        return result;
+    }
+    glslang::TShader producerShader(producerLanguage);
     glslang::TShader fsShader(EShLangFragment);
 
     // Configure both shaders identically to the per-stage `compileGLSL`
@@ -7651,22 +7662,25 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     // dangling stack memory after the lambda returned, yielding parse
     // errors like `'Ä' : unexpected token` and link errors like
     // `Missing entry point`.)
-    const char* vsSourcePtr = vertexSource.data();
-    const int vsSourceLen = static_cast<int>(vertexSource.size());
+    const char* producerSourcePtr = producerSource.data();
+    const int producerSourceLen = static_cast<int>(producerSource.size());
     const char* fsSourcePtr = fragmentSource.data();
     const int fsSourceLen = static_cast<int>(fragmentSource.size());
 
-    vsShader.setStringsWithLengths(&vsSourcePtr, &vsSourceLen, 1);
-    vsShader.setEnvInput(glslang::EShSourceGlsl, EShLangVertex,
+    producerShader.setStringsWithLengths(
+        &producerSourcePtr, &producerSourceLen, 1);
+    producerShader.setEnvInput(glslang::EShSourceGlsl, producerLanguage,
                          glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
-    vsShader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
-    vsShader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
-    vsShader.setEnvInputVulkanRulesRelaxed();
-    vsShader.setAutoMapLocations(true);
-    vsShader.setAutoMapBindings(true);
-    vsShader.setGlobalUniformBlockName("_DefaultUniforms");
-    vsShader.setGlobalUniformSet(0);
-    vsShader.setGlobalUniformBinding(0);
+    producerShader.setEnvClient(
+        glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+    producerShader.setEnvTarget(
+        glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+    producerShader.setEnvInputVulkanRulesRelaxed();
+    producerShader.setAutoMapLocations(true);
+    producerShader.setAutoMapBindings(true);
+    producerShader.setGlobalUniformBlockName("_DefaultUniforms");
+    producerShader.setGlobalUniformSet(0);
+    producerShader.setGlobalUniformBinding(0);
     fsShader.setStringsWithLengths(&fsSourcePtr, &fsSourceLen, 1);
     fsShader.setEnvInput(glslang::EShSourceGlsl, EShLangFragment,
                          glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
@@ -7685,9 +7699,10 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     const TBuiltInResource* resources = &appglResources;
     EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
 
-    if (!vsShader.parse(resources, version, false, messages)) {
+    if (!producerShader.parse(resources, version, false, messages)) {
         if (log != nullptr) {
-            *log = std::string("vertex parse: ") + vsShader.getInfoLog();
+            *log = std::string("producer parse: ") +
+                   producerShader.getInfoLog();
         }
         return result;
     }
@@ -7699,7 +7714,7 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     }
 
     glslang::TProgram program;
-    program.addShader(&vsShader);
+    program.addShader(&producerShader);
     program.addShader(&fsShader);
 
     if (!program.link(messages)) {
@@ -7712,11 +7727,11 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     }
 
     // Run cross-stage IO mapping so glslang's default GLSL IO resolver
-    // assigns matching `DecorationLocation` values to vertex outputs and
+    // assigns `DecorationLocation` values to final-producer outputs and
     // fragment inputs that share a name. The resolver walks the pipeline
     // in-order, sees both stages because we attached them to the same
     // TProgram above, and produces a coherent location table — which is
-    // exactly what BAR observed missing in the followup⁴ Metal NSErrors.
+    // exactly what the linked Metal interface requires.
     //
     // Without this pass, varyings in the SPIR-V come out either
     // unlocated or with per-stage-independent locations, and SPIRV-Cross
@@ -7732,28 +7747,97 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
         return result;
     }
 
+    // glslang's default resolver can assign different locations to same-name
+    // producer outputs and fragment inputs when one side declares additional
+    // outputs. Re-pin each matched fragment input to its producer output after
+    // mapIO. This stage-pair helper is specifically an interface oracle for
+    // the actual final producer, so name identity is authoritative here.
+    glslang::TIntermediate* producerIntermediate =
+        program.getIntermediate(producerLanguage);
+    glslang::TIntermediate* fragmentIntermediate =
+        program.getIntermediate(EShLangFragment);
+    if (producerIntermediate != nullptr && fragmentIntermediate != nullptr) {
+        class OutputLocationCollector final : public glslang::TIntermTraverser {
+        public:
+            OutputLocationCollector()
+                : glslang::TIntermTraverser(
+                      true, false, false, false, true) {}
+            std::unordered_map<std::string, int> locations;
+
+            void visitSymbol(glslang::TIntermSymbol* symbol) override {
+                const glslang::TType& type = symbol->getType();
+                const glslang::TQualifier& qualifier = type.getQualifier();
+                if (qualifier.storage == glslang::EvqVaryingOut &&
+                    qualifier.hasLocation()) {
+                    locations[std::string(symbol->getName().c_str())] =
+                        qualifier.layoutLocation;
+                }
+            }
+        } outputs;
+        class FragmentInputRepinner final : public glslang::TIntermTraverser {
+        public:
+            explicit FragmentInputRepinner(
+                const std::unordered_map<std::string, int>& producerLocations)
+                : glslang::TIntermTraverser(
+                      true, false, false, false, true),
+                  producerLocations_(producerLocations) {}
+
+            void visitSymbol(glslang::TIntermSymbol* symbol) override {
+                glslang::TType& type = symbol->getWritableType();
+                glslang::TQualifier& qualifier = type.getQualifier();
+                if (qualifier.storage != glslang::EvqVaryingIn) {
+                    return;
+                }
+                const auto it = producerLocations_.find(
+                    std::string(symbol->getName().c_str()));
+                if (it != producerLocations_.end()) {
+                    qualifier.layoutLocation = it->second;
+                }
+            }
+
+        private:
+            const std::unordered_map<std::string, int>& producerLocations_;
+        } repinner(outputs.locations);
+        producerIntermediate->getTreeRoot()->traverse(&outputs);
+        fragmentIntermediate->getTreeRoot()->traverse(&repinner);
+    }
+
     glslang::SpvOptions spvOptions;
     spvOptions.disableOptimizer = false;
     spvOptions.optimizeSize = true;
 
-    std::vector<unsigned int> vsSpirv;
+    std::vector<unsigned int> producerSpirv;
     std::vector<unsigned int> fsSpirv;
-    glslang::GlslangToSpv(*program.getIntermediate(EShLangVertex), vsSpirv, &spvOptions);
+    glslang::GlslangToSpv(*program.getIntermediate(producerLanguage),
+                          producerSpirv, &spvOptions);
     glslang::GlslangToSpv(*program.getIntermediate(EShLangFragment), fsSpirv, &spvOptions);
 
-    if (vsSpirv.empty() || fsSpirv.empty()) {
+    if (producerSpirv.empty() || fsSpirv.empty()) {
         if (log != nullptr) {
             *log = "GlslangToSpv produced empty output for at least one stage";
         }
         return result;
     }
 
-    result.vertexSpirv.assign(vsSpirv.begin(), vsSpirv.end());
+    result.producerSpirv.assign(producerSpirv.begin(), producerSpirv.end());
     result.fragmentSpirv.assign(fsSpirv.begin(), fsSpirv.end());
     result.linkSucceeded = true;
     if (log != nullptr) {
         *log = "ok";
     }
+    return result;
+}
+
+LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
+    std::string_view vertexSource, std::string_view fragmentSource,
+    int version, std::string* log) const {
+    const LinkedStagePairSpirv pair = compileGLSLStagePair(
+        vertexSource, GL_VERTEX_SHADER, fragmentSource, version, log);
+    LinkedProgramSpirv result;
+    result.vertexSpirv = pair.producerSpirv;
+    result.fragmentSpirv = pair.fragmentSpirv;
+    result.linkSucceeded = pair.linkSucceeded;
+    result.linkLog = pair.linkLog;
     return result;
 }
 
@@ -11610,6 +11694,19 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     (void)version;
     if (log != nullptr) {
         *log = "Shader translator dependencies are vendored; GLSL compilation is not enabled in the bootstrap build yet.";
+    }
+    return {};
+}
+
+LinkedStagePairSpirv ShaderTranslator::compileGLSLStagePair(
+    std::string_view producerSource, GLenum producerStage,
+    std::string_view fragmentSource, int version, std::string* log) const {
+    (void)producerSource;
+    (void)producerStage;
+    (void)fragmentSource;
+    (void)version;
+    if (log != nullptr) {
+        *log = "Cross-stage GLSL linking is not enabled in the bootstrap build yet.";
     }
     return {};
 }

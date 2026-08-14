@@ -360,8 +360,18 @@ void markStateFunction(FunctionId id, std::string_view note) {
 #ifndef GL_TEXTURE_3D
 #define GL_TEXTURE_3D 0x806F
 #endif
+#ifndef GL_VERTEX_PROGRAM_TWO_SIDE
+#define GL_VERTEX_PROGRAM_TWO_SIDE 0x8643
+#endif
+#ifndef GL_COLOR_SUM
+#define GL_COLOR_SUM 0x8458
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY
+#define GL_SECONDARY_COLOR_ARRAY 0x845E
+#endif
 bool isLegacyClientArrayCap(GLenum cap) {
-    return cap == GL_VERTEX_ARRAY || cap == GL_COLOR_ARRAY;
+    return cap == GL_VERTEX_ARRAY || cap == GL_COLOR_ARRAY ||
+        cap == GL_SECONDARY_COLOR_ARRAY;
 }
 
 bool admitsLegacyClientArrayCap(GLenum cap) {
@@ -381,6 +391,7 @@ bool isValidEnableCap(GLenum cap) {
             return appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest);
         case GL_BLEND:
         case GL_COLOR_LOGIC_OP:
+        case GL_COLOR_SUM:
         case GL_CULL_FACE:
         case GL_DEBUG_OUTPUT:
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
@@ -406,6 +417,7 @@ bool isValidEnableCap(GLenum cap) {
         case GL_PRIMITIVE_RESTART:
         case GL_PRIMITIVE_RESTART_FIXED_INDEX:
         case GL_PROGRAM_POINT_SIZE:
+        case GL_VERTEX_PROGRAM_TWO_SIDE:
         case GL_RASTERIZER_DISCARD:
         case GL_SAMPLE_ALPHA_TO_COVERAGE:
         case GL_SAMPLE_ALPHA_TO_ONE:

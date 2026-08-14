@@ -56,6 +56,9 @@
 #ifndef GL_COLOR_ARRAY
 #define GL_COLOR_ARRAY 0x8076
 #endif
+#ifndef GL_SECONDARY_COLOR_ARRAY
+#define GL_SECONDARY_COLOR_ARRAY 0x845E
+#endif
 #ifndef GL_TEXTURE_COORD_ARRAY
 #define GL_TEXTURE_COORD_ARRAY 0x8078
 #endif
@@ -513,6 +516,18 @@ extern "C" void APIENTRY glColorPointer(GLint size,
         return;
     }
     (void)ctx->setLegacyClientArrayPointer(GL_COLOR_ARRAY, size, type, stride, pointer);
+}
+
+extern "C" void APIENTRY glSecondaryColorPointer(GLint size,
+                                                  GLenum type,
+                                                  GLsizei stride,
+                                                  const void* pointer) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    (void)ctx->setLegacyClientArrayPointer(
+        GL_SECONDARY_COLOR_ARRAY, size, type, stride, pointer);
 }
 
 extern "C" void APIENTRY glTexCoordPointer(GLint size,

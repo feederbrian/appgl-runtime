@@ -98,9 +98,11 @@ struct SynthesizedMatrixUsage {
 // All flags default to `false`; the rewriter sets them when the
 // corresponding identifier is discovered in the original source.
 struct LegacyCompatUsage {
-    // Version-line rewrite kicked in for a pre-140 desktop version
-    // (`#version 100/110/120/130`). Not set for `150 compatibility` —
-    // that's the older, narrower rewrite covered by `wasCompatProfile`.
+    // Version-line frontend floor rewrite kicked in for a pre-140 desktop
+    // version (`#version 100/110/120/130`), or for a legacy-color shader
+    // whose continued preprocessor macro requires glslang's GLSL 4.20
+    // frontend. Ordinary `150 compatibility` remains covered by
+    // `wasCompatProfile` instead.
     bool upgradedVersion = false;
     // `varying` keyword appeared and was rewritten to `in`/`out`. The
     // exact in/out direction depends on the stage passed to the rewriter.
@@ -109,6 +111,7 @@ struct LegacyCompatUsage {
     bool attrVertex = false;           // gl_Vertex -> layout(loc=0) in vec4 appgl_Vertex
     bool attrNormal = false;           // gl_Normal -> layout(loc=2) in vec3 appgl_Normal
     bool attrColor = false;            // gl_Color -> layout(loc=3) in vec4 appgl_Color
+    bool attrSecondaryColor = false;   // gl_SecondaryColor -> layout(loc=4) in vec4 appgl_SecondaryColor
     std::array<bool, 8> attrMultiTexCoord = {};  // gl_MultiTexCoord[0..7] -> layout(loc=8+N)
     // Legacy vertex builtin. Lowered only for a callable `ftransform()`
     // in a legacy/compat source; plain identifiers in core GLSL are left
@@ -138,15 +141,33 @@ struct LegacyCompatUsage {
     // separately from plain read/write use.
     bool usesFogFragCoord = false;
     bool usesFogFragCoordInput = false;
-    // Legacy color bridges. Vertex shaders may expose the front/back
-    // primary and secondary colors independently; keep each output distinct
-    // so transform feedback can capture the original compatibility names.
+    // Legacy color bridges. Vertex-processing stages may expose the
+    // front/back primary and secondary colors independently; keep each
+    // output distinct so transform feedback can capture the original
+    // compatibility names. Standard GS/TCS/TES inputs use gl_in[] members,
+    // which must be lowered separately from each stage's output spelling.
     bool usesFrontColor = false;
     bool usesBackColor = false;
     bool usesFrontSecondaryColor = false;
     bool usesBackSecondaryColor = false;
-    // Fragment shaders read gl_Color as the interpolated front color.
+    bool usesFrontColorInput = false;
+    bool usesBackColorInput = false;
+    bool usesFrontSecondaryColorInput = false;
+    bool usesBackSecondaryColorInput = false;
+    std::string frontColorInterpolationQualifier;
+    std::string backColorInterpolationQualifier;
+    std::string frontSecondaryColorInterpolationQualifier;
+    std::string backSecondaryColorInterpolationQualifier;
+    // Fragment shaders read unified primary/secondary colors. AppGL carries
+    // the front/back values separately and selects after interpolation from
+    // dynamic GL_VERTEX_PROGRAM_TWO_SIDE state.
     bool usesFragmentColor = false;
+    bool usesFragmentSecondaryColor = false;
+    // Explicit compatibility redeclarations may select an interpolation
+    // qualifier. The rewriter removes the reserved gl_* declaration and
+    // applies the same qualifier to both internal front/back transports.
+    std::string fragmentColorInterpolationQualifier;
+    std::string fragmentSecondaryColorInterpolationQualifier;
     // gl_TextureEnvColor[N] fixed-function texture environment color.
     // Runtime state is mirrored into appgl_TextureEnvColor[] at draw time.
     bool usesTextureEnvColor = false;
@@ -206,7 +227,7 @@ struct LegacyCompatUsage {
     bool rewroteShadow2DProj = false;
 
     bool anyAttribute() const {
-        if (attrVertex || attrNormal || attrColor) return true;
+        if (attrVertex || attrNormal || attrColor || attrSecondaryColor) return true;
         for (bool used : attrMultiTexCoord) {
             if (used) return true;
         }
@@ -219,7 +240,11 @@ struct LegacyCompatUsage {
                usesFogEnd || usesFogScale || usesFogFragCoord ||
                usesFogFragCoordInput || usesFrontColor || usesBackColor ||
                usesFrontSecondaryColor || usesBackSecondaryColor ||
-               usesFragmentColor || usesTextureEnvColor ||
+               usesFrontColorInput || usesBackColorInput ||
+               usesFrontSecondaryColorInput ||
+               usesBackSecondaryColorInput ||
+               usesFragmentColor || usesFragmentSecondaryColor ||
+               usesTextureEnvColor ||
                usesLightModelAmbient || anyLight() ||
                usesClipVertex || synthesizesLegacyClipPlanes ||
                usesFtransform || rewroteTexture2D ||
@@ -369,6 +394,8 @@ inline constexpr const char* kFogScale =
     "appgl_FogScale";
 inline constexpr const char* kLegacyClipPlanes =
     "appgl_LegacyClipPlanes";  // vec4[8] array
+inline constexpr const char* kVertexProgramTwoSide =
+    "appgl_VertexProgramTwoSide";
 }  // namespace SynthesizedUniformNames
 
 // Length of the synthesized texture matrix array. Matches
@@ -406,6 +433,31 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                                               GLenum stage,
                                               CompatShaderRewriteMode mode =
                                                   CompatShaderRewriteMode::Default);
+
+// Optional link-local locations for the four internal compatibility color
+// transports. Negative values preserve glslang's automatic assignment.
+struct CompatColorInterfaceLocations {
+    int frontColor = -1;
+    int backColor = -1;
+    int frontSecondaryColor = -1;
+    int backSecondaryColor = -1;
+};
+
+// Cross-stage companion for independently rewritten producer/fragment paths.
+// When a
+// compatibility fragment shader consumes unified primary/secondary color it
+// necessarily declares both front and back transports. Ensure a preceding
+// rewritten producer source exposes the matching pair even when the original
+// shader only wrote one side (or neither side). Existing producer declarations
+// retain their interpolation qualifiers so qualifier mismatches remain real
+// link errors. Optional locations decorate both existing and missing outputs.
+void ensureCompatColorProducerOutputs(
+    std::string& rewrittenProducerSource,
+    bool primary,
+    bool secondary,
+    std::string_view primaryInterpolationQualifier = {},
+    std::string_view secondaryInterpolationQualifier = {},
+    const CompatColorInterfaceLocations& locations = {});
 
 // Pre-glslang validation: GLSL 4.60 §4.1.8 allows ONLY precision
 // qualifiers (highp/mediump/lowp) on struct members. Everything else

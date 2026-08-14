@@ -799,6 +799,11 @@ struct GLProgramUniformInfo {
     std::string name;
     GLenum type = 0;
     GLint arraySize = 1;
+    // Driver-control uniforms remain part of the executable's internal
+    // uniform storage, but are not part of the GL-visible uniform interface.
+    // This is provenance metadata, not a name-prefix rule: compatibility
+    // matrix uniforms are intentionally public on this implementation.
+    bool implementationInternal = false;
     // True iff the GLSL source used array syntax (see
     // GLShaderDeclaration::isArray). Propagated so
     // resource-interface queries can append the "[0]" suffix even
@@ -838,6 +843,10 @@ struct GLProgramAttributeInfo {
     std::string name;
     GLenum type = 0;
     GLint location = -1;
+    // Conventional compatibility inputs have an internal backend location,
+    // but GL exposes their reserved gl_* name as active with no queryable
+    // generic attribute location.
+    bool conventionalBuiltin = false;
     // True when location came from GLSL layout(location=N) or
     // glBindAttribLocation rather than link-time auto assignment.
     bool locationExplicit = false;
@@ -974,6 +983,7 @@ struct GLSynthesizedMatrixSlots {
     GLint fogEnd = -1;
     GLint fogScale = -1;
     GLint legacyClipPlanes = -1;
+    GLint vertexProgramTwoSide = -1;
 
     bool hasAny() const {
         return modelView >= 0 || projection >= 0 || modelViewProjection >= 0 ||
@@ -981,7 +991,8 @@ struct GLSynthesizedMatrixSlots {
                modelViewProjectionInverse >= 0 || normal >= 0 || texture >= 0 ||
                textureEnvColor >= 0 || lightModelAmbient >= 0 ||
                fogColor >= 0 || fogDensity >= 0 || fogStart >= 0 ||
-               fogEnd >= 0 || fogScale >= 0 || legacyClipPlanes >= 0;
+               fogEnd >= 0 || fogScale >= 0 || legacyClipPlanes >= 0 ||
+               vertexProgramTwoSide >= 0;
     }
 };
 
@@ -1114,6 +1125,7 @@ struct GLProgramObject {
     std::array<std::unordered_map<GLint, GLProgramUniformValue>, 6> pipelineEmulationStageUniformValues;
     std::array<bool, 6> pipelineEmulationStageUniformsValid{};
     GLuint pipelineEmulationFragmentProgram = 0;
+    GLint pipelineEmulationFragmentVertexProgramTwoSideSlot = -1;
     std::unordered_map<std::string, GLuint> requestedAttribLocations;
     // Pre-link mapping set by `glBindFragDataLocation(program, color,
     // name)`. GL 4.6 §15.2 — these bindings take effect on the next
@@ -1324,6 +1336,12 @@ struct GLProgramObject {
     std::string vertexSpirvEntryPoint;
     std::unordered_map<std::uint32_t, std::uint32_t>
         vertexSpirvSpecializationConstants;
+    // A vertex-only compatibility program executes the original SPIR-V for
+    // transform-feedback capture.  Its synthesized raster fragment consumer
+    // is linked against a padded producer interface, however, so CPU raster
+    // replay needs this separate interface view without replacing the user
+    // executable above (which may carry TF-only outputs).
+    std::vector<std::uint32_t> compatVertexOnlyRasterReplaySpirv;
     // GS input / output topology from the SPIR-V execution modes —
     // OutputPoints / OutputLineStrip / OutputTriangleStrip, and
     // InputPoints / InputLines / InputTrianglesAdjacency etc.

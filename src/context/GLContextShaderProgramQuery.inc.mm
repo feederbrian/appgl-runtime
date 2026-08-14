@@ -1,6 +1,55 @@
 // This file is textually included by GLContextShader.inc.mm. Do not compile it directly.
 // It contains the GLContext shader-program query method body split out for navigation only.
 
+namespace {
+
+bool isPublicProgramUniform(const GLProgramUniformInfo& uniform) {
+    return !uniform.implementationInternal;
+}
+
+std::size_t publicProgramUniformCount(const GLProgramObject& program) {
+    return static_cast<std::size_t>(std::count_if(
+        program.uniforms.begin(), program.uniforms.end(),
+        [](const GLProgramUniformInfo& uniform) {
+            return isPublicProgramUniform(uniform);
+        }));
+}
+
+const GLProgramUniformInfo* publicProgramUniformAt(
+    const GLProgramObject& program,
+    std::size_t publicIndex) {
+    std::size_t index = 0;
+    for (const auto& uniform : program.uniforms) {
+        if (!isPublicProgramUniform(uniform)) {
+            continue;
+        }
+        if (index == publicIndex) {
+            return &uniform;
+        }
+        ++index;
+    }
+    return nullptr;
+}
+
+bool isImplementationInternalUniformLocation(
+    const GLProgramObject& program,
+    GLint location) {
+    if (location < 0) {
+        return false;
+    }
+    for (const auto& uniform : program.uniforms) {
+        const GLint slots = std::max<GLint>(uniform.arraySize, 1);
+        if (uniform.location >= 0 &&
+            location >= uniform.location &&
+            location < uniform.location + slots) {
+            return uniform.implementationInternal;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 bool GLContext::useProgram(GLuint program) {
     if (program != 0) {
         GLProgramObject* object = impl_->objects->programs().get(program);
@@ -105,7 +154,7 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             // resourceUniforms holds both; uniforms only holds bare ones.
             *params = static_cast<GLint>(
                 object->resourceUniforms.empty()
-                    ? object->uniforms.size()
+                    ? publicProgramUniformCount(*object)
                     : object->resourceUniforms.size());
             return true;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
@@ -120,6 +169,9 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
                 }
             } else {
                 for (const auto& u : object->uniforms) {
+                    if (!isPublicProgramUniform(u)) {
+                        continue;
+                    }
                     maxLen = std::max(maxLen, u.name.size() + 1);
                 }
             }
@@ -322,6 +374,10 @@ bool GLContext::bindAttribLocation(GLuint program, GLuint index, const GLchar* n
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (std::strncmp(name, "gl_", 3) == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     object->requestedAttribLocations[std::string(name)] = index;
     return true;
 }
@@ -362,9 +418,12 @@ GLint GLContext::getAttribLocation(GLuint program, const GLchar* name) {
     }
     for (const auto& attrib : object->attributes) {
         if (attrib.name == lookup) {
-            return attrib.location;
+            return attrib.conventionalBuiltin ? -1 : attrib.location;
         }
         if (attrib.name == baseName) {
+            if (attrib.conventionalBuiltin) {
+                return -1;
+            }
             auto arrayElementLocationStride = [](GLenum type) -> GLint {
                 switch (type) {
                     case GL_FLOAT_MAT2:    case GL_DOUBLE_MAT2:
@@ -484,7 +543,7 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
     };
     auto lookupUniformLocation = [&](const std::string& text) -> GLint {
         for (const auto& uniform : object->uniforms) {
-            if (uniform.name == text) {
+            if (isPublicProgramUniform(uniform) && uniform.name == text) {
                 return uniform.location;
             }
         }
@@ -493,7 +552,8 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
         if (parsePureArrayElementLookup(text, baseName, indices)) {
             for (const auto& uniform : object->uniforms) {
                 GLint flatIndex = 0;
-                if (uniform.name == baseName && uniform.location >= 0 &&
+                if (isPublicProgramUniform(uniform) &&
+                    uniform.name == baseName && uniform.location >= 0 &&
                     flattenUniformArrayIndex(uniform, indices, flatIndex)) {
                     return uniform.location + flatIndex;
                 }
@@ -532,7 +592,8 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
             const long idx = std::strtol(indexStr.c_str(), &endp, 10);
             if (endp && *endp == '\0' && idx >= 0) {
                 for (const auto& uniform : object->uniforms) {
-                    if (uniform.name == baseName && uniform.arraySize >= 1
+                    if (isPublicProgramUniform(uniform) &&
+                        uniform.name == baseName && uniform.arraySize >= 1
                         && idx < static_cast<long>(uniform.arraySize)
                         && uniform.location >= 0) {
                         return uniform.location + static_cast<GLint>(idx);
@@ -585,7 +646,8 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
                     const long idxR = std::strtol(idxStrR.c_str(), &endpR, 10);
                     if (endpR && *endpR == '\0' && idxR >= 0) {
                         for (const auto& uniform : object->uniforms) {
-                            if (uniform.name == baseR && uniform.arraySize >= 1
+                            if (isPublicProgramUniform(uniform) &&
+                                uniform.name == baseR && uniform.arraySize >= 1
                                 && idxR < static_cast<long>(uniform.arraySize)
                                 && uniform.location >= 0) {
                                 return uniform.location + static_cast<GLint>(idxR);
@@ -622,18 +684,19 @@ bool GLContext::getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, 
         copyStringToBuffer(u.name, bufSize, length, name);
         return true;
     }
-    if (index >= object->uniforms.size()) {
+    const GLProgramUniformInfo* uniform =
+        publicProgramUniformAt(*object, static_cast<std::size_t>(index));
+    if (uniform == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    const auto& uniform = object->uniforms[index];
     if (size != nullptr) {
-        *size = std::max<GLint>(uniform.arraySize, 1);
+        *size = std::max<GLint>(uniform->arraySize, 1);
     }
     if (type != nullptr) {
-        *type = uniform.type;
+        *type = uniform->type;
     }
-    copyStringToBuffer(uniform.name, bufSize, length, name);
+    copyStringToBuffer(uniform->name, bufSize, length, name);
     return true;
 }
 
@@ -641,6 +704,9 @@ namespace {
 
 GLProgramUniformValue* lookupUniformValue(GLProgramObject* program, GLint location) {
     if (program == nullptr || location < 0) {
+        return nullptr;
+    }
+    if (isImplementationInternalUniformLocation(*program, location)) {
         return nullptr;
     }
     auto it = program->uniformValues.find(location);
@@ -651,7 +717,8 @@ GLProgramUniformValue* lookupUniformValue(GLProgramObject* program, GLint locati
     // with arraySize > 1 hits locations [base+1, base+arraySize). The slot
     // lives at the base location; find it by walking the uniforms list.
     for (const auto& u : program->uniforms) {
-        if (u.arraySize > 1 && location > u.location
+        if (isPublicProgramUniform(u) &&
+            u.arraySize > 1 && location > u.location
             && location < u.location + u.arraySize) {
             auto base = program->uniformValues.find(u.location);
             if (base != program->uniformValues.end()) {
@@ -680,7 +747,13 @@ UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
     if (program == nullptr || location < 0) {
         return r;
     }
+    if (isImplementationInternalUniformLocation(*program, location)) {
+        return r;
+    }
     for (const auto& u : program->uniforms) {
+        if (!isPublicProgramUniform(u)) {
+            continue;
+        }
         const GLint slots = std::max<GLint>(u.arraySize, 1);
         if (u.location >= 0 && location >= u.location &&
             location < u.location + slots) {
@@ -705,7 +778,8 @@ UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
         return r;
     }
     for (const auto& u : program->uniforms) {
-        if (u.arraySize > 1 && location > u.location
+        if (isPublicProgramUniform(u) &&
+            u.arraySize > 1 && location > u.location
             && location < u.location + u.arraySize) {
             auto base = program->uniformValues.find(u.location);
             if (base != program->uniformValues.end()) {

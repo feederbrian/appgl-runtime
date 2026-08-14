@@ -97,8 +97,26 @@
 #ifndef GL_CURRENT_RASTER_SECONDARY_COLOR
 #define GL_CURRENT_RASTER_SECONDARY_COLOR 0x845F
 #endif
+#ifndef GL_COLOR_SUM
+#define GL_COLOR_SUM 0x8458
+#endif
+#ifndef GL_VERTEX_PROGRAM_TWO_SIDE
+#define GL_VERTEX_PROGRAM_TWO_SIDE 0x8643
+#endif
 #ifndef GL_COLOR_ARRAY
 #define GL_COLOR_ARRAY 0x8076
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY
+#define GL_SECONDARY_COLOR_ARRAY 0x845E
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_SIZE
+#define GL_SECONDARY_COLOR_ARRAY_SIZE 0x845A
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_TYPE
+#define GL_SECONDARY_COLOR_ARRAY_TYPE 0x845B
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_STRIDE
+#define GL_SECONDARY_COLOR_ARRAY_STRIDE 0x845C
 #endif
 #ifndef GL_QUAD_STRIP
 #define GL_QUAD_STRIP 0x0008
@@ -32093,13 +32111,32 @@ struct GLContext::Impl {
                                               const char* label,
                                               const void* indices = nullptr,
                                               GLsizei indexCount = 0,
-                                              GLenum indexType = 0);
+                                              GLenum indexType = 0,
+                                              std::size_t secondaryColorOffset =
+                                                  std::numeric_limits<std::size_t>::max());
     bool encodeLegacyClientArrayTranslatedProgramDraw(
         GLenum mode,
         const void* indices,
         GLsizei indexCount,
         GLenum indexType,
         const char* label);
+    // Draw-local compatibility-array staging tuple. The 48-byte prefix
+    // matches ImmediateModeVertex; secondary colour is appended so the
+    // established immediate-mode ABI stays unchanged.
+    struct LegacyCompatClientVertex {
+        float position[4];
+        float color[4];
+        float texcoord[4];
+        float secondaryColor[4];
+    };
+    bool materializeLegacyCompatClientVertexArray(
+        const GLProgramObject& program,
+        GLint first,
+        GLsizei count,
+        std::vector<LegacyCompatClientVertex>& vertices,
+        GLVertexArrayObject& cpuVertexArray,
+        GLVertexArrayObject* nativeVertexArray,
+        GLuint nativeBufferSentinel);
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — wrapper around
     // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
@@ -32125,14 +32162,20 @@ struct GLContext::Impl {
     // non-null only when the caller is routing a drawElements variant
     // through this helper (Phase 2 accepts both for uniformity even
     // though neither path is feature-rich yet — indexed tess support
-    // lands later).
+    // lands later). A compatibility client-array draw may supply a draw-local
+    // VAO plus an interleaved byte range; the helper uploads that range to a
+    // transient Metal buffer for the VS-as-compute stage.
     bool tryMetalTessellationDraw(GLProgramObject& program,
                                    GLuint programName,
                                    GLenum mode,
                                    GLsizei count,
                                    GLint first,
                                    GLsizei instanceCount = 1,
-                                   GLuint baseInstance = 0);
+                                   GLuint baseInstance = 0,
+                                   const GLVertexArrayObject* vertexArrayOverride = nullptr,
+                                   const void* clientVertexData = nullptr,
+                                   std::size_t clientVertexDataByteCount = 0,
+                                   GLuint clientVertexBufferSentinel = 0);
 
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader
     // path for tier=MeshShader programs when APPGL_ENABLE_MESH_GS is set.
@@ -33809,6 +33852,7 @@ struct GLContext::Impl {
     };
     LegacyClientArray legacyVertexArray;
     LegacyClientArray legacyColorArray;
+    LegacyClientArray legacySecondaryColorArray;
     LegacyClientArray legacyTexCoordArray;
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
@@ -34046,6 +34090,7 @@ struct GLContext::Impl {
             End,
             Vertex,
             Color,
+            SecondaryColor,
             TexCoord,
             Enable,
             CallList,
@@ -44938,6 +44983,7 @@ static void clearPipelineEmulationStageUniforms(GLProgramObject* program)
         program->pipelineEmulationStageUniformValues[stage].clear();
         program->pipelineEmulationStageUniformsValid[stage] = false;
     }
+    program->pipelineEmulationFragmentVertexProgramTwoSideSlot = -1;
 }
 
 static void setPipelineEmulationStageUniformSnapshot(
@@ -44952,6 +44998,10 @@ static void setPipelineEmulationStageUniformSnapshot(
     target->pipelineEmulationStageUniforms[stage] = source->uniforms;
     target->pipelineEmulationStageUniformValues[stage] = source->uniformValues;
     target->pipelineEmulationStageUniformsValid[stage] = true;
+    if (stageIndex == 4) {
+        target->pipelineEmulationFragmentVertexProgramTwoSideSlot =
+            source->synthesizedMatrixSlots.vertexProgramTwoSide;
+    }
 }
 
 // The output is written into |outBuffer|, which is resized via assign().
@@ -45025,6 +45075,7 @@ static bool assignSynthesizedUniformInts(GLProgramUniformValue& value,
 static bool pushSynthesizedMatrixUniforms(
     GLProgramObject& program,
     const MatrixStateMirror& matrixState,
+    bool vertexProgramTwoSide,
     GLuint drawID = 0,
     GLint baseVertex = 0,
     GLuint baseInstance = 0,
@@ -45058,8 +45109,24 @@ static bool pushSynthesizedMatrixUniforms(
     }
 
     const auto& slots = program.synthesizedMatrixSlots;
-    if (!slots.hasAny()) {
+    const GLint pipelineFragmentTwoSideSlot =
+        program.pipelineEmulationFragmentVertexProgramTwoSideSlot;
+    if (!slots.hasAny() && pipelineFragmentTwoSideSlot < 0) {
         return changed;
+    }
+
+    const GLint twoSideValue = vertexProgramTwoSide ? 1 : 0;
+    if (slots.vertexProgramTwoSide >= 0) {
+        auto& value = program.uniformValues[slots.vertexProgramTwoSide];
+        changed |= assignSynthesizedUniformInts(
+            value, GL_INT, 1, &twoSideValue, 1);
+    }
+    if (pipelineFragmentTwoSideSlot >= 0 &&
+        program.pipelineEmulationStageUniformsValid[4]) {
+        auto& value = program.pipelineEmulationStageUniformValues[4]
+            [pipelineFragmentTwoSideSlot];
+        changed |= assignSynthesizedUniformInts(
+            value, GL_INT, 1, &twoSideValue, 1);
     }
 
     auto storeMat4 = [&](GLint loc, const Matrix4& matrix) {
@@ -45317,6 +45384,7 @@ static void prepareTranslatedDrawUniformBuffers(
     GLProgramObject& program,
     GLuint programName,
     const MatrixStateMirror& matrixState,
+    bool vertexProgramTwoSide,
     const GLfloat* textureEnvColor,
     const GLfloat* lightModelAmbient,
     const GLfloat* fogColor,
@@ -45339,7 +45407,7 @@ static void prepareTranslatedDrawUniformBuffers(
     }
 
     if (pushSynthesizedMatrixUniforms(
-            program, matrixState, drawID,
+            program, matrixState, vertexProgramTwoSide, drawID,
             tdi.shaderBaseVertex, tdi.baseInstance,
             textureEnvColor, lightModelAmbient,
             fogColor, fogDensity, fogStart, fogEnd,
@@ -47283,12 +47351,32 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
         return nullptr;
     }
 
+    // The synthesized container is shared by four independently linked
+    // separable programs. Uniform locations are only meaningful within
+    // their originating program, so keep per-stage metadata and values
+    // instead of relying on the aggregate name/location merge below.
+    // Refresh this on every draw: glProgramUniform* updates the source
+    // program without invalidating the synthesized Metal pipeline.
+    const auto refreshStageUniformSnapshots = [&](GLProgramObject* target) {
+        if (target == nullptr) return;
+        clearPipelineEmulationStageUniforms(target);
+        setPipelineEmulationStageUniformSnapshot(
+            target, 0, vsName != 0 ? objects->programs().get(vsName) : nullptr);
+        setPipelineEmulationStageUniformSnapshot(
+            target, 1, objects->programs().get(tcsName));
+        setPipelineEmulationStageUniformSnapshot(
+            target, 2, objects->programs().get(tesName));
+        setPipelineEmulationStageUniformSnapshot(
+            target, 4, fsName != 0 ? objects->programs().get(fsName) : nullptr);
+    };
+
     const bool snapshotMatches =
         ppo.syntheticTessVsSnapshot == vsName &&
         ppo.syntheticTessTcsSnapshot == tcsName &&
         ppo.syntheticTessTesSnapshot == tesName &&
         ppo.syntheticTessFsSnapshot == fsName;
     if (snapshotMatches && ppo.syntheticTessProbeAttempted) {
+        refreshStageUniformSnapshots(ppo.syntheticTessProgram.get());
         return ppo.syntheticTessProgram.get();
     }
 
@@ -47549,6 +47637,11 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     mergeStageUniforms(tcsProg);
     mergeStageUniforms(tesProg);
     mergeStageUniforms(fsProg);
+    refreshStageUniformSnapshots(synth.get());
+    synth->synthesizedMatrixSlots.vertexProgramTwoSide =
+        fsProg != nullptr
+            ? fsProg->synthesizedMatrixSlots.vertexProgramTwoSide
+            : -1;
 
     // TF varying names live on the TES separable program (linked
     // there via glTransformFeedbackVaryings or in-shader xfb_buffer
@@ -47859,7 +47952,11 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                                                 GLsizei count,
                                                 GLint first,
                                                 GLsizei instanceCount,
-                                                GLuint baseInstance)
+                                                GLuint baseInstance,
+                                                const GLVertexArrayObject* vertexArrayOverride,
+                                                const void* clientVertexData,
+                                                std::size_t clientVertexDataByteCount,
+                                                GLuint clientVertexBufferSentinel)
 {
     (void)first;
     if (mode != GL_PATCHES) return false;
@@ -47990,6 +48087,27 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     MetalTessDrawInfo info;
     std::vector<GLuint> tessVertexBufferNames;
     std::vector<GLuint> tessSampledTextureNames;
+    id<MTLBuffer> clientVertexBuffer = nil;
+    if (clientVertexData != nullptr && clientVertexDataByteCount > 0) {
+        if (device == nil || clientVertexBufferSentinel == 0) {
+            return false;
+        }
+        clientVertexBuffer =
+            [device newBufferWithBytes:clientVertexData
+                                length:static_cast<NSUInteger>(
+                                           clientVertexDataByteCount)
+                               options:MTLResourceStorageModeShared];
+        if (clientVertexBuffer == nil) {
+            return false;
+        }
+    }
+    ScopedOwnedMetalObject clientVertexBufferOwner(clientVertexBuffer);
+#if __has_feature(objc_arc)
+    void* clientVertexBufferRaw =
+        clientVertexBuffer != nil ? (__bridge void*)clientVertexBuffer : nullptr;
+#else
+    void* clientVertexBufferRaw = clientVertexBuffer;
+#endif
     info.tessControlPipelineState = program.metalTessControlPipelineState;
     if (program.metalTessTier == GLProgramObject::MetalTessTier::Phase3) {
         info.vertexComputePipelineState = program.metalTessVertexPipelineState;
@@ -48025,7 +48143,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         program.metalTessVertexNeedsDescriptor &&
         info.vertexComputePipelineState == nullptr) {
         const GLuint vaoName = state->boundVertexArray();
-        GLVertexArrayObject* vao = objects->vertexArrays().get(vaoName);
+        const GLVertexArrayObject* vao = vertexArrayOverride != nullptr
+            ? vertexArrayOverride
+            : objects->vertexArrays().get(vaoName);
         if (vao == nullptr) {
             return false;
         }
@@ -48071,6 +48191,15 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         for (const auto& binding : buildResult.vertexBufferBindings) {
             if (useZeroedVsOutputs) {
                 break;
+            }
+            if (binding.glBuffer == clientVertexBufferSentinel &&
+                clientVertexBufferRaw != nullptr) {
+                MetalTessVertexBufferBinding ent;
+                ent.metalBuffer = clientVertexBufferRaw;
+                ent.offset = 0;
+                ent.metalSlot = binding.metalSlot;
+                info.vertexComputeBufferBindings.push_back(ent);
+                continue;
             }
             if (binding.glBuffer != 0) {
                 tessVertexBufferNames.push_back(binding.glBuffer);
@@ -48186,17 +48315,20 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (program.fragmentUniformLayout.empty() &&
         !program.fragmentReflection.uniformBlocks.empty()) {
         computeStageUniformLayout(program.fragmentUniformLayout,
-            program.fragmentReflection, program.uniforms);
+            program.fragmentReflection,
+            uniformsForEmulationStage(program, 4));
     }
     if (!program.fragmentUniformLayout.empty()) {
         if (pushSynthesizedMatrixUniforms(
-                program, matrixState, 0, 0, 0,
+                program, matrixState,
+                state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE), 0, 0, 0,
                 texEnv.color, lighting.modelAmbient,
                 fog.color, fog.density, fog.start, fog.end)) {
             program.markUniformsDirty();
         }
         buildStageUniformBuffer(fragUniformScratch,
-            program.fragmentReflection, program.uniformValues,
+            program.fragmentReflection,
+            uniformValuesForEmulationStage(program, 4),
             program.fragmentUniformLayout);
         info.fragmentUniformData = fragUniformScratch.data();
         info.fragmentUniformSize = fragUniformScratch.size();
@@ -48214,21 +48346,25 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         if (program.tessControlUniformLayout.empty() &&
             !program.tessControlReflection.uniformBlocks.empty()) {
             computeStageUniformLayout(program.tessControlUniformLayout,
-                program.tessControlReflection, program.uniforms);
+                program.tessControlReflection,
+                uniformsForEmulationStage(program, 1));
         }
         if (program.tessVertexAsComputeUniformLayout.empty() &&
             !program.tessVertexAsComputeReflection.uniformBlocks.empty()) {
             computeStageUniformLayout(program.tessVertexAsComputeUniformLayout,
-                program.tessVertexAsComputeReflection, program.uniforms);
+                program.tessVertexAsComputeReflection,
+                uniformsForEmulationStage(program, 0));
         }
         if (program.tessEvalAsComputeUniformLayout.empty() &&
             !program.tessEvalAsComputeReflection.uniformBlocks.empty()) {
             computeStageUniformLayout(program.tessEvalAsComputeUniformLayout,
-                program.tessEvalAsComputeReflection, program.uniforms);
+                program.tessEvalAsComputeReflection,
+                uniformsForEmulationStage(program, 2));
         }
         if (!program.tessControlUniformLayout.empty()) {
             buildStageUniformBuffer(tcsUniformScratch,
-                program.tessControlReflection, program.uniformValues,
+                program.tessControlReflection,
+                uniformValuesForEmulationStage(program, 1),
                 program.tessControlUniformLayout);
             info.tessControlUniformData = tcsUniformScratch.data();
             info.tessControlUniformSize = tcsUniformScratch.size();
@@ -48250,14 +48386,16 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         }
         if (!program.tessVertexAsComputeUniformLayout.empty()) {
             buildStageUniformBuffer(vsComputeUniformScratch,
-                program.tessVertexAsComputeReflection, program.uniformValues,
+                program.tessVertexAsComputeReflection,
+                uniformValuesForEmulationStage(program, 0),
                 program.tessVertexAsComputeUniformLayout);
             info.tessVertexAsComputeUniformData = vsComputeUniformScratch.data();
             info.tessVertexAsComputeUniformSize = vsComputeUniformScratch.size();
         }
         if (!program.tessEvalAsComputeUniformLayout.empty()) {
             buildStageUniformBuffer(tesComputeUniformScratch,
-                program.tessEvalAsComputeReflection, program.uniformValues,
+                program.tessEvalAsComputeReflection,
+                uniformValuesForEmulationStage(program, 2),
                 program.tessEvalAsComputeUniformLayout);
             info.tessEvalAsComputeUniformData = tesComputeUniformScratch.data();
             info.tessEvalAsComputeUniformSize = tesComputeUniformScratch.size();
@@ -48791,7 +48929,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
         computeStageUniformLayout(program.vertexUniformLayout,
             program.vertexReflection, program.uniforms);
         computeStageUniformLayout(program.fragmentUniformLayout,
-            program.fragmentReflection, program.uniforms);
+            program.fragmentReflection,
+            uniformsForEmulationStage(program, 4));
         program.uniformLayoutComputed = true;
     }
     thread_local std::vector<std::uint8_t> meshGsVtxUniformScratch;
@@ -48799,7 +48938,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     thread_local std::vector<std::uint8_t> meshGsGeomUniformScratch;
     thread_local std::vector<GLProgramObject::UniformLayoutEntry> meshGsGeomUniformLayout;
     if (pushSynthesizedMatrixUniforms(
-            program, matrixState, 0, 0, 0,
+            program, matrixState,
+            state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE), 0, 0, 0,
             texEnv.color, lighting.modelAmbient,
             fog.color, fog.density, fog.start, fog.end)) {
         program.markUniformsDirty();
@@ -48810,7 +48950,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
         program.vertexReflection, program.uniformValues,
         program.vertexUniformLayout);
     buildStageUniformBuffer(meshGsFragUniformScratch,
-        program.fragmentReflection, program.uniformValues,
+        program.fragmentReflection,
+        uniformValuesForEmulationStage(program, 4),
         program.fragmentUniformLayout);
     buildStageUniformBuffer(meshGsGeomUniformScratch,
         program.geometryReflection, program.uniformValues,
@@ -48959,6 +49100,7 @@ double GLContext::Impl::prepareBindingConstructionUniformBuffers(
     }
     prepareTranslatedDrawUniformBuffers(
         program, programName, matrixState,
+        state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE),
         texEnv.color, lighting.modelAmbient,
         fog.color, fog.density, fog.start, fog.end,
         &clipPlanes, legacyClipPlaneMask,
@@ -49050,6 +49192,290 @@ void GLContext::Impl::resolveBindingConstructionForTranslatedDraw(
     }
 }
 
+bool GLContext::Impl::materializeLegacyCompatClientVertexArray(
+    const GLProgramObject& program,
+    GLint first,
+    GLsizei count,
+    std::vector<LegacyCompatClientVertex>& vertices,
+    GLVertexArrayObject& cpuVertexArray,
+    GLVertexArrayObject* nativeVertexArray,
+    GLuint nativeBufferSentinel)
+{
+    vertices.clear();
+    if (!appglCompatProfileEnabled() || objects == nullptr || first < 0 ||
+        count <= 0) {
+        return false;
+    }
+
+    auto supportedLocation = [](GLuint location) {
+        return location == 0 || location == 1 || location == 3 ||
+            location == 4 || location == 8;
+    };
+    auto programWantsLocation = [&](GLuint location) {
+        for (const auto& input : program.vertexReflection.vertexInputs) {
+            if (input.location == location || input.sourceLocation == location) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const auto& input : program.vertexReflection.vertexInputs) {
+        if (input.containsFp64 ||
+            (!supportedLocation(input.location) &&
+             !supportedLocation(input.sourceLocation))) {
+            return false;
+        }
+    }
+    if (!programWantsLocation(0)) {
+        return false;
+    }
+
+    const auto& vertexArray = legacyVertexArray;
+    const auto& colorArray = legacyColorArray;
+    const auto& secondaryColorArray = legacySecondaryColorArray;
+    const auto& texCoordArray = legacyTexCoordArray;
+    if (!vertexArray.enabled ||
+        (vertexArray.pointer == nullptr && vertexArray.bufferName == 0) ||
+        vertexArray.type != GL_FLOAT || vertexArray.size < 2 ||
+        vertexArray.size > 4) {
+        return false;
+    }
+
+    const bool wantsColor = programWantsLocation(3);
+    const bool wantsSecondaryColor = programWantsLocation(4);
+    const bool wantsTexCoord =
+        programWantsLocation(1) || programWantsLocation(8);
+    const bool colorArrayUsable =
+        colorArray.enabled &&
+        (colorArray.pointer != nullptr || colorArray.bufferName != 0) &&
+        colorArray.type == GL_FLOAT && colorArray.size >= 3 &&
+        colorArray.size <= 4;
+    const bool secondaryColorArrayUsable =
+        secondaryColorArray.enabled &&
+        (secondaryColorArray.pointer != nullptr ||
+         secondaryColorArray.bufferName != 0) &&
+        secondaryColorArray.type == GL_FLOAT &&
+        secondaryColorArray.size == 3;
+    const bool texCoordArrayUsable =
+        texCoordArray.enabled &&
+        (texCoordArray.pointer != nullptr || texCoordArray.bufferName != 0) &&
+        texCoordArray.type == GL_FLOAT && texCoordArray.size >= 1 &&
+        texCoordArray.size <= 4;
+    if ((wantsColor && colorArray.enabled && !colorArrayUsable) ||
+        (wantsSecondaryColor && secondaryColorArray.enabled &&
+         !secondaryColorArrayUsable) ||
+        (wantsTexCoord && texCoordArray.enabled && !texCoordArrayUsable)) {
+        return false;
+    }
+
+    auto resolveArraySource = [&](const LegacyClientArray& array,
+                                  const std::uint8_t*& base,
+                                  std::size_t& availableBytes) -> bool {
+        if (array.bufferName != 0) {
+            const GLBufferObject* buffer = objects->buffers().get(array.bufferName);
+            if (buffer == nullptr || buffer->shadowBytes.empty()) {
+                return false;
+            }
+            const std::uintptr_t offset =
+                reinterpret_cast<std::uintptr_t>(array.pointer);
+            if (offset > buffer->shadowBytes.size()) {
+                return false;
+            }
+            base = buffer->shadowBytes.data() + static_cast<std::size_t>(offset);
+            availableBytes = buffer->shadowBytes.size() -
+                static_cast<std::size_t>(offset);
+            return true;
+        }
+        if (array.pointer == nullptr) {
+            return false;
+        }
+        base = static_cast<const std::uint8_t*>(array.pointer);
+        availableBytes = std::numeric_limits<std::size_t>::max();
+        return true;
+    };
+    auto elementPointer = [](const std::uint8_t* base,
+                             std::size_t availableBytes,
+                             std::size_t sourceIndex,
+                             std::size_t stride,
+                             std::size_t need) -> const GLfloat* {
+        if (stride != 0 &&
+            sourceIndex > std::numeric_limits<std::size_t>::max() / stride) {
+            return nullptr;
+        }
+        const std::size_t offset = sourceIndex * stride;
+        if (offset > availableBytes || need > availableBytes - offset) {
+            return nullptr;
+        }
+        return reinterpret_cast<const GLfloat*>(base + offset);
+    };
+
+    const std::size_t vertexStride = vertexArray.stride > 0
+        ? static_cast<std::size_t>(vertexArray.stride)
+        : static_cast<std::size_t>(vertexArray.size) * sizeof(GLfloat);
+    const std::size_t colorStride = colorArrayUsable
+        ? (colorArray.stride > 0
+               ? static_cast<std::size_t>(colorArray.stride)
+               : static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat))
+        : 0;
+    const std::size_t secondaryColorStride = secondaryColorArrayUsable
+        ? (secondaryColorArray.stride > 0
+               ? static_cast<std::size_t>(secondaryColorArray.stride)
+               : 3u * sizeof(GLfloat))
+        : 0;
+    const std::size_t texCoordStride = texCoordArrayUsable
+        ? (texCoordArray.stride > 0
+               ? static_cast<std::size_t>(texCoordArray.stride)
+               : static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat))
+        : 0;
+
+    const std::uint8_t* vertexBase = nullptr;
+    std::size_t vertexAvailableBytes = 0;
+    if (!resolveArraySource(vertexArray, vertexBase, vertexAvailableBytes)) {
+        return false;
+    }
+    const std::uint8_t* colorBase = nullptr;
+    std::size_t colorAvailableBytes = 0;
+    if (colorArrayUsable &&
+        !resolveArraySource(colorArray, colorBase, colorAvailableBytes)) {
+        return false;
+    }
+    const std::uint8_t* secondaryColorBase = nullptr;
+    std::size_t secondaryColorAvailableBytes = 0;
+    if (secondaryColorArrayUsable &&
+        !resolveArraySource(secondaryColorArray, secondaryColorBase,
+                            secondaryColorAvailableBytes)) {
+        return false;
+    }
+    const std::uint8_t* texCoordBase = nullptr;
+    std::size_t texCoordAvailableBytes = 0;
+    if (texCoordArrayUsable &&
+        !resolveArraySource(texCoordArray, texCoordBase,
+                            texCoordAvailableBytes)) {
+        return false;
+    }
+
+    const std::size_t vertexCount = static_cast<std::size_t>(count);
+    if (vertexCount > vertices.max_size()) {
+        return false;
+    }
+    vertices.resize(vertexCount);
+    for (std::size_t i = 0; i < vertexCount; ++i) {
+        const std::size_t sourceIndex = static_cast<std::size_t>(first) + i;
+        if (sourceIndex < i) {
+            vertices.clear();
+            return false;
+        }
+        const GLfloat* position = elementPointer(
+            vertexBase, vertexAvailableBytes, sourceIndex, vertexStride,
+            static_cast<std::size_t>(vertexArray.size) * sizeof(GLfloat));
+        const GLfloat* color = colorArrayUsable
+            ? elementPointer(
+                  colorBase, colorAvailableBytes, sourceIndex, colorStride,
+                  static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat))
+            : nullptr;
+        const GLfloat* secondaryColor = secondaryColorArrayUsable
+            ? elementPointer(secondaryColorBase, secondaryColorAvailableBytes,
+                             sourceIndex, secondaryColorStride,
+                             3u * sizeof(GLfloat))
+            : nullptr;
+        const GLfloat* texCoord = texCoordArrayUsable
+            ? elementPointer(
+                  texCoordBase, texCoordAvailableBytes, sourceIndex,
+                  texCoordStride,
+                  static_cast<std::size_t>(texCoordArray.size) *
+                      sizeof(GLfloat))
+            : nullptr;
+        if (position == nullptr || (colorArrayUsable && color == nullptr) ||
+            (secondaryColorArrayUsable && secondaryColor == nullptr) ||
+            (texCoordArrayUsable && texCoord == nullptr)) {
+            vertices.clear();
+            return false;
+        }
+
+        LegacyCompatClientVertex& out = vertices[i];
+        out.position[0] = position[0];
+        out.position[1] = position[1];
+        out.position[2] = vertexArray.size >= 3 ? position[2] : 0.0f;
+        out.position[3] = vertexArray.size >= 4 ? position[3] : 1.0f;
+        std::memcpy(out.color, immediate.currentColor, sizeof(out.color));
+        if (color != nullptr) {
+            out.color[0] = color[0];
+            out.color[1] = color[1];
+            out.color[2] = color[2];
+            if (colorArray.size >= 4) {
+                out.color[3] = color[3];
+            }
+        }
+        std::memcpy(out.secondaryColor, fixedFunctionCurrentSecondaryColor,
+                    sizeof(out.secondaryColor));
+        if (secondaryColor != nullptr) {
+            out.secondaryColor[0] = secondaryColor[0];
+            out.secondaryColor[1] = secondaryColor[1];
+            out.secondaryColor[2] = secondaryColor[2];
+            out.secondaryColor[3] = 1.0f;
+        }
+        std::memcpy(out.texcoord, immediate.currentTexcoord,
+                    sizeof(out.texcoord));
+        if (texCoord != nullptr) {
+            for (GLint component = 0; component < texCoordArray.size;
+                 ++component) {
+                out.texcoord[component] = texCoord[component];
+            }
+        }
+    }
+
+    static_assert(sizeof(LegacyCompatClientVertex) == 64);
+    auto populateVertexArray = [&](GLVertexArrayObject& out,
+                                   bool native) {
+        objects->initializeVertexArray(out);
+        auto addAttribute = [&](GLuint location, std::size_t offset) {
+            if (location >= out.attributes.size()) {
+                return;
+            }
+            GLVertexAttributeState& attr = out.attributes[location];
+            attr.enabled = true;
+            attr.size = 4;
+            attr.type = GL_FLOAT;
+            attr.normalized = GL_FALSE;
+            attr.stride = static_cast<GLsizei>(
+                sizeof(LegacyCompatClientVertex));
+            attr.pointer = native
+                ? offset
+                : reinterpret_cast<std::uintptr_t>(vertices.data()) + offset;
+            attr.buffer = native ? nativeBufferSentinel : 0;
+            attr.divisor = 0;
+            attr.integer = false;
+            attr.longData = false;
+            attr.bindingIndex = location;
+            attr.relativeOffset = 0;
+            attr.useSeparatedFormat = false;
+        };
+        addAttribute(0, offsetof(LegacyCompatClientVertex, position));
+        if (programWantsLocation(1)) {
+            addAttribute(1, offsetof(LegacyCompatClientVertex, texcoord));
+        }
+        if (wantsColor) {
+            addAttribute(3, offsetof(LegacyCompatClientVertex, color));
+        }
+        if (wantsSecondaryColor) {
+            addAttribute(
+                4, offsetof(LegacyCompatClientVertex, secondaryColor));
+        }
+        if (programWantsLocation(8)) {
+            addAttribute(8, offsetof(LegacyCompatClientVertex, texcoord));
+        }
+    };
+    populateVertexArray(cpuVertexArray, false);
+    if (nativeVertexArray != nullptr) {
+        if (nativeBufferSentinel == 0) {
+            vertices.clear();
+            return false;
+        }
+        populateVertexArray(*nativeVertexArray, true);
+    }
+    return true;
+}
+
 bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     GLenum mode,
     const void* vertices,
@@ -49058,8 +49484,13 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     const char* label,
     const void* indices,
     GLsizei indexCount,
-    GLenum indexType)
+    GLenum indexType,
+    std::size_t secondaryColorOffset)
 {
+    const bool hasSecondaryColorData =
+        secondaryColorOffset != std::numeric_limits<std::size_t>::max() &&
+        secondaryColorOffset <= vertexStride &&
+        sizeof(float) * 4u <= vertexStride - secondaryColorOffset;
     if (!appglCompatProfileEnabled() ||
         frameGraph == nullptr ||
         state == nullptr ||
@@ -49095,11 +49526,13 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         return false;
     }
 
-    auto immediateAttributeLocationSupported = [](GLuint location) {
+    auto immediateAttributeLocationSupported = [&](GLuint location) {
         switch (location) {
             case 0: // position
             case 1: // texcoord0 vec4
             case 3: // color
+            case 4: // optional secondary color
+                return location != 4 || hasSecondaryColorData;
             case 8: // texcoord0 vec4
                 return true;
             default:
@@ -49142,6 +49575,9 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     if (vertexInputAt(0) == nullptr) {
         return false;
     }
+    if (vertexInputAt(4) != nullptr && !hasSecondaryColorData) {
+        return false;
+    }
 
     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
     tdi.mode = mode;
@@ -49176,6 +49612,9 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     }
     if (vertexInputAt(3) != nullptr) {
         addImmediateAttributeLayout(3, sizeof(float) * 4u, 4);
+    }
+    if (vertexInputAt(4) != nullptr) {
+        addImmediateAttributeLayout(4, secondaryColorOffset, 4);
     }
     if (vertexInputAt(8) != nullptr) {
         addImmediateAttributeLayout(8, sizeof(float) * 8u, 4);
@@ -49274,6 +49713,7 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
 
     const auto& vertexArray = legacyVertexArray;
     const auto& colorArray = legacyColorArray;
+    const auto& secondaryColorArray = legacySecondaryColorArray;
     const auto& texCoordArray = legacyTexCoordArray;
     if (!vertexArray.enabled ||
         (vertexArray.pointer == nullptr && vertexArray.bufferName == 0) ||
@@ -49287,15 +49727,35 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
         (colorArray.pointer != nullptr || colorArray.bufferName != 0) &&
         colorArray.type == GL_FLOAT &&
         colorArray.size >= 3 && colorArray.size <= 4;
+    const bool secondaryColorArrayUsable =
+        secondaryColorArray.enabled &&
+        (secondaryColorArray.pointer != nullptr ||
+         secondaryColorArray.bufferName != 0) &&
+        secondaryColorArray.type == GL_FLOAT &&
+        secondaryColorArray.size == 3;
     const bool texCoordArrayUsable =
         texCoordArray.enabled &&
         (texCoordArray.pointer != nullptr || texCoordArray.bufferName != 0) &&
         texCoordArray.type == GL_FLOAT &&
         texCoordArray.size >= 1 && texCoordArray.size <= 4;
     if ((colorArray.enabled && !colorArrayUsable) ||
+        (secondaryColorArray.enabled && !secondaryColorArrayUsable) ||
         (texCoordArray.enabled && !texCoordArrayUsable)) {
         return false;
     }
+
+    // Keep the fixed immediate-mode tuple's 48-byte ABI untouched. Indexed
+    // translated client-array draws use this compatible prefix plus an
+    // appended conventional secondary-color attribute at location 4.
+    struct LegacyTranslatedClientVertex {
+        float position[4];
+        float color[4];
+        float texcoord[4];
+        float secondaryColor[4];
+    };
+    static_assert(
+        offsetof(LegacyTranslatedClientVertex, secondaryColor) ==
+            sizeof(ImmediateModeVertex));
 
     auto indexAt = [&](GLsizei i) -> GLuint {
         return indexType == GL_UNSIGNED_SHORT
@@ -49308,7 +49768,8 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
     }
     const std::size_t vertexSlots = static_cast<std::size_t>(maxIndex) + 1u;
     if (vertexSlots == 0 ||
-        vertexSlots > std::vector<ImmediateModeVertex>{}.max_size()) {
+        vertexSlots >
+            std::vector<LegacyTranslatedClientVertex>{}.max_size()) {
         return false;
     }
 
@@ -49360,6 +49821,9 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
     const std::size_t colorStride = colorArray.stride > 0
         ? static_cast<std::size_t>(colorArray.stride)
         : static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat);
+    const std::size_t secondaryColorStride = secondaryColorArray.stride > 0
+        ? static_cast<std::size_t>(secondaryColorArray.stride)
+        : static_cast<std::size_t>(secondaryColorArray.size) * sizeof(GLfloat);
     const std::size_t texCoordStride = texCoordArray.stride > 0
         ? static_cast<std::size_t>(texCoordArray.stride)
         : static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat);
@@ -49375,6 +49839,15 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
         !resolveArraySource(colorArray, colorBase, colorAvailableBytes)) {
         return false;
     }
+    const std::uint8_t* secondaryColorBase = nullptr;
+    std::size_t secondaryColorAvailableBytes = 0;
+    if (secondaryColorArrayUsable &&
+        !resolveArraySource(
+            secondaryColorArray,
+            secondaryColorBase,
+            secondaryColorAvailableBytes)) {
+        return false;
+    }
     const std::uint8_t* texCoordBase = nullptr;
     std::size_t texCoordAvailableBytes = 0;
     if (texCoordArrayUsable &&
@@ -49382,7 +49855,7 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
         return false;
     }
 
-    std::vector<ImmediateModeVertex> vertices(vertexSlots);
+    std::vector<LegacyTranslatedClientVertex> vertices(vertexSlots);
     std::vector<std::uint8_t> populated(vertexSlots, 0);
     for (GLsizei i = 0; i < indexCount; ++i) {
         const GLuint sourceIndex = indexAt(i);
@@ -49400,6 +49873,15 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
                   colorBase, colorAvailableBytes, sourceIndex, colorStride,
                   static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat))
             : nullptr;
+        const GLfloat* sp = secondaryColorArrayUsable
+            ? elementPointer(
+                  secondaryColorBase,
+                  secondaryColorAvailableBytes,
+                  sourceIndex,
+                  secondaryColorStride,
+                  static_cast<std::size_t>(secondaryColorArray.size) *
+                      sizeof(GLfloat))
+            : nullptr;
         const GLfloat* tp = texCoordArrayUsable
             ? elementPointer(
                   texCoordBase, texCoordAvailableBytes, sourceIndex,
@@ -49407,11 +49889,12 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
                   static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat))
             : nullptr;
         if ((colorArrayUsable && cp == nullptr) ||
+            (secondaryColorArrayUsable && sp == nullptr) ||
             (texCoordArrayUsable && tp == nullptr)) {
             return false;
         }
 
-        ImmediateModeVertex& vertex = vertices[sourceIndex];
+        LegacyTranslatedClientVertex& vertex = vertices[sourceIndex];
         vertex.position[0] = vp[0];
         vertex.position[1] = vp[1];
         vertex.position[2] = vertexArray.size >= 3 ? vp[2] : 0.0f;
@@ -49422,6 +49905,15 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
             vertex.color[1] = cp[1];
             vertex.color[2] = cp[2];
             vertex.color[3] = colorArray.size >= 4 ? cp[3] : vertex.color[3];
+        }
+        std::memcpy(vertex.secondaryColor,
+                    fixedFunctionCurrentSecondaryColor,
+                    sizeof(vertex.secondaryColor));
+        if (sp != nullptr) {
+            vertex.secondaryColor[0] = sp[0];
+            vertex.secondaryColor[1] = sp[1];
+            vertex.secondaryColor[2] = sp[2];
+            vertex.secondaryColor[3] = 1.0f;
         }
         std::memcpy(vertex.texcoord, immediate.currentTexcoord,
                     sizeof(vertex.texcoord));
@@ -49435,8 +49927,10 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
     }
 
     return encodeImmediateTranslatedProgramDraw(
-        mode, vertices.data(), vertices.size(), sizeof(ImmediateModeVertex),
-        label, indices, indexCount, indexType);
+        mode, vertices.data(), vertices.size(),
+        sizeof(LegacyTranslatedClientVertex),
+        label, indices, indexCount, indexType,
+        offsetof(LegacyTranslatedClientVertex, secondaryColor));
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,

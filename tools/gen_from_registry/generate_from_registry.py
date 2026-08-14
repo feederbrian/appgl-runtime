@@ -459,6 +459,7 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glAlphaFunc",
     "glVertexPointer",
     "glColorPointer",
+    "glSecondaryColorPointer",
     "glTexCoordPointer",
     "glEnableClientState",
     "glDisableClientState",
