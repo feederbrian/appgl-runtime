@@ -121,6 +121,17 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         // base-level dimensions to compute the natural cap.
         auto baseIt = tex->levels.find(baseLevel);
         if (baseIt == tex->levels.end() || !baseIt->second.defined) return false;
+        // GL 4.6 §8.17: mipmap completeness is required only when the
+        // minification filter actually samples the mip chain. With GL_NEAREST
+        // or GL_LINEAR a single defined base level is already complete.
+        // piglit copy_image `targets` sets MIN_FILTER=GL_NEAREST (targets.c:101)
+        // on its single-level textures, so demanding the full chain here
+        // rejected the entire 7x7 target matrix with INVALID_OPERATION.
+        // CTS copy_image.incomplete_tex is unaffected twice over: it defines no
+        // levels at all and is already rejected by the `levels.empty()` check
+        // above, and the GL default filter (GL_NEAREST_MIPMAP_LINEAR) still
+        // demands the full chain for any texture that never sets one.
+        if (!textureMinFilterUsesMipChain(tex->params.minFilter)) return true;
         const GLsizei baseW = baseIt->second.desc.width;
         const GLsizei baseH = baseIt->second.desc.height;
         const GLsizei baseD = baseIt->second.desc.depth;
