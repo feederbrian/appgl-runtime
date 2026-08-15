@@ -520,10 +520,42 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         // always 1. CTS copy_image.exceeding_boundaries plants Y=14 on a
         // 16-wide × 6-layer 1D-array and expects INVALID_VALUE because
         // 14+1 > 6. Re-route the Y-axis bound to the layer count for
-        // 1D_ARRAY so the bounds check fires on layer overflow even if
-        // raw `desc.height` is set to texel-row count.
+        // 1D_ARRAY so the bounds check fires on layer overflow.
+        //
+        // The layer count is read as a 4-way max, NOT from `desc.depth`:
+        // no allocator ever stores a 1D_ARRAY's layer count in `depth`.
+        // texStorage (GLContextTextureCore.inc.mm:2442) and texImage
+        // (:575) both restrict `depth` to {3D, 2D_ARRAY, CUBE_MAP_ARRAY},
+        // and SparseTextureAlloc.mm:426 omits 1D_ARRAY from its switch and
+        // falls through to 1. The count lands in `layers` (:2452, :585) or
+        // in `height` depending on entry point, so the union over both
+        // fields on both objects is the only expression correct for all
+        // three allocators. Reading `depth` collapsed the bound to its
+        // default of 1 and rejected every multi-layer 1D_ARRAY copy.
+        //
+        // This bound is NOT validation-only: srcImgH/dstImgH also drive
+        // the rgba8 allocation (:631) and the byte strides (:757, :806),
+        // so a bound of 1 under-allocates by the layer factor. The value
+        // must be correct here, at the override, not patched at the checks.
         if (srcTarget == GL_TEXTURE_1D_ARRAY) {
+            const GLsizei srcLayerCount = std::max<GLsizei>(
+                std::max<GLsizei>(srcTex->desc.height, srcTex->desc.layers),
+                std::max<GLsizei>(srcImg.desc.height, srcImg.desc.layers));
+            // ⛔ srcImgH IS DELIBERATELY LEFT AT THE COLLAPSED VALUE. It is not
+            // only the Y bound — it is the SLICE STRIDE HEIGHT (:794 srcSliceBytes
+            // = srcRowBytes * srcImgH, and :843 on the bpp-mismatch path). A
+            // 1D_ARRAY's true texel height is 1, so the stride must stay 1;
+            // setting it to the layer count multiplies every slice offset by N
+            // and walks off the end of the buffer. The layer count belongs on
+            // the Z axis alone.
             srcImgH = std::max<GLsizei>(srcTex->desc.depth, srcImg.desc.depth);
+            // The Z axis is the PRIMARY layer axis for array targets — see the
+            // bounds-check comment below, which states that *_ARRAY targets
+            // place layers on Z and treats the layer-on-Y case as additional.
+            // `srcImgD` was left reading raw `desc.depth`, which is 1 for every
+            // 1D_ARRAY by the allocator argument above, so every copy touching
+            // a layer beyond 0 was rejected on `srcZ + srcDepth > srcImgD`.
+            srcImgD = srcLayerCount;
         }
         // Prefer native data if available, else fall back to rgba8.
         if (srcImg.nativeBpp > 0 && !srcImg.nativeData.empty()) {
@@ -623,12 +655,41 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         dstImgH = dstImg->desc.height;
         dstImgD = dstCubeMap ? 6 : dstImg->desc.depth;
         // CKPT116: 1D_ARRAY layer-count-on-Y axis (mirror src logic).
+        // 4-way max over {height, layers} on both objects — see the src-side
+        // comment above for why `desc.depth` is never the 1D_ARRAY layer
+        // count, and why this value must be right here rather than at the
+        // bounds checks: it feeds the totalPixels allocation immediately
+        // below (:631) as well as the byte strides.
         if (dstTarget == GL_TEXTURE_1D_ARRAY) {
+            const GLsizei dstLayerCount = std::max<GLsizei>(
+                std::max<GLsizei>(dstTex->desc.height, dstTex->desc.layers),
+                std::max<GLsizei>(dstImg->desc.height, dstImg->desc.layers));
+            // ⛔ See the src-side note: dstImgH is the SLICE STRIDE HEIGHT and
+            // must stay 1 for a 1D_ARRAY.
             dstImgH = std::max<GLsizei>(dstTex->desc.depth, dstImg->desc.depth);
+            // Mirror of the src-side Z-axis correction — see there. Note this
+            // runs BEFORE the totalPixels allocation immediately below, so the
+            // destination buffer is sized from the corrected layer count rather
+            // than from the collapsed default of 1.
+            dstImgD = dstLayerCount;
         }
 
         // Ensure the destination rgba8 buffer is large enough.
-        const std::size_t totalPixels = static_cast<std::size_t>(dstImgW) * dstImgH;
+        //
+        // For a 1D_ARRAY the layer count is on the Z axis and `dstImgH` is the
+        // PER-LAYER row count (1), so `dstImgW * dstImgH` sizes a single layer.
+        // A level that already existed was allocated W x N by texStorage/texImage
+        // and the resize below only grows, so that case is unaffected. But a level
+        // created on the fly above starts at W x 1 x 1, and with the Z bound now
+        // admitting layers up to N the slice loop would write (dstZ + z) * rowBytes
+        // past the end of it. Size by the layer extent so the buffer covers every
+        // slice the bounds check now permits.
+        const std::size_t dstLayerExtent =
+            (dstTarget == GL_TEXTURE_1D_ARRAY)
+                ? static_cast<std::size_t>(dstImgD)
+                : static_cast<std::size_t>(dstImgH);
+        const std::size_t totalPixels =
+            static_cast<std::size_t>(dstImgW) * dstLayerExtent;
         if (dstImg->nativeBpp > 0 && !dstImg->nativeData.empty()) {
             dstPixels = dstImg->nativeData.data();
             dstBpp = dstImg->nativeBpp;
