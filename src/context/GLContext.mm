@@ -21217,6 +21217,39 @@ struct GLContext::Impl {
                 if (texObject->metalTexture == nullptr) continue;
                 id<MTLTexture> mtlTex =
                     (__bridge id<MTLTexture>)texObject->metalTexture;
+                // Metal has no CPU readback for a multisample texture — it must be
+                // resolved first — and AGX segfaults inside processCompressedRegion2D
+                // rather than validating the call. This map is geometry-shader
+                // emulation support, so it is the only path that reads sampled
+                // texture bytes back to the CPU; vs/fs sample on the GPU and never
+                // arrive here. That is why every crashing row was a gs variant.
+                //
+                // The sampleCount test below existed already, but nested inside the
+                // `viewSourceTexture != 0` branch, so it only covered texture VIEWS.
+                // A directly-created multisample texture fell straight through to the
+                // getBytes calls further down — which the layer-count arm explicitly
+                // sizes for MTLTextureType2DMultisampleArray, so MSAA reaching here
+                // was anticipated, not an oversight.
+                //
+                // Skip the slot rather than abandoning the whole map, matching the
+                // mirror of this loop. The emulated geometry shader then gets no data
+                // for this sampler: incorrect, but measurable. A crash is not.
+                const bool nativeMultisampleTexture =
+                    mtlTex.textureType == MTLTextureType2DMultisample ||
+                    mtlTex.textureType == MTLTextureType2DMultisampleArray ||
+                    mtlTex.sampleCount > 1;
+                if (nativeMultisampleTexture) {
+                    if (trace) {
+                        std::fprintf(stderr,
+                            "[GS-tex] slot %zu: skipping multisample texture "
+                            "(name=%u type=%lu samples=%lu) — Metal cannot getBytes "
+                            "an MSAA texture\n",
+                            i, texName,
+                            (unsigned long)mtlTex.textureType,
+                            (unsigned long)mtlTex.sampleCount);
+                    }
+                    continue;
+                }
                 if (texObject->viewSourceTexture != 0) {
                     const bool cpuReadableViewType =
                         mtlTex.textureType == MTLTextureType1D ||
