@@ -152,6 +152,33 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §18.3.2 requires the images to EXIST, and that is not a
+    // property of the copy extent. A renderbuffer named by
+    // glGenRenderbuffers but never given glRenderbufferStorage has no
+    // image, so it is not a legal operand.
+    //
+    // The storage checks further down (the `!rb->storageDefined` guards in
+    // the source and destination resolution blocks) never see this case:
+    // a zero-extent copy returns success before them, at the
+    // `srcWidth == 0 || srcHeight == 0 || srcDepth == 0` early-out. A
+    // TEXTURE operand is caught above, ahead of that early-out; a
+    // renderbuffer operand was not caught anywhere, so
+    // copyImageSubData(unallocated_rb, ..., 0, 0, 0) silently succeeded.
+    // Those later guards also raise GL_INVALID_VALUE, where a missing
+    // image calls for GL_INVALID_OPERATION; they are left in place as a
+    // second line of defence rather than moved.
+    auto isRenderbufferComplete = [&](GLuint name) -> bool {
+        const GLRenderbufferObject* rb = impl_->objects->renderbuffers().get(name);
+        return rb != nullptr && rb->storageDefined;
+    };
+    if (!srcIsTex && !isRenderbufferComplete(srcName)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!dstIsTex && !isRenderbufferComplete(dstName)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     // GL 4.6 §18.2.3: srcLevel and dstLevel must be valid levels of
     // their objects. Renderbuffers only have level 0; textures have
