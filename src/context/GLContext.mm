@@ -21238,19 +21238,31 @@ struct GLContext::Impl {
                     mtlTex.textureType == MTLTextureType2DMultisample ||
                     mtlTex.textureType == MTLTextureType2DMultisampleArray ||
                     mtlTex.sampleCount > 1;
-                if (nativeMultisampleTexture) {
-                    if (trace) {
-                        std::fprintf(stderr,
-                            "[GS-tex] slot %zu: skipping multisample texture "
-                            "(name=%u type=%lu samples=%lu) — Metal cannot getBytes "
-                            "an MSAA texture\n",
-                            i, texName,
-                            (unsigned long)mtlTex.textureType,
-                            (unsigned long)mtlTex.sampleCount);
-                    }
-                    continue;
+                // Populate DIMENSIONS but not DATA. textureSize() lowers to
+                // OpImageQuerySize, which reads mipWidths/mipHeights/
+                // mipLayerFaces/width/height/depth/samplerType and nothing
+                // else — it has no data-empty bail — so metadata alone is
+                // enough for it. texelFetch() still stops at its own
+                // "slot has no data" bail, which is the intended outcome:
+                // skipping the readback is what keeps AGX from segfaulting.
+                //
+                // NOTE the `!msDimsOnly` conjunct on the view test below.
+                // Do NOT "simplify" this by moving the multisample test after
+                // the view branch: that branch returns {} and abandons the
+                // WHOLE map, so an MSAA texture that is also a view would
+                // destroy every other slot. Skipping ahead of it is the
+                // shipped precedence and is deliberate.
+                const bool msDimsOnly = nativeMultisampleTexture;
+                if (msDimsOnly && trace) {
+                    std::fprintf(stderr,
+                        "[GS-tex] slot %d: multisample texture "
+                        "(name=%u type=%lu samples=%lu) — dimensions only, "
+                        "no getBytes\n",
+                        i, texName,
+                        (unsigned long)mtlTex.textureType,
+                        (unsigned long)mtlTex.sampleCount);
                 }
-                if (texObject->viewSourceTexture != 0) {
+                if (!msDimsOnly && texObject->viewSourceTexture != 0) {
                     const bool cpuReadableViewType =
                         mtlTex.textureType == MTLTextureType1D ||
                         mtlTex.textureType == MTLTextureType1DArray ||
@@ -21301,6 +21313,14 @@ struct GLContext::Impl {
                     texObject->desc.internalFormat);
                 slot.samplerType = samplerGLType;
                 applySamplingState(slot);
+                if (msDimsOnly) {
+                    // Dimensions are set; stop before the readback. Leaving
+                    // data empty and the strides at zero keeps the slot
+                    // self-consistent: no data, so no way to index into it.
+                    // Every consumer of the strides checks data first.
+                    slot.data.clear();
+                    continue;
+                }
                 // Format gating — minimal initial set.
                 const std::uint32_t intFmt =
                     static_cast<std::uint32_t>(texObject->desc.internalFormat);
