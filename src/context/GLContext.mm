@@ -27687,7 +27687,21 @@ struct GLContext::Impl {
                     ? resolved.attachedTexture->desc.internalFormat
                     : level->second.desc.internalFormat;
             sourceWidth = std::max<GLsizei>(level->second.desc.width, 1);
-            sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
+            // GL_TEXTURE_1D_ARRAY joins GL_TEXTURE_1D here: a 1D array's
+            // PER-LAYER row count is 1. For a 1D_ARRAY `desc.height` holds the
+            // LAYER COUNT, not a row count — glTexStorage2D passes depth=1
+            // (GLContextTexture.inc.mm:417) so desc.layers stays 1, and
+            // glTexImage2D assigns height directly (GLContextTextureCore.inc.mm:573).
+            // The layer count is read correctly AS a count 37 lines below, at the
+            // sourceLayers assignment. Using it here as the SLICE STRIDE made layer
+            // L read at L*N*W*4 inside a buffer of only N*W*4 bytes: layer 0 correct,
+            // every layer above it beginning exactly one allocation past the end.
+            // Only reachable once metalTexture is nulled (copyImageSubData does this),
+            // which routes readback down this CPU-shadow branch instead of Metal
+            // getBytes(slice:) — which is why it surfaced only after a copy.
+            sourceHeight = (texture->target == GL_TEXTURE_1D
+                            || texture->target == GL_TEXTURE_1D_ARRAY)
+                ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
             metalMipLevel = static_cast<NSUInteger>(resolved.level);
             if (texture->target == GL_TEXTURE_3D) {
                 // 3D texture: Metal has a single slice; depth-layer
