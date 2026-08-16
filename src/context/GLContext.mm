@@ -21356,11 +21356,115 @@ struct GLContext::Impl {
                 slot.samplerType = samplerGLType;
                 applySamplingState(slot);
                 if (msDimsOnly) {
-                    // Dimensions are set; stop before the readback. Leaving
-                    // data empty and the strides at zero keeps the slot
-                    // self-consistent: no data, so no way to index into it.
-                    // Every consumer of the strides checks data first.
+                    // Dimensions are set; the getBytes readback below is
+                    // still off-limits -- calling it on a multisample
+                    // texture segfaults AGX, which is why ecf62b5 stops
+                    // here. But stopping with an empty slot is exactly what
+                    // makes texelFetch bail with "sampled texture slot has
+                    // no data", so blit into a buffer instead: it reads the
+                    // same pixels without ever touching getBytes, and
+                    // de-interleaves the samples on the way out.
+                    //
+                    // The blit lands SAMPLE-MINOR -- a texel's samples are
+                    // contiguous -- so a row is width * texelBytes * samples
+                    // and the sample index selects within a texel. Measured
+                    // across 8 configurations; the alternative
+                    // parameterisation (sourceSize.depth = samples) is
+                    // rejected outright by the Metal validation layer.
                     slot.data.clear();
+                    slot.samples = static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.sampleCount, 1u));
+                    // mtlTex.sampleCount, never texObject->desc.samples --
+                    // the latter is the pre-clamp request.
+                    const std::uint32_t msTexelBytes =
+                        sampledTextureBytesPerTexelForSamplerMap(
+                            static_cast<std::uint32_t>(
+                                texObject->desc.internalFormat));
+                    const std::uint32_t msLayers =
+                        std::max<std::uint32_t>(slot.layerFaces, 1u);
+                    const std::uint32_t msHeight =
+                        std::max<std::uint32_t>(slot.height, 1u);
+                    const std::uint32_t msRowBytes =
+                        slot.width * msTexelBytes * slot.samples;
+                    const std::size_t msImageBytes =
+                        static_cast<std::size_t>(msRowBytes) * msHeight;
+                    const std::size_t msTotal =
+                        msImageBytes * static_cast<std::size_t>(msLayers);
+                    if (msTexelBytes != 0u && msTotal != 0u &&
+                        device != nil && commandQueue != nil) {
+                        id<MTLBuffer> staging = [device
+                            newBufferWithLength:msTotal
+                                        options:MTLResourceStorageModeShared];
+                        auto lease = makeCommandBuffer(
+                            AppGLCommandReason::FlushForReadback);
+                        id<MTLCommandBuffer> cmd = lease.get();
+                        id<MTLBlitCommandEncoder> blit =
+                            cmd != nil ? [cmd blitCommandEncoder] : nil;
+                        if (staging != nil && blit != nil) {
+                            for (std::uint32_t layer = 0; layer < msLayers;
+                                 ++layer) {
+                                [blit copyFromTexture:mtlTex
+                                          sourceSlice:layer
+                                          sourceLevel:0
+                                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                                           sourceSize:MTLSizeMake(slot.width,
+                                                                  msHeight, 1)
+                                             toBuffer:staging
+                                    destinationOffset:layer * msImageBytes
+                               destinationBytesPerRow:msRowBytes
+                             destinationBytesPerImage:msImageBytes];
+                            }
+                            [blit endEncoding];
+                            if (lease.commitAndWait(
+                                    AppGLCommandReason::FlushForReadback)) {
+                                // The content of a multisample texture can
+                                // only arrive by rendering, and an FBO draw
+                                // stores GL row y at Metal row H-1-y (see
+                                // 4265bed). Un-flip here so slot.data is
+                                // GL-ordered like every other slot -- the
+                                // fetch arithmetic is shared with uploaded
+                                // slots and must not learn about orientation.
+                                slot.data.assign(msTotal, 0u);
+                                const std::uint8_t* src =
+                                    static_cast<const std::uint8_t*>(
+                                        [staging contents]);
+                                for (std::uint32_t layer = 0;
+                                     layer < msLayers; ++layer) {
+                                    const std::size_t base =
+                                        layer * msImageBytes;
+                                    for (std::uint32_t y = 0; y < msHeight;
+                                         ++y) {
+                                        std::memcpy(
+                                            slot.data.data() + base +
+                                                static_cast<std::size_t>(y) *
+                                                    msRowBytes,
+                                            src + base +
+                                                static_cast<std::size_t>(
+                                                    msHeight - 1u - y) *
+                                                    msRowBytes,
+                                            msRowBytes);
+                                    }
+                                }
+                                slot.bytesPerRow = msRowBytes;
+                                slot.bytesPerImage =
+                                    static_cast<std::uint32_t>(msImageBytes);
+                                slot.sampleStride = msTexelBytes;
+                            }
+                        } else if (blit != nil) {
+                            [blit endEncoding];
+                        }
+                    }
+                    if (trace) {
+                        std::fprintf(stderr,
+                            "[GS-tex] slot %d: multisample fill %s "
+                            "(%ux%u s=%u layers=%u bpr=%u bytes=%zu)\n",
+                            i, slot.data.empty() ? "SKIPPED" : "ok",
+                            slot.width, msHeight, slot.samples, msLayers,
+                            msRowBytes, slot.data.size());
+                    }
+                    // Empty data still means "no way to index into it", which
+                    // is the pre-existing safe behaviour if anything above
+                    // declined.
                     continue;
                 }
                 // Format gating — minimal initial set.
