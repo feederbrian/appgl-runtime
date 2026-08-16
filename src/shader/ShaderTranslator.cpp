@@ -3801,6 +3801,33 @@ std::vector<MultisampleTextureVar> collectMultisampleSampledTextureVars(
     return vars;
 }
 
+// A multisample texture cannot be uploaded — `glTexImage2DMultisample`
+// allocates storage without data — so its content always arrives by
+// rendering into it through a framebuffer. AppGL renders Metal-native
+// (top-left origin) and synthesises a GL-convention `gl_FragCoord.y` in
+// the fragment shader (`injectFragmentCoordYFixup`), so the staging draw
+// writes the *correct* GL value into the *mirrored* Metal row: GL texel
+// row y physically lives at Metal row H-1-y.
+//
+// Normalized sampling compensates for this elsewhere
+// (`kTextureReductionModeSampleYFlipBit`), but that path is unreachable
+// here on three counts — it is gated on the draw target being the default
+// framebuffer, its target whitelist excludes multisample, and its
+// `1.0f - coord.y` form cannot express a reflection in absolute texel
+// space anyway. An integer `texelFetch` therefore needs its own
+// compensation, which is what this helper is.
+const char* const kMsFetchFlipYHelper = R"APPGL(
+static inline uint2 _appgl_msFetchFlipY(uint2 c, uint h)
+{
+    return uint2(c.x, (h == 0u ? 0u : h - 1u) - c.y);
+}
+
+static inline int2 _appgl_msFetchFlipY(int2 c, uint h)
+{
+    return int2(c.x, int(h == 0u ? 0u : h - 1u) - c.y);
+}
+)APPGL";
+
 bool rewriteMultisampleSampledImageReads(std::string& msl) {
     bool changed = false;
     const auto vars = collectMultisampleSampledTextureVars(msl);
@@ -3838,12 +3865,37 @@ bool rewriteMultisampleSampledImageReads(std::string& msl) {
                 continue;
             }
 
+            // Compensate the framebuffer write orientation on the direct
+            // read of the real multisample texture. Only this branch is
+            // touched: the sidecar serves storage images, which may be
+            // written by compute and never rasterised at all.
+            const std::string flippedCoord =
+                "_appgl_msFetchFlipY(" + args[0] + ", " +
+                var.name + ".get_height())";
+            const std::string flippedOriginal =
+                var.arrayed
+                    ? (var.name + ".read(" + flippedCoord + ", " +
+                       args[1] + ", " + args[2] + ")")
+                    : (var.name + ".read(" + flippedCoord + ", " +
+                       args[1] + ")");
+
             const std::string replacement =
                 "((" + sampleCount + " == 0u) ? " +
-                original + " : " + sidecarRead + ")";
+                flippedOriginal + " : " + sidecarRead + ")";
             msl.replace(pos, original.size(), replacement);
             pos += replacement.size();
             changed = true;
+        }
+    }
+
+    // Helpers precede the entry point in SPIRV-Cross emission, and the
+    // vertex path reads through `appgl_LegacyClipMain`, so anchoring on
+    // the entry point would place this after a call site.
+    if (changed) {
+        const std::string usingNeedle = "using namespace metal;\n";
+        const std::size_t anchor = msl.find(usingNeedle);
+        if (anchor != std::string::npos) {
+            msl.insert(anchor + usingNeedle.size(), kMsFetchFlipYHelper);
         }
     }
 
