@@ -7330,6 +7330,48 @@ bool textureViewTargetLayerCountValid(GLenum target, GLuint numlayers) {
     }
 }
 
+// GL 4.6 section 8.18: a texture view's target must be compatible with the
+// target of the texture it views. Without this, an illegal pair — a 3D source
+// with a 2D view target, say — passes every other check and reaches
+// newTextureViewWithPixelFormat:textureType:, where Metal does not return an
+// error but ASSERTS, aborting the process.
+//
+// The table is transcribed from the conformance test's own legal-target arrays
+// (arb_texture_view/targets.c:128-190), which is the authority actually being
+// measured against. Note the asymmetry that makes this worth a table rather
+// than an equality test: 2D_ARRAY, CUBE_MAP and CUBE_MAP_ARRAY are mutually
+// viewable and also viewable as plain 2D, while 3D and RECTANGLE view only as
+// themselves.
+bool textureViewTargetCompatible(GLenum origTarget, GLenum viewTarget) {
+    switch (origTarget) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_1D_ARRAY:
+            return viewTarget == GL_TEXTURE_1D ||
+                   viewTarget == GL_TEXTURE_1D_ARRAY;
+        case GL_TEXTURE_2D:
+            return viewTarget == GL_TEXTURE_2D ||
+                   viewTarget == GL_TEXTURE_2D_ARRAY;
+        case GL_TEXTURE_3D:
+            return viewTarget == GL_TEXTURE_3D;
+        case GL_TEXTURE_RECTANGLE:
+            return viewTarget == GL_TEXTURE_RECTANGLE;
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            return viewTarget == GL_TEXTURE_CUBE_MAP ||
+                   viewTarget == GL_TEXTURE_2D ||
+                   viewTarget == GL_TEXTURE_2D_ARRAY ||
+                   viewTarget == GL_TEXTURE_CUBE_MAP_ARRAY;
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return viewTarget == GL_TEXTURE_2D_MULTISAMPLE ||
+                   viewTarget == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+        default:
+            // TEXTURE_BUFFER and anything unrecognised have no legal view.
+            return false;
+    }
+}
+
 bool textureViewCubeTargetRequiresSquareLevels(
     const GLTextureObject& object,
     GLuint minlevel,

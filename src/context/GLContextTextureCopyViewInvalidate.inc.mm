@@ -1113,6 +1113,24 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 section 8.18. This has to run before the Metal view is created at
+    // the bottom of this function: Metal does not reject an incompatible
+    // source/view target pair, it asserts and takes the process down.
+    //
+    // Placed after the format-compatibility check and before the minlevel /
+    // minlayer bounds below, so a call that violates both reports
+    // INVALID_OPERATION rather than INVALID_VALUE. That ordering is a choice,
+    // not an accident — see the note at the top of this function about the
+    // origtexture error-code deviation.
+    // desc.target is not always populated — :103 in this file uses the same
+    // fallback. Reading it blind would send a valid source through the
+    // table's default arm and reject a legal view.
+    const GLenum origViewTarget =
+        origObj->desc.target != 0 ? origObj->desc.target : origObj->target;
+    if (!textureViewTargetCompatible(origViewTarget, target)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     const GLsizei parentViewLevels = textureViewEffectiveLevelCount(*origObj);
     const GLsizei parentViewLayers = textureViewAvailableLayerCount(*origObj);
     if (minlevel >= static_cast<GLuint>(std::max<GLsizei>(parentViewLevels, 1))) {
