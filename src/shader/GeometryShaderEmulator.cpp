@@ -7141,6 +7141,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     std::int32_t offX = 0;
                     std::int32_t offY = 0;
                     std::int32_t offZ = 0;
+                    // texelFetch on a multisample sampler carries the sample
+                    // index as the SPIR-V Sample image operand. It used to be
+                    // skipped, which is why every sample read texel 0.
+                    std::int32_t sampleIndex = 0;
                     if (wc > 4u) {
                         constexpr std::uint32_t kBiasMask = 0x00000001u;
                         constexpr std::uint32_t kLodMask = 0x00000002u;
@@ -7203,7 +7207,16 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             ++cursor;
                         }
                         if ((operands & kConstOffsetsMask) != 0u) skipOperand();
-                        if ((operands & kSampleMask) != 0u) skipOperand();
+                        if ((operands & kSampleMask) != 0u) {
+                            if (cursor < wc) {
+                                Value sampleValue;
+                                if (tryGetValue(w[cursor], sampleValue)) {
+                                    sampleIndex =
+                                        valueLaneAsInt(sampleValue, 0);
+                                }
+                                ++cursor;
+                            }
+                        }
                         if ((operands & kMinLodMask) != 0u) skipOperand();
                         if ((operands & kMakeTexelAvailableMask) != 0u) skipOperand();
                         if ((operands & kMakeTexelVisibleMask) != 0u) skipOperand();
@@ -7277,9 +7290,26 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         slot.samplerType == GL_INT_SAMPLER_2D_RECT ||
                         slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D_RECT ||
                         slot.samplerType == GL_SAMPLER_2D_RECT_SHADOW;
+                    // Kept separate from sampler2D / sampler2DArray on
+                    // purpose: those names are re-derived in OpImageSample and
+                    // OpImageGather, neither of which is legal on a
+                    // multisample sampler, so widening them there would admit
+                    // an operation GLSL forbids.
+                    const bool sampler2DMS =
+                        slot.samplerType == GL_SAMPLER_2D_MULTISAMPLE ||
+                        slot.samplerType == GL_INT_SAMPLER_2D_MULTISAMPLE ||
+                        slot.samplerType ==
+                            GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE;
+                    const bool sampler2DMSArray =
+                        slot.samplerType == GL_SAMPLER_2D_MULTISAMPLE_ARRAY ||
+                        slot.samplerType ==
+                            GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY ||
+                        slot.samplerType ==
+                            GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY;
 
                     ix += offX;
-                    if (sampler2D || sampler2DArray || sampler3D) {
+                    if (sampler2D || sampler2DArray || sampler3D ||
+                        sampler2DMS || sampler2DMSArray) {
                         iy += offY;
                     }
                     if (sampler3D) {
@@ -7287,7 +7317,12 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     }
 
                     const std::int32_t layerCoord =
-                        sampler1DArray ? iy : (sampler2DArray || sampler3D ? iz : 0);
+                        sampler1DArray
+                            ? iy
+                            : ((sampler2DArray || sampler3D ||
+                                sampler2DMSArray)
+                                   ? iz
+                                   : 0);
                     auto inRange = [](std::int32_t value,
                                       std::uint32_t size) -> bool {
                         return value >= 0 &&
@@ -7298,8 +7333,15 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     if (!sampler1D && !sampler1DArray) {
                         valid = valid && inRange(iy, mipHeight);
                     }
-                    if (sampler1DArray || sampler2DArray || sampler3D) {
+                    if (sampler1DArray || sampler2DArray || sampler3D ||
+                        sampler2DMSArray) {
                         valid = valid && inRange(layerCoord, mipLayerFaces);
+                    }
+                    if (sampler2DMS || sampler2DMSArray) {
+                        valid = valid &&
+                                inRange(sampleIndex,
+                                        std::max<std::uint32_t>(
+                                            slot.samples, 1u));
                     }
                     if (valid) {
                         const std::uint32_t u =
@@ -7309,7 +7351,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                 ? 0u
                                 : static_cast<std::uint32_t>(iy);
                         const std::uint32_t layer =
-                            (sampler1DArray || sampler2DArray || sampler3D)
+                            (sampler1DArray || sampler2DArray || sampler3D ||
+                             sampler2DMSArray)
                                 ? static_cast<std::uint32_t>(layerCoord)
                                 : 0u;
                         const std::uint32_t bpr =
@@ -7327,10 +7370,26 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                        ? slot.bytesPerImage
                                        : bpr * std::max<std::uint32_t>(
                                                    mipHeight, 1u));
+                        // Sample-minor: a texel occupies samples*texelBytes,
+                        // with the sample index selecting within it. Both
+                        // terms vanish when sampleStride is 0, which is every
+                        // non-multisample slot, so this is byte-identical to
+                        // the previous arithmetic off the multisample path.
+                        const std::size_t sampleStride =
+                            static_cast<std::size_t>(slot.sampleStride);
+                        const std::size_t texelStride =
+                            sampleStride != 0u
+                                ? sampleStride *
+                                      static_cast<std::size_t>(
+                                          std::max<std::uint32_t>(
+                                              slot.samples, 1u))
+                                : static_cast<std::size_t>(texelBytes);
                         off = static_cast<std::size_t>(mipBase) +
                               static_cast<std::size_t>(layer) * bpi +
                               static_cast<std::size_t>(v) * bpr +
-                              static_cast<std::size_t>(u) * texelBytes;
+                              static_cast<std::size_t>(u) * texelStride +
+                              static_cast<std::size_t>(sampleIndex) *
+                                  sampleStride;
                     } else {
                         off = slot.data.size();
                     }

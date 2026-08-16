@@ -333,6 +333,15 @@ struct SampledTextureSlot {
     // imageSize() reports cube count in depth, while imageLoad/store
     // coordinates address the six faces per cube via coord.z.
     std::uint32_t layerFaces = 0;
+    // Multisample sample count; 1 for every non-multisample target.
+    std::uint32_t samples = 1;
+    // Bytes between consecutive samples OF THE SAME TEXEL, or 0 when the
+    // slot is not multisample. MTLBlitCommandEncoder de-interleaves a
+    // multisample texture SAMPLE-MINOR -- a texel's samples are contiguous,
+    // so this is texelBytes and bytesPerRow is width * texelBytes * samples.
+    // Measured across 8 configurations; there is no parameterisation that
+    // yields the sample-major arrangement, so do not assume one.
+    std::uint32_t sampleStride = 0;
     std::uint32_t internalFormat = 0;
     std::uint32_t samplerType = 0;
     std::uint32_t textureTarget = 0;
