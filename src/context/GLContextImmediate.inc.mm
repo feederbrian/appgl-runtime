@@ -104,6 +104,34 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_INTENSITY32F_ARB:
         case GL_COMPRESSED_INTENSITY:
             return kAppGLImmediateTextureBaseIntensity;
+        // ARB_texture_rg's RED and RG base formats. GL treats them as RGB for
+        // texture-environment purposes -- green and blue read 0, alpha reads 1
+        // -- so they belong in this group.
+        //
+        // Their absence was not a mis-classification, it was a GATE: callers
+        // test `baseClass != 0` before copying ANY texture-env state into the
+        // draw, so a RED/RG texture silently lost GL_TEXTURE_ENV_MODE and the
+        // shader fell through to a hard-coded MODULATE. That surfaced as two
+        // unrelated-looking failures -- a wrong alpha on R16F mipmaps, and
+        // black where green was expected on a swizzle test -- which are the
+        // same fallback hitting the alpha channel and the colour channels.
+        //
+        // Integer R/RG are deliberately NOT added: they do not go through the
+        // fixed-function texture-environment path.
+        case GL_RED:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_RG:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG32F:
         case GL_RGB:
         case GL_RGB16F:
         case GL_RGB32F:

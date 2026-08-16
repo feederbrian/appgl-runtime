@@ -590,7 +590,6 @@ bool GLContext::texImage(
     image.defined = true;
     const bool ignoreUnpackSkipImages =
         appglCompatProfileEnabled() &&
-        isLegacyCompatTextureFormatCombo(internalFormatEnum, format) &&
         target != GL_TEXTURE_3D &&
         target != GL_TEXTURE_2D_ARRAY &&
         target != GL_TEXTURE_CUBE_MAP_ARRAY;
@@ -1736,7 +1735,6 @@ bool GLContext::texSubImage(
     image.exactReadbackBpp = 0;
     const bool ignoreUnpackSkipImages =
         appglCompatProfileEnabled() &&
-        isLegacyCompatTextureFormatCombo(image.desc.internalFormat, format) &&
         target != GL_TEXTURE_3D &&
         target != GL_TEXTURE_2D_ARRAY &&
         target != GL_TEXTURE_CUBE_MAP_ARRAY;
