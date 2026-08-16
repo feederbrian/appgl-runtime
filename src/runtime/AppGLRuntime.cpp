@@ -405,6 +405,14 @@ bool isValidEnableCap(GLenum cap) {
         case GL_TEXTURE_1D:
         case GL_TEXTURE_2D:
         case GL_TEXTURE_3D:
+        // ARB_texture_rectangle adds GL_TEXTURE_RECTANGLE as a fixed-function
+        // enable target alongside the others. Without it glEnable() rejected
+        // the cap outright, so it never reached enabledCaps_, isEnabled() was
+        // false, and the fixed-function texture resolver skipped rectangle
+        // textures however its target list was written — the primitive drew
+        // untextured in the current vertex colour, and the rejected call left
+        // a GL_INVALID_ENUM behind for the test to trip over later.
+        case GL_TEXTURE_RECTANGLE:
         case GL_TEXTURE_GEN_S:
         case GL_TEXTURE_GEN_T:
         case GL_TEXTURE_GEN_R:
