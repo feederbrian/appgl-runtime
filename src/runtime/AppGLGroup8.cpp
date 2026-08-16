@@ -555,7 +555,18 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 if (fmt == 4) {
                     return 8;
                 }
-                if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
+                // GL_RED and GL_RG are the unsized base formats. They belong
+                // with the 8-bit sized ones, exactly as bare GL_RGB already
+                // sits in the GL_RGB8 list below: metalRenderbufferFormat
+                // resolves GL_RED to R8Unorm and GL_RG to RG8Unorm, so 8 is
+                // the depth actually allocated.
+                //
+                // Omitting them does not report 0 — it falls past every match
+                // to the generic tail, which answers 8 for EVERY channel. A
+                // GL_RG texture then claims blue and alpha it does not have,
+                // and callers that size their expectations from these queries
+                // test channels that are not there.
+                if (match({GL_RED, GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
                     return channel == 0 ? 8 : 0;
                 }
                 if (match({GL_R16, GL_R16_SNORM, GL_R16I, GL_R16UI, GL_R16F})) {
@@ -564,7 +575,7 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 if (match({GL_R32F, GL_R32I, GL_R32UI})) {
                     return channel == 0 ? 32 : 0;
                 }
-                if (match({GL_RG8, GL_RG8_SNORM, GL_RG8I, GL_RG8UI})) {
+                if (match({GL_RG, GL_RG8, GL_RG8_SNORM, GL_RG8I, GL_RG8UI})) {
                     return (channel < 2) ? 8 : 0;
                 }
                 if (match({GL_RG16, GL_RG16_SNORM, GL_RG16I, GL_RG16UI, GL_RG16F})) {

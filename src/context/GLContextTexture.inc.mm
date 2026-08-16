@@ -1783,7 +1783,12 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     return 8;
                 }
                 // Red-only formats: R8/R16/R8I/R8UI/R16I/R16UI/R16F/R32F/R32I/R32UI/R8_SNORM/R16_SNORM.
-                if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
+                // GL_RED / GL_RG are the unsized base formats; they belong with
+                // the 8-bit sized ones, as bare GL_RGB already does below.
+                // Omitting them does not yield 0 — it falls to the generic tail
+                // that answers 8 on every channel, so a GL_RG texture claims
+                // blue and alpha it does not have.
+                if (match({GL_RED, GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
                     return channel == 0 ? 8 : 0;
                 }
                 if (match({GL_R16, GL_R16_SNORM, GL_R16I, GL_R16UI, GL_R16F})) {
@@ -1793,7 +1798,7 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     return channel == 0 ? 32 : 0;
                 }
                 // Red+green formats.
-                if (match({GL_RG8, GL_RG8_SNORM, GL_RG8I, GL_RG8UI})) {
+                if (match({GL_RG, GL_RG8, GL_RG8_SNORM, GL_RG8I, GL_RG8UI})) {
                     return (channel < 2) ? 8 : 0;
                 }
                 if (match({GL_RG16, GL_RG16_SNORM, GL_RG16I, GL_RG16UI, GL_RG16F})) {
