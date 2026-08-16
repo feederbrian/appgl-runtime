@@ -9647,6 +9647,14 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             (void)rewriteMultisampleSampledImageReads(msl);
         }
         (void)injectMultisampleSampledImageSidecars(msl);
+        // The sidecar parameter is added to main0, but the read it feeds can
+        // sit inside a helper — the vertex path reads through
+        // `appgl_LegacyClipMain` — and an undeclared identifier there fails
+        // the whole library, which is negative-cached and silently drops every
+        // draw using the shader. Thread it the same way the storage sidecar
+        // below already is.
+        threadMainTextureParamsThroughHelpers(
+            msl, "appgl_ms_sampled_sidecar_");
         (void)injectMultisampleStorageReadSidecars(msl);
         threadMainTextureParamsThroughHelpers(
             msl, "appgl_ms_storage_read_sidecar_");
