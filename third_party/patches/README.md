@@ -1834,6 +1834,18 @@ tracks the same SPIR-V `OpImageWrite` reachability as structured
 metadata (`sparseStorageImageWrite`) so Phase 7.6.3 can combine the
 program flag with the actual runtime `textureSparse` state.
 
+### `spirv-cross-msl-arrays-of-arrays-varyings.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — removes the hard rejection of arrays-of-arrays in shader interface variables and generalises the element-count arithmetic to walk every array dimension.
+
+**Summary:** upstream throws `SPIRV_CROSS_THROW("MSL cannot emit arrays-of-arrays in input and output variables.")` and computes `elem_cnt` from a single array dimension (`to_array_size_literal(var_type)`), asserting `var_type.array.size() != 1`. The patch replaces the single-dimension assumption with a dimension vector walked innermost-first, multiplying across all dimensions, so an array-of-array (and an array-of-array-of-matrix) varying flattens correctly instead of aborting translation.
+
+**Why:** a varying declared as an array of arrays was rejected during MSL emission, so the declaration never reached the link stage and transform feedback could not name it. Pairs with the AppGL-side reflector fix in `e072839`; **that commit landed only the AppGL half, and this file is the other half.**
+
+**Rows advanced:** `spec@ext_transform_feedback@max-varyings` fail → pass (3/3 reps, 0 regressions over a 461-row slice). The 21 `varying-packing arrays_of_arrays` rows that were projected for this item were in fact already fixed by the varying-cap change `70a1a40`.
+
+⚠ **This was uncommitted working-tree state for roughly 15 hours** and was compiled into both the R1.0-b and R1.0-c full sweeps. It is captured here so a clean re-fetch of the fork reproduces what was measured.
+
 ### `glslang-shader-texture-image-samples-version-gate.patch`
 
 **Target:** `third_party/glslang/glslang/MachineIndependent/Initialize.cpp:7514` (KhronosGroup/glslang) — one line, inside `TBuiltIns::addQueryFunctions`, lowering the version floor that declares `textureSamples()` / `imageSamples()` for multisample samplers from `version >= 430` to `version >= 140`.

@@ -1,0 +1,96 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index fc515916..f88656ef 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -3305,7 +3305,9 @@ void CompilerMSL::add_composite_variable_to_interface_block(StorageClass storage
+ 	auto &entry_func = get<SPIRFunction>(ir.default_entry_point);
+ 	auto &var_type = meta.strip_array ? get_variable_element_type(var) : get_variable_data_type(var);
+ 	uint32_t elem_cnt = 0;
+-	bool is_array_of_matrix = false;
++	// Array dimensions of the composite, innermost-first (SPIRType::array order).
++	// Empty for a bare matrix. array_matrix_columns is 0 when the leaf is not a matrix.
++	SmallVector<uint32_t> array_dims;
+ 	uint32_t array_matrix_columns = 0;
+ 
+ 	if (add_component_variable_to_interface_block(storage, ib_var_ref, var, var_type, meta))
+@@ -3316,19 +3318,27 @@ void CompilerMSL::add_composite_variable_to_interface_block(StorageClass storage
+ 		if (is_array(var_type))
+ 		{
+ 			auto &matrix_type = get<SPIRType>(var_type.parent_type);
+-			is_array_of_matrix = true;
+ 			array_matrix_columns = matrix_type.columns;
+-			elem_cnt = to_array_size_literal(var_type) * array_matrix_columns;
++			elem_cnt = array_matrix_columns;
++			for (uint32_t d = 0; d < uint32_t(var_type.array.size()); d++)
++			{
++				uint32_t n = to_array_size_literal(var_type, d);
++				array_dims.push_back(n);
++				elem_cnt *= n;
++			}
+ 		}
+ 		else
+ 			elem_cnt = var_type.columns;
+ 	}
+ 	else if (is_array(var_type))
+ 	{
+-		if (var_type.array.size() != 1)
+-			SPIRV_CROSS_THROW("MSL cannot emit arrays-of-arrays in input and output variables.");
+-
+-		elem_cnt = to_array_size_literal(var_type);
++		elem_cnt = 1;
++		for (uint32_t d = 0; d < uint32_t(var_type.array.size()); d++)
++		{
++			uint32_t n = to_array_size_literal(var_type, d);
++			array_dims.push_back(n);
++			elem_cnt *= n;
++		}
+ 	}
+ 
+ 	bool is_builtin = is_builtin_variable(var);
+@@ -3343,10 +3353,42 @@ void CompilerMSL::add_composite_variable_to_interface_block(StorageClass storage
+ 		usable_type = &get<SPIRType>(usable_type->parent_type);
+ 	while (is_array(*usable_type) || is_matrix(*usable_type))
+ 		usable_type = &get<SPIRType>(usable_type->parent_type);
+-	auto flat_index_expr = [&](uint32_t idx) -> string {
+-		if (is_array_of_matrix)
+-			return join("[", idx / array_matrix_columns, "][", idx % array_matrix_columns, "]");
+-		return join("[", idx, "]");
++	// Maps a flattened interface-member index back onto the nested local composite.
++	// Flattening order is the GLSL declaration walk: outermost array index varies
++	// slowest, matrix column fastest — so decompose column first, then array
++	// dimensions innermost-first, and emit subscripts outermost-first to match the
++	// MSL nesting (spvUnsafeArray<spvUnsafeArray<T, inner>, outer>).
++	//
++	// NOTE: BY-VALUE CAPTURE IS LOAD-BEARING. This lambda is copied into the
++	// fixup_hooks_in/out closures below, which run long after this function has
++	// returned; capturing array_dims / array_matrix_columns by reference reads
++	// dead stack slots and silently degrades to a single-subscript expression.
++	auto flat_index_expr = [array_dims, array_matrix_columns](uint32_t idx) -> string {
++		if (array_dims.empty())
++			return join("[", idx, "]");
++
++		uint32_t rest = idx;
++		uint32_t col = 0;
++		if (array_matrix_columns)
++		{
++			col = rest % array_matrix_columns;
++			rest /= array_matrix_columns;
++		}
++
++		SmallVector<uint32_t> subs;
++		for (uint32_t d = 0; d < uint32_t(array_dims.size()); d++)
++		{
++			uint32_t n = array_dims[d] ? array_dims[d] : 1u;
++			subs.push_back(rest % n);
++			rest /= n;
++		}
++
++		string expr;
++		for (size_t k = subs.size(); k-- > 0;)
++			expr += join("[", subs[k], "]");
++		if (array_matrix_columns)
++			expr += join("[", col, "]");
++		return expr;
+ 	};
+ 
+ 	// If a builtin, force it to have the proper name.
