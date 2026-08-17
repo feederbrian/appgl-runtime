@@ -17,15 +17,27 @@ here as subject to change without notice.
 
 ## Where it stands
 
-Conformance measured 2026-08-12 against the current pin:
+Conformance measured 2026-08-12:
 
-| suite | standing |
-|---|---|
-| **Khronos CTS** (`KHR-GL46`, 19,716 cases) | 19,402 pass · 4 fail · 310 not-supported |
-| **Piglit** (7,858 rows) | 4,316 pass · 587 fail · 2,421 skip |
+| suite | configuration | standing |
+|---|---|---|
+| **Khronos CTS** (`KHR-GL46`, 19,716 cases) | df64 emulation **enabled** | 19,402 pass · 4 fail · 310 not-supported |
+| **Piglit** (7,324 rows run) | default | 4,316 pass · 587 fail · 2,421 skip |
 
-Both figures are at default settings. AppGL is a single binary whose behaviour is selected at runtime
-via environment flags — there is no separate "feature build."
+AppGL is a single binary whose behaviour is selected at runtime via environment flags — there is no
+separate "feature build." The CTS row above is **not** the default configuration: df64 emulation is
+off unless enabled (`APPGL_ENABLE_FP64_EMULATION=1`, or the `f64-emulation` feature flag), and with
+it off the not-supported count is substantially higher.
+
+Two caveats we would rather state than have you discover:
+
+- **The default-configuration CTS standing is not published here.** We have an internal figure, but
+  it has not been re-measured against the current pin, and replacing one unverified number with
+  another is not an improvement. It will be published when it is re-run.
+- **The Piglit row is a partial surface.** The canonical Piglit surface is 7,878 rows; the row above
+  covers the 7,324 that were executed. Roughly 450 of the remainder are binaries piglit does not
+  build on macOS. A run over a different subset is a *differential*, not a standing, and cannot be
+  quoted as a percentage of the canonical surface.
 
 ---
 

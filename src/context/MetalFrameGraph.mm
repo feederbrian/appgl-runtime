@@ -30029,7 +30029,7 @@ private:
     // On first launch, pipelines compile from MSL source (~100–500 ms each).
     // On second launch, the archive supplies pre-compiled GPU binaries and
     // Metal skips the expensive compilation.  The archive lives at
-    //   ~/Library/Caches/dev.excalibur.AppGL/pipeline_archive.metallib
+    //   ~/Library/Caches/dev.appgl.AppGL/pipeline_archive.metallib
     // Populated lazily: after each successful pipeline build, we add the
     // descriptor to the archive.  Serialized to disk on context teardown.
     id<MTLBinaryArchive> pipelineArchive = nil;
@@ -30040,7 +30040,7 @@ private:
         if (url == nil) {
             NSString* cacheDir = [NSSearchPathForDirectoriesInDomains(
                 NSCachesDirectory, NSUserDomainMask, YES) firstObject];
-            NSString* appglDir = [cacheDir stringByAppendingPathComponent:@"dev.excalibur.AppGL"];
+            NSString* appglDir = [cacheDir stringByAppendingPathComponent:@"dev.appgl.AppGL"];
             [[NSFileManager defaultManager] createDirectoryAtPath:appglDir
                                      withIntermediateDirectories:YES
                                                       attributes:nil

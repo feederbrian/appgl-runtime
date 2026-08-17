@@ -207,7 +207,7 @@ once the parity gauntlet is extended to cover them.
 - **MTLBinaryArchive for pipeline cache**: serialize compiled
   pipeline state objects to disk so subsequent runs skip MSL
   compilation entirely. Expected 80 % reduction in first-frame cost.
-  Interacts with the `dev.excalibur.AppGL/shaders` cache directory.
+  Interacts with the `dev.appgl.AppGL/shaders` cache directory.
 
 - **Argument buffers for bindless textures**: replace per-draw
   texture argument tables with a persistent argument buffer. 15-20 %

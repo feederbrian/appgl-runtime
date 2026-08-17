@@ -15,9 +15,9 @@ namespace {
 
 std::filesystem::path defaultCacheRoot() {
     if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-        return std::filesystem::path(home) / "Library" / "Caches" / "dev.excalibur.AppGL" / "shaders";
+        return std::filesystem::path(home) / "Library" / "Caches" / "dev.appgl.AppGL" / "shaders";
     }
-    return std::filesystem::temp_directory_path() / "dev.excalibur.AppGL" / "shaders";
+    return std::filesystem::temp_directory_path() / "dev.appgl.AppGL" / "shaders";
 }
 
 }  // namespace

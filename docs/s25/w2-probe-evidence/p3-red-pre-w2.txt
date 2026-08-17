@@ -1,5 +1,0 @@
-P3 capacity-freeze probe — PRE-W2 RED CAPTURE
-date: 2026-06-13T00:41:59Z
-HEAD: 4ffd297 + P3 scaffold (uncommitted)
-env: APPGL_PHASE2_PLAN_CAPACITY=0 APPGL_COPY_HEADROOM_PROBE=1
-{"phase":"s25-w2-plan-prepare-probes","passed":false,"claimedVersion":"4.6 AppGL core","tests":[{"id":"s25.w2.capacity-freeze","status":"failed","diffRatio":0,"maxChannelDelta":0,"millis":88.0545,"goldenPath":"","actualPath":"","message":"lean fill never succeeds with the Phase-2 plan cache saturated — record path still depends on cache luck: fills=0 draws=16","coverageDelta":[]}]}

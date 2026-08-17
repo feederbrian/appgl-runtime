@@ -35292,7 +35292,7 @@ bool GLContext::framebufferShadingRateEXT(GLenum target,
 // with a count of non-zero bytes in the data the caller will see.
 //
 // Pair with deqp-builtin `tcuTestSessionExecutor.cpp` "Test case '<name>'.."
-// stdout marker — combine streams via 2>&1 and feed `tools/detector_classify.py`
+// stdout marker — combine streams via 2>&1 when collecting these for triage
 // to bucket each test into GENUINE_PASS / VACUOUS_PASS / GENUINE_FAIL.
 namespace {
 struct VacuousPassDetector {

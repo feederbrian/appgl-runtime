@@ -1,6 +1,0 @@
-W2.2 read-image-reject probe — PRE-W2.2 RED CAPTURE
-date: 2026-06-13T03:58:18Z
-HEAD: 732c763 + probe scaffold (W2.2 fix stashed)
-env: APPGL_PARALLEL_ENCODE=1 APPGL_PHASE2_PLAN_CAPACITY=0
-expectation: readImageTextureNames ungated → image-load draw becomes parallel candidate (RED)
-{"phase":"s25-w2-1-gate-probes","passed":false,"claimedVersion":"4.6 AppGL core","tests":[{"id":"s25.w2_1.candidate-delivery","status":"passed","diffRatio":0,"maxChannelDelta":0,"millis":88.7441,"goldenPath":"","actualPath":"","message":"real parallel arm forms candidates under a frozen Phase-2 cache (record-prepare reaches the gate; verifier clean)","coverageDelta":[]},{"id":"s25.w2_1.candidate-delivery.arm-off","status":"passed","diffRatio":0,"maxChannelDelta":0,"millis":6.15271,"goldenPath":"","actualPath":"","message":"arm-OFF leaves the parallel-encode candidate counters at zero (must-miss)","coverageDelta":[]},{"id":"s25.w2_2.read-image-reject","status":"failed","diffRatio":0,"maxChannelDelta":0,"millis":24.7126,"goldenPath":"","actualPath":"","message":"read-image draw became a parallel candidate — it would encode without its image bindings (W2.1-RED class): candidates=15","coverageDelta":[]}]}
