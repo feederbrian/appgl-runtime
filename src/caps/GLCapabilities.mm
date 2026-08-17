@@ -944,9 +944,29 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // divided by 4.
     integerLimits_[GL_MAX_VERTEX_UNIFORM_VECTORS] = 1024;
     integerLimits_[GL_MAX_FRAGMENT_UNIFORM_VECTORS] = 1024;
-    integerLimits_[GL_MAX_VARYING_VECTORS] = 32;
-    integerLimits_[GL_MAX_VARYING_COMPONENTS] = 128;
-    integerLimits_[GL_MAX_VARYING_FLOATS] = 128;
+    integerLimits_[GL_MAX_VARYING_VECTORS] = 31;
+    // NOTE: GL_MAX_VARYING_COMPONENTS and GL_MAX_VARYING_FLOATS are the SAME
+    // enum (0x8B4B) — see gl_enums.gen.h:1143 and :1395. The second assignment
+    // below is a no-op overwrite kept only for grep-ability of both spellings.
+    //
+    // 124, not 128. MEASURED on Apple M1 Max / macOS 26.5.2 with a standalone
+    // Metal program (no AppGL in the process): a render pipeline with N user
+    // stage-out components builds at N<=124 and fails at N>=125 with the
+    // driver's own message
+    //     AGXMetalG13X code=3 "Number of varying components(125) exceeds the
+    //     limit (124)"
+    // The budget is billed by TRUE component width (float=1, float3=3), and
+    // [[position]], [[point_size]] and [[clip_distance]][8] are all free, so
+    // this maps 1:1 onto GL's MAX_VARYING_COMPONENTS semantics.
+    // At N>=127 the driver instead dies with XPC_ERROR_CONNECTION_INTERRUPTED
+    // (code=2) — a separate driver bug that bypasses its own clean limit check.
+    // That crash is what made 32 vec4 (=128) look like an AppGL defect.
+    // GL floors: MAX_VARYING_COMPONENTS >= 64 (GL 3.0/3.1) and >= 60 (GL 3.3+),
+    // MAX_VARYING_VECTORS >= 15, so 124/31 is spec-legal.
+    // arb_es2_compatibility-maxvectors requires FLOATS/4 == VECTORS, which is
+    // why VECTORS moves to 31 in lockstep.
+    integerLimits_[GL_MAX_VARYING_COMPONENTS] = 124;
+    integerLimits_[GL_MAX_VARYING_FLOATS] = 124;
 
     // Texel offset window for textureOffset / textureLodOffset. GL 4.6 spec
     // floor is [-8, +7], which is what Metal supports.
