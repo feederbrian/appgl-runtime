@@ -2457,10 +2457,22 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     const auto tryCompressedDataDecompressedReadback =
         [&]() -> std::pair<bool, bool> {
             const GLTextureImageLevel* image = levelImageForReadback();
+            // A level that still holds its pristine uncompressed upload is
+            // read back from that, not by decoding the blocks. Both describe
+            // the same image, but rgba8 is the one the application handed us
+            // and decoding is strictly lossier. This matters now that
+            // glTexImage* with an S3TC internal format also attaches encoded
+            // blocks (GLContextTextureCore.inc.mm): without this clause the
+            // three `getteximage-targets … s3tc` rows regress pass -> fail on
+            // "byte 11 … channel 3, expected 0, got 255" — DXT1's one-bit
+            // alpha coming back through a round trip that used to not happen.
+            // Levels created by glCompressedTexImage* carry no rgba8, so they
+            // still decode, which is the path this helper exists for.
             if (image == nullptr ||
                 !isCompressedInternalFormat(image->desc.internalFormat) ||
                 !isDecompressibleS3TCInternalFormat(image->desc.internalFormat) ||
                 image->compressedData.empty() ||
+                !image->rgba8.empty() ||
                 obj->target == GL_TEXTURE_RECTANGLE ||
                 format == GL_DEPTH_COMPONENT ||
                 format == GL_DEPTH_STENCIL ||

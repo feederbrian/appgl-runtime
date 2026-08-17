@@ -786,12 +786,30 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
         case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
             *params = GL_TRUE;
             break;
-        case GL_TEXTURE_COMPRESSED:
-            *params = GL_FALSE;
+        // R1.0-c item #12. These two were hard-coded to "not compressed,
+        // zero bytes". `piglit compressedteximage` reads the size back for
+        // every mip level and aborts on the first mismatch —
+        // "level 0 (256x256) size 0 doesn't match expected size 32768".
+        // The real block arithmetic lives in
+        // GLContext::compressedLevelImageSize, shared with the DSA query.
+        case GL_TEXTURE_COMPRESSED: {
+            GLint compressed = GL_FALSE;
+            (void)context->compressedLevelImageSize(desc.internalFormat,
+                                                    desc.width, desc.height,
+                                                    desc.depth,
+                                                    &compressed, nullptr);
+            *params = compressed;
             break;
-        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
-            *params = 0;
+        }
+        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE: {
+            GLint imageSize = 0;
+            (void)context->compressedLevelImageSize(desc.internalFormat,
+                                                    desc.width, desc.height,
+                                                    desc.depth,
+                                                    nullptr, &imageSize);
+            *params = imageSize;
             break;
+        }
         case GL_TEXTURE_BUFFER_DATA_STORE_BINDING:
             // GL 4.6 Table 8.23 — name of the buffer object attached
             // via glTexBuffer{,Range}.

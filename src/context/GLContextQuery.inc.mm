@@ -593,6 +593,20 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = static_cast<GLint>(pname == GL_IMPLEMENTATION_COLOR_READ_TYPE ? type : fmt);
         return true;
     }
+    // GL_COMPRESSED_TEXTURE_FORMATS writes one enum per advertised
+    // format. glGetIntegerv is one of only two entry points whose `data`
+    // is the caller's own buffer, sized from a prior
+    // GL_NUM_COMPRESSED_TEXTURE_FORMATS probe, so the full list is
+    // written here rather than in GLCapabilities::queryInteger — that
+    // one is also reached with fixed-size internal scratch buffers and
+    // deliberately writes only element 0. See GLCapabilities.h.
+    if (pname == GL_COMPRESSED_TEXTURE_FORMATS && impl_->capabilities != nullptr) {
+        const auto& compressedFormats = impl_->capabilities->compressedTextureFormats();
+        for (std::size_t i = 0; i < compressedFormats.size(); ++i) {
+            data[i] = static_cast<GLint>(compressedFormats[i]);
+        }
+        return true;
+    }
     bool fragmentShadingRateHandled = false;
     if (!queryFragmentShadingRateInteger(*this, pname, data, fragmentShadingRateHandled)) {
         return false;
@@ -670,6 +684,14 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         }
         for (int i = 0; i < 4; ++i) {
             data[i] = static_cast<GLint64>(integerValues[i]);
+        }
+        return true;
+    }
+    // Full advertised list — see the matching comment in queryInteger.
+    if (pname == GL_COMPRESSED_TEXTURE_FORMATS && impl_->capabilities != nullptr) {
+        const auto& compressedFormats = impl_->capabilities->compressedTextureFormats();
+        for (std::size_t i = 0; i < compressedFormats.size(); ++i) {
+            data[i] = static_cast<GLint64>(compressedFormats[i]);
         }
         return true;
     }

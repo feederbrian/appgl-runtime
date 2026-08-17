@@ -195,6 +195,15 @@ public:
     bool compressedTexImage(GLenum target, GLint level, GLenum internalformat,
                             GLsizei width, GLsizei height, GLsizei depth,
                             GLsizei imageSize, const void* data);
+    // R1.0-c item #12 — GL 4.6 §8.11 Table 8.23 GL_TEXTURE_COMPRESSED /
+    // GL_TEXTURE_COMPRESSED_IMAGE_SIZE. Plain-C++ callers (AppGLGroup8.cpp)
+    // cannot include GLContextTextureHelpers.h because it imports Foundation,
+    // so the block-size arithmetic is exposed through this thin accessor
+    // instead of being duplicated. Returns false for a non-compressed format
+    // (both out-params are still written: compressed = GL_FALSE, size = 0).
+    bool compressedLevelImageSize(GLenum internalFormat,
+                                  GLsizei width, GLsizei height, GLsizei depth,
+                                  GLint* outCompressed, GLint* outImageSize) const;
     bool texParameterInteger(GLenum target, GLenum pname, const GLint* params);
     bool texParameterUnsignedInteger(GLenum target, GLenum pname, const GLuint* params);
     bool texParameterFloat(GLenum target, GLenum pname, const GLfloat* params);

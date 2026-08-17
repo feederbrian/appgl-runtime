@@ -192,17 +192,27 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
         out[1] = static_cast<GLint>(pair[1]);
         return true;
     }
-    // Phase 8X Group 4d follow-up⁶ — GL_COMPRESSED_TEXTURE_FORMATS is a
-    // variable-length query: the caller is supposed to glGetIntegerv the
-    // count from GL_NUM_COMPRESSED_TEXTURE_FORMATS first, then size the
-    // output buffer and pass it here. We advertise zero compressed
-    // format enums through this query (compressed formats are reachable
-    // via glCompressedTexImage2D / format table routing, but none are
-    // exposed through the legacy probe), so the correct behaviour is to
-    // write zero entries and return true. The NUM alias is published in
-    // initializeLimits alongside every other scalar cap.
+    if (pname == GL_NUM_COMPRESSED_TEXTURE_FORMATS) {
+        *out = static_cast<GLint>(compressedTextureFormats_.size());
+        return true;
+    }
+    // GL_COMPRESSED_TEXTURE_FORMATS is variable-length, and this entry
+    // point cannot know how large `out` is. Several internal callers
+    // reach it with a single-GLint scratch slot
+    // (GLContextQuery.inc.mm:112 and :157 pass `&intValue`) and others
+    // with a GLint[4], so writing the whole list here would smash the
+    // stack the moment the advertised list outgrew the scratch buffer.
+    //
+    // Only glGetIntegerv/glGetInteger64v receive a buffer the caller
+    // sized from the GL_NUM_COMPRESSED_TEXTURE_FORMATS probe, so the
+    // full list is written there — GLContext::queryInteger and
+    // ::queryInteger64 intercept this pname before delegating here.
+    // Reaching this line means a scalar-shaped caller, which by GL's
+    // value-conversion rules reads element 0 only; write just that.
     if (pname == GL_COMPRESSED_TEXTURE_FORMATS) {
-        (void)out;
+        *out = compressedTextureFormats_.empty()
+                   ? 0
+                   : static_cast<GLint>(compressedTextureFormats_[0]);
         return true;
     }
 
@@ -257,12 +267,17 @@ bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
         out[1] = static_cast<GLint64>(pair[1]);
         return true;
     }
-    // Phase 8X Group 4d follow-up⁶ — zero-entry variable-length cap. See
-    // the matching comment in queryInteger for the NUM-first probe
-    // contract; the 64-bit path mirrors it so glGetInteger64v and
-    // glGetIntegerv return identical shapes.
+    // Variable-length cap. See the matching comment in queryInteger for
+    // why only element 0 is written here; the 64-bit path mirrors it so
+    // glGetInteger64v and glGetIntegerv return identical shapes.
+    if (pname == GL_NUM_COMPRESSED_TEXTURE_FORMATS) {
+        *out = static_cast<GLint64>(compressedTextureFormats_.size());
+        return true;
+    }
     if (pname == GL_COMPRESSED_TEXTURE_FORMATS) {
-        (void)out;
+        *out = compressedTextureFormats_.empty()
+                   ? 0
+                   : static_cast<GLint64>(compressedTextureFormats_[0]);
         return true;
     }
 
@@ -706,6 +721,44 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
         add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR, MTLPixelFormatASTC_12x10_sRGB, false, true, false, true, true);
         add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR, MTLPixelFormatASTC_12x12_sRGB, false, true, false, true, true);
     }
+
+    // ------------------------------------------------------------------
+    // GL_COMPRESSED_TEXTURE_FORMATS — the advertised general-purpose menu.
+    //
+    // GL 4.6 §8.5.2: "The only values returned by this query are those
+    // corresponding to formats suitable for general-purpose usage. The
+    // renderer will not enumerate formats with restrictions that need to
+    // be specifically understood prior to use."
+    //
+    // Every compressed enum registered above stays reachable through
+    // glCompressedTexImage*; this list is deliberately the smaller set a
+    // caller may pick from without knowing anything format-specific. The
+    // exclusions below are each a "restriction that must be understood":
+    //
+    //   · GL_COMPRESSED_RGBA_S3TC_DXT1_EXT — 1-bit punch-through alpha.
+    //     A caller that picks it expecting general RGBA gets alpha
+    //     quantised to fully-opaque-or-fully-transparent, and transparent
+    //     texels forced to black. Excluded by every desktop driver.
+    //   · sRGB variants — carry a non-linear transfer function.
+    //   · RGTC / LATC — one- and two-channel only, not general RGB(A).
+    //   · ASTC — LDR-only profile plus block-footprint selection.
+    //
+    // BPTC and ETC2/EAC are legitimately optional here (GL 4.2 §8.5.2 and
+    // GL 4.3 §8.5.2 both only require NUM_COMPRESSED_TEXTURE_FORMATS >= 0,
+    // and desktop vendors split on them), so they stay off the list to
+    // keep the advertised menu to formats this driver routes on every
+    // device that reports BC support at all.
+    //
+    // Membership is keyed off formats_ rather than the supportsBC flag so
+    // the advertised list can never name an enum the format table would
+    // then refuse to allocate.
+    for (const GLenum candidate : {GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                                   GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+                                   GL_COMPRESSED_RGBA_S3TC_DXT5_EXT}) {
+        if (formats_.find(candidate) != formats_.end()) {
+            compressedTextureFormats_.push_back(candidate);
+        }
+    }
 }
 
 void GLCapabilities::initializeLimits(void* rawMetalDevice) {
@@ -1091,17 +1144,10 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // AppGL has no hard internal ceiling so we report the floor.
     integerLimits_[GL_MAX_UNIFORM_LOCATIONS] = 1024;
 
-    // Phase 8X Group 4d follow-up⁶ — compressed-format probe count.
-    // Publishing GL_NUM_COMPRESSED_TEXTURE_FORMATS = 0 advertises "no
-    // compressed formats exposed through the legacy enum list". The
-    // format table already routes BC/ETC2/EAC/ASTC through the full
-    // glCompressedTexImage2D path for engines that know the specific
-    // enum they need, but the queryable list here is empty so compliant
-    // callers skip the variable-length GL_COMPRESSED_TEXTURE_FORMATS
-    // follow-up query. GLCapabilities::queryInteger still accepts the
-    // variable-length path with a zero-write special case so legacy
-    // callers that skip the NUM probe don't trip a GL_INVALID_ENUM.
-    integerLimits_[GL_NUM_COMPRESSED_TEXTURE_FORMATS] = 0;
+    // GL_NUM_COMPRESSED_TEXTURE_FORMATS is served directly from
+    // compressedTextureFormats_ in queryInteger/queryInteger64 rather
+    // than being mirrored into this table, so the count can never drift
+    // from the list that GL_COMPRESSED_TEXTURE_FORMATS returns.
 
     // Framebuffer object dimensions. Match the viewport limits.
     integerLimits_[GL_MAX_FRAMEBUFFER_WIDTH] = maxViewportDimension;

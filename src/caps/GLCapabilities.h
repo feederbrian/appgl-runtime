@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "../../include/AppGL/glcorearb.h"
 
@@ -39,6 +40,21 @@ public:
     // GL convention for compute cap queries via the scalar path.
     bool queryIntegerIndexed(GLenum pname, GLuint index, GLint* out) const;
     bool queryInteger64Indexed(GLenum pname, GLuint index, GLint64* out) const;
+
+    // The GL_COMPRESSED_TEXTURE_FORMATS enum list. Its length is what
+    // GL_NUM_COMPRESSED_TEXTURE_FORMATS reports, so a caller that probed
+    // the count has exactly this many slots to fill.
+    //
+    // Exposed as a container rather than served through queryInteger
+    // because queryInteger takes a bare pointer with no length: internal
+    // callers reach it with single-element and 4-element scratch buffers,
+    // and a variable-length write through that signature is a stack
+    // overflow waiting for the list to grow. Only glGetIntegerv and
+    // glGetInteger64v hold a buffer the caller sized from the count
+    // probe, so only they write the list — via this accessor.
+    const std::vector<GLenum>& compressedTextureFormats() const {
+        return compressedTextureFormats_;
+    }
 
     std::optional<GLFormatCapability> format(GLenum internalFormat) const;
 
@@ -83,6 +99,19 @@ private:
     std::unordered_map<GLenum, std::array<GLint64, 3>> indexedIntegerLimits_;
 
     std::unordered_map<GLenum, GLFormatCapability> formats_;
+
+    // The enum list published through GL_COMPRESSED_TEXTURE_FORMATS, with
+    // its length published through GL_NUM_COMPRESSED_TEXTURE_FORMATS.
+    //
+    // GL 4.6 §8.5.2 constrains this to formats "suitable for
+    // general-purpose usage", explicitly excluding formats "with
+    // restrictions that need to be specifically understood prior to use".
+    // That is a narrower set than everything the format table can route:
+    // it is the advertised menu a naive caller may pick blindly from, not
+    // the list of enums glCompressedTexImage2D accepts. Populated in
+    // initializeFormatTable so it can be gated on the same device probes
+    // as the format entries themselves.
+    std::vector<GLenum> compressedTextureFormats_;
 
     // Sprint 3 [metal-mesh-GS]: cached at format-table init time so
     // link-time GS tier classification doesn't repeat the family probe.

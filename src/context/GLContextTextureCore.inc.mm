@@ -664,6 +664,75 @@ bool GLContext::texImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+
+    // R1.0 residue — glTexImage* with an S3TC internal format must actually
+    // compress. GL 4.6 §8.5: the implementation chooses the compressed
+    // encoding, and §8.11 Table 8.23 then has to answer GL_TEXTURE_COMPRESSED
+    // = TRUE and a real GL_TEXTURE_COMPRESSED_IMAGE_SIZE, with
+    // glGetCompressedTexImage handing back those exact bytes.
+    //
+    // Until now these enums were classified as plain RGB/RGBA (see the
+    // GL_COMPRESSED_RGB_S3TC_DXT1_EXT arms in GLContext.mm's
+    // compatTextureInternalBaseComponentCount at :7061 and
+    // CompatUploadBase at :12291) and stored uncompressed, so
+    // `s3tc-errors` reported "Image was not compressed / Compressed image
+    // size mismatch. Found: 0 Expected: 8192" and `compressedteximage`
+    // reported "size 0 doesn't match expected size 32768".
+    //
+    // Nothing on this platform compresses for us: the M1 Max reports
+    // supportsBCTextureCompression = YES and samples BC1/2/3 natively, but
+    // Metal exposes no encoder, MPS and vImage carry no BC symbol, and
+    // ImageIO's advertised kCGImagePropertyBCEncoder does not function (its
+    // DDS destination writes zero bytes, its KTX destination falls back to
+    // GL_RGBA16F). Hence the CPU encoder in S3TCEncode.h.
+    //
+    // The encoded blocks go through GLContext::compressedTexImage, the same
+    // path glCompressedTexImage2D already uses, so the Metal BC allocation,
+    // the per-level bookkeeping and the readback path are shared rather than
+    // duplicated. If that path declines the target (it handles 2D, 2D_ARRAY
+    // and the cube targets) we fall through to the uncompressed storage that
+    // was there before, which is strictly what used to happen.
+    if (!proxyTextureTarget &&
+        appgl::s3tc::isEncodableFormat(internalFormatEnum) &&
+        image.desc.width > 0 && image.desc.height > 0 &&
+        image.desc.depth > 0) {
+        // The encoded blocks are attached to the level; the Metal storage
+        // stays exactly as it was. That split is deliberate and was measured:
+        // routing these calls into GLContext::compressedTexImage instead —
+        // so the level got a real BC MTLTexture — passed the same four
+        // `compressedteximage` rows but broke `fbo-generatemipmap-formats`,
+        // taking it from 6 of 8 subtests passing to 0 of 8 with the run
+        // aborting on GL_INVALID_OPERATION. The cause is glGenerateMipmap:
+        // Impl::generateMipmaps goes through Metal's blit-encoder
+        // generateMipmapsForTexture, which does not accept a compressed
+        // pixel format, so a compressed level 0 leaves the mip chain empty.
+        //
+        // Attaching the bytes is all these rows actually need.
+        // glGetCompressedTexImage / getCompressedTextureImage read
+        // GLTextureImageLevel::compressedData, and GL_TEXTURE_COMPRESSED /
+        // GL_TEXTURE_COMPRESSED_IMAGE_SIZE are answered from
+        // desc.internalFormat by GLContext::compressedLevelImageSize, which
+        // is already the S3TC enum here. Sampling keeps using the
+        // uncompressed upload, which is a strictly better image than the
+        // blocks would decode to and is what every currently-passing
+        // compressed row already relies on.
+        //
+        // A null-data glTexImage2D is an allocation and gets no blocks:
+        // fbo-generatemipmap-formats:119-124 allocates every mip above 0
+        // that way.
+        if (resolvedPixels != nullptr && !image.rgba8.empty()) {
+            std::vector<std::uint8_t> encodedBlocks;
+            if (appgl::s3tc::encodeImage(
+                    internalFormatEnum, image.rgba8.data(),
+                    static_cast<std::size_t>(image.desc.width),
+                    static_cast<std::size_t>(image.desc.height),
+                    static_cast<std::size_t>(image.desc.depth),
+                    encodedBlocks)) {
+                image.compressedData = std::move(encodedBlocks);
+            }
+        }
+    }
+
     // Also build native-format data for non-RGBA8 internal formats.
     const bool nativeUploadBuilt = impl_->buildNativeUpload(
         storageInternalFormatEnum,
@@ -2002,6 +2071,44 @@ bool GLContext::texSubImage(
     if (!impl_->replaceMetalTexture(*storageObject, storageTextureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
+    }
+    return true;
+}
+
+// R1.0-c item #12 — GL 4.6 §8.11 Table 8.23 GL_TEXTURE_COMPRESSED and
+// GL_TEXTURE_COMPRESSED_IMAGE_SIZE.
+//
+// The correct block arithmetic already existed in
+// GLContext::getTextureLevelParameteriv (GLContextTexture.inc.mm), which is
+// the path the DSA query glGetTextureLevelParameteriv takes. The non-DSA
+// glGetTexLevelParameteriv in AppGLGroup8.cpp has its own switch and answered
+// GL_FALSE / 0 unconditionally, so the same texture reported a size of 0
+// through the target-based query and the right number through the DSA one.
+// AppGLGroup8.cpp is plain C++ and cannot include GLContextTextureHelpers.h
+// (it imports Foundation), hence this accessor rather than a third copy of
+// the arithmetic.
+bool GLContext::compressedLevelImageSize(GLenum internalFormat,
+                                         GLsizei width, GLsizei height,
+                                         GLsizei depth,
+                                         GLint* outCompressed,
+                                         GLint* outImageSize) const {
+    const CompressedBlockInfo block =
+        compressedBlockInfoForInternalFormat(internalFormat);
+    if (block.bytes == 0 || block.width == 0 || block.height == 0 ||
+        block.depth == 0) {
+        if (outCompressed != nullptr) *outCompressed = GL_FALSE;
+        if (outImageSize != nullptr) *outImageSize = 0;
+        return false;
+    }
+    const NSUInteger blocksX = ceilDivBlocks(
+        static_cast<NSUInteger>(std::max<GLsizei>(width, 1)), block.width);
+    const NSUInteger blocksY = ceilDivBlocks(
+        static_cast<NSUInteger>(std::max<GLsizei>(height, 1)), block.height);
+    const NSUInteger blocksZ = ceilDivBlocks(
+        static_cast<NSUInteger>(std::max<GLsizei>(depth, 1)), block.depth);
+    if (outCompressed != nullptr) *outCompressed = GL_TRUE;
+    if (outImageSize != nullptr) {
+        *outImageSize = static_cast<GLint>(blocksX * blocksY * blocksZ * block.bytes);
     }
     return true;
 }

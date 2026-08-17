@@ -31,6 +31,7 @@
 #include "../state/MetalVertexDescriptorBuilder.h"
 #include "GLContextTextureHelpers.h"
 #include "TextureMipLevels.h"
+#include "S3TCEncode.h"
 
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
