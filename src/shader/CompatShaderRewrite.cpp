@@ -1136,6 +1136,125 @@ int parseVersionNumber(std::string_view versionLine) {
     return value;
 }
 
+// R1.0-b item #15 — `__VERSION__` fidelity across a `#version` promotion.
+//
+// GLSL 4.60 §3.3: "__VERSION__ will substitute a decimal integer
+// reflecting the version number of the OpenGL Shading Language", and the
+// version in question is the one the shader itself declares: "The
+// language version a shader is written to is specified by `#version
+// number profile_opt` where number must be a version of the language,
+// following the same convention as __VERSION__ above." The same section
+// makes the binding normative for compilation: "Shader compile-time
+// errors must still be given strictly based on the version declared (or
+// defaulted to) within each shader."
+//
+// This rewriter promotes several sources to a higher `#version` so
+// glslang's Vulkan front-end accepts them (the pre-140 floor upgrade to
+// `#version 330 core`, the 420 line-continuation floor, the stripped-ARB
+// 430/460 upgrades). glslang reports `__VERSION__` as the version it
+// PARSED —
+//   third_party/glslang/glslang/MachineIndependent/preprocessor/Pp.cpp:1248
+//     case PpAtomVersionMacro: ppToken->ival = parseContext.version;
+// — and that case is handled in MacroExpand BEFORE any user macro lookup,
+// so a shader cannot restore the value with `#define` / `#undef` either.
+// glslang's `setOverrideVersion` is no escape: ShaderLang.cpp:898-899
+// assigns the override straight into the same `version` field the macro
+// reads. Substituting the declared number back into the macro's ordinary
+// references is therefore the only repair available above glslang, and it
+// belongs beside the promotion that created the discrepancy.
+//
+// Occurrences that NAME the macro rather than READ it are left alone;
+// substituting there would turn a legal directive into a syntax error:
+//   - the operand of `defined` / `defined(...)`
+//   - the NAME operand of `#define` / `#undef` / `#ifdef` / `#ifndef`
+// Only the name is off limits on a `#define` line: a `#define V
+// __VERSION__` BODY reads the macro, so it must still be substituted or
+// the promoted number reaches the conditional through the alias.
+bool substituteDeclaredVersionMacro(std::string& src, int declaredVersion) {
+    static constexpr std::string_view kMacro = "__VERSION__";
+    const std::string replacement = std::to_string(declaredVersion);
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t found = src.find(kMacro, pos);
+        if (found == std::string::npos) {
+            break;
+        }
+        const std::size_t end = found + kMacro.size();
+        const bool leftOk = (found == 0) || !isIdentChar(src[found - 1]);
+        const bool rightOk = (end >= src.size()) || !isIdentChar(src[end]);
+        if (!leftOk || !rightOk) {
+            pos = found + 1;
+            continue;
+        }
+
+        std::size_t bol = 0;
+        if (found > 0) {
+            const std::size_t nl = src.rfind('\n', found - 1);
+            bol = (nl == std::string::npos) ? 0 : nl + 1;
+        }
+
+        bool skip = false;
+        // `#define NAME` / `#undef NAME` / `#ifdef NAME` / `#ifndef NAME`
+        // — only the NAME token itself.
+        std::size_t d = bol;
+        while (d < found && (src[d] == ' ' || src[d] == '\t')) {
+            ++d;
+        }
+        if (d < found && src[d] == '#') {
+            ++d;
+            while (d < found && (src[d] == ' ' || src[d] == '\t')) {
+                ++d;
+            }
+            std::size_t kwEnd = d;
+            while (kwEnd < found && isIdentChar(src[kwEnd])) {
+                ++kwEnd;
+            }
+            const std::string_view keyword(src.data() + d, kwEnd - d);
+            if (keyword == "define" || keyword == "undef" ||
+                keyword == "ifdef" || keyword == "ifndef") {
+                std::size_t nameStart = kwEnd;
+                while (nameStart < found &&
+                       (src[nameStart] == ' ' || src[nameStart] == '\t')) {
+                    ++nameStart;
+                }
+                if (nameStart == found) {
+                    skip = true;
+                }
+            }
+        }
+        if (!skip) {
+            // `defined __VERSION__` / `defined ( __VERSION__ )`
+            std::size_t b = found;
+            while (b > bol && (src[b - 1] == ' ' || src[b - 1] == '\t')) {
+                --b;
+            }
+            if (b > bol && src[b - 1] == '(') {
+                --b;
+                while (b > bol && (src[b - 1] == ' ' || src[b - 1] == '\t')) {
+                    --b;
+                }
+            }
+            const std::size_t wordEnd = b;
+            while (b > bol && isIdentChar(src[b - 1])) {
+                --b;
+            }
+            if (std::string_view(src.data() + b, wordEnd - b) == "defined") {
+                skip = true;
+            }
+        }
+        if (skip) {
+            pos = end;
+            continue;
+        }
+
+        src.replace(found, kMacro.size(), replacement);
+        pos = found + replacement.size();
+        didReplace = true;
+    }
+    return didReplace;
+}
+
 // A source without #version uses desktop GLSL 1.10 semantics. Explicit
 // compatibility profiles and pre-1.50 desktop versions likewise expose the
 // fixed-function builtin surface. Core-profile sources must never acquire a
@@ -4167,11 +4286,51 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             rewriteLegacyTextureAliasMacros(result.source);
     }
 
+    // ---- 3c. `__VERSION__` fidelity across a `#version` promotion --------
+    // Every version-changing site above (the pre-140 floor upgrade to
+    // `#version 330 core`, the 420 line-continuation floor, the
+    // stripped-ARB 430/460 upgrades) leaves glslang reporting the
+    // REWRITTEN number from `__VERSION__`. Compare the version the shader
+    // DECLARED against the version actually present now, and restore the
+    // declared one in the macro's ordinary references. This runs last so
+    // it sees the final `#version`, whichever site produced it.
+    //
+    // Deliberately out of scope: a source that declared no `#version` at
+    // all. GLSL 4.60 §3.3 says such a shader targets 1.10, but nothing
+    // here rewrites it — ShaderTranslator::compileGLSL supplies glslang's
+    // default version instead, so the discrepancy is not this rewriter's
+    // to repair and no measured row exercises it.
+    bool didVersionMacroFixup = false;
+    if (result.source.find("__VERSION__") != std::string::npos) {
+        const std::string originalSource(source.begin(), source.end());
+        std::size_t declaredStart = std::string::npos;
+        const std::size_t declaredEol =
+            findVersionLineEnd(originalSource, &declaredStart);
+        std::size_t currentStart = std::string::npos;
+        const std::size_t currentEol =
+            findVersionLineEnd(result.source, &currentStart);
+        if (declaredEol != std::string::npos &&
+            currentEol != std::string::npos) {
+            const int declaredVersion = parseVersionNumber(std::string_view(
+                originalSource.data() + declaredStart,
+                declaredEol - declaredStart));
+            const int currentVersion = parseVersionNumber(std::string_view(
+                result.source.data() + currentStart,
+                currentEol - currentStart));
+            if (declaredVersion > 0 && currentVersion > 0 &&
+                currentVersion != declaredVersion) {
+                didVersionMacroFixup = substituteDeclaredVersionMacro(
+                    result.source, declaredVersion);
+            }
+        }
+    }
+
     if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup &&
         !didGpuShader4LexicalFixup && !didGpuShader4ShadowFixup &&
         !didGpuShader4TextureAliasFixup &&
         !didLegacyDesktopTextureAliasFixup &&
-        !didLegacyTextureAliasMacroFixup) {
+        !didLegacyTextureAliasMacroFixup &&
+        !didVersionMacroFixup) {
         return result;
     }
     result.didRewrite = true;

@@ -7411,6 +7411,147 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     return r;
 }
 
+// R1.0-b item #13 — the `sample` auxiliary storage qualifier gate.
+//
+// The fragment preamble below force-enables
+// `GL_OES_shader_multisample_interpolation` on EVERY fragment shader.
+// In a DESKTOP-profile compile that extension has exactly one effect in
+// the vendored glslang: it promotes the token `sample` from an
+// identifier to the SAMPLE keyword at any version —
+//   third_party/glslang/glslang/MachineIndependent/Scan.cpp:1162-1171
+//     case SAMPLE: layoutExts = {E_GL_OES_shader_multisample_interpolation,
+//                                E_GL_ARB_gpu_shader5, E_GL_NV_gpu_shader5};
+//                  if ((isEsProfile() && version >= 320) ||
+//                      extensionsTurnedOn(numLayoutExts, layoutExts))
+//                      return keyword;
+//                  return es30ReservedFromGLSL(400);
+// Its only other use in glslang gates interpolateAtCentroid/Sample/Offset
+// (Initialize.cpp:9504-9506) and sits inside `if (isEsProfile())` under
+// `if (version == 310)`, so it cannot fire for the desktop GLSL this
+// runtime compiles. Desktop `interpolateAt*` comes from GLSL 4.00 core or
+// GL_ARB_gpu_shader5 instead.
+//
+// Desktop GLSL reserves `sample` only from 4.00 (Scan.cpp's
+// `es30ReservedFromGLSL(400)` hands back an ordinary identifier below
+// that), so a pre-400 shader may legally name a variable `sample` — and
+// piglit's ARB_texture_multisample shaders do exactly that
+// (`uniform int sample;` … `texelFetch(tex, coord, sample)`). With the
+// extension force-enabled those sources die at
+// "syntax error, unexpected SAMPLE, expecting COMMA or SEMICOLON".
+//
+// Classify every bare `sample` token in the COMMENT-STRIPPED source:
+//   qualifier position  — the next non-space character can start an
+//                         identifier (`sample in`, `sample out`,
+//                         `sample vec4`, `sample centroid`)
+//   identifier position — anything else (`sample;`, `sample)`,
+//                         `sample =`, `sample,`)
+// Drop the extension only when the source uses `sample` as a plain
+// identifier and NEVER as a qualifier. Such a source cannot compile with
+// the extension on, and every source that might need the keyword keeps
+// it — so the gate cannot take a currently-passing shader away.
+// Comments are stripped first because a prose `sample` decides nothing
+// and would otherwise vote in either direction by accident.
+std::string stripGlslCommentsForScan(std::string_view source) {
+    std::string out;
+    out.reserve(source.size());
+    enum class State { Code, LineComment, BlockComment };
+    State state = State::Code;
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        const char c = source[i];
+        const char n = (i + 1 < source.size()) ? source[i + 1] : '\0';
+        switch (state) {
+        case State::Code:
+            if (c == '/' && n == '/') {
+                state = State::LineComment;
+                out.push_back(' ');
+                ++i;
+            } else if (c == '/' && n == '*') {
+                state = State::BlockComment;
+                out.push_back(' ');
+                ++i;
+            } else {
+                out.push_back(c);
+            }
+            break;
+        case State::LineComment:
+            // Keep newlines so nothing downstream sees lines merge.
+            if (c == '\n') {
+                state = State::Code;
+                out.push_back(c);
+            }
+            break;
+        case State::BlockComment:
+            if (c == '*' && n == '/') {
+                state = State::Code;
+                out.push_back(' ');
+                ++i;
+            } else if (c == '\n') {
+                out.push_back(c);
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+struct SampleTokenUsage {
+    bool asQualifier = false;
+    bool asIdentifier = false;
+};
+
+SampleTokenUsage classifySampleTokenUsage(std::string_view source) {
+    SampleTokenUsage usage;
+    static constexpr std::string_view kToken = "sample";
+    const auto isIdentifierChar = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+    };
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t found = source.find(kToken, pos);
+        if (found == std::string_view::npos) {
+            break;
+        }
+        const std::size_t end = found + kToken.size();
+        // `sampler2DMS`, `sample_coord`, `GL_ARB_sample_shading` and
+        // `numSamples` are not the token `sample`.
+        const bool leftOk =
+            (found == 0) || !isIdentifierChar(source[found - 1]);
+        const bool rightOk =
+            (end >= source.size()) || !isIdentifierChar(source[end]);
+        if (!leftOk || !rightOk) {
+            pos = found + 1;
+            continue;
+        }
+        std::size_t next = end;
+        while (next < source.size() &&
+               std::isspace(static_cast<unsigned char>(source[next]))) {
+            ++next;
+        }
+        const bool startsIdentifier =
+            next < source.size() &&
+            (std::isalpha(static_cast<unsigned char>(source[next])) != 0 ||
+             source[next] == '_');
+        if (startsIdentifier) {
+            usage.asQualifier = true;
+        } else {
+            usage.asIdentifier = true;
+        }
+        pos = end;
+    }
+    return usage;
+}
+
+bool fragmentPreambleMaySampleQualify(std::string_view source) {
+    // Cheap reject: the overwhelming majority of fragment shaders never
+    // mention the token at all, and those keep the historical preamble.
+    if (source.find("sample") == std::string_view::npos) {
+        return true;
+    }
+    const std::string scanned = stripGlslCommentsForScan(source);
+    const SampleTokenUsage usage = classifySampleTokenUsage(scanned);
+    return !(usage.asIdentifier && !usage.asQualifier);
+}
+
 }  // namespace
 
 std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source, GLenum stage, int version, std::string* log) const {
@@ -7447,9 +7588,15 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     // for these built-ins. Preamble runs after #version directive
     // processing, so version-dependent gating already saw the user's
     // #version pick.
+    //
+    // R1.0-b item #13: the third directive is split out because it — and
+    // only it — reclassifies the token `sample` as a keyword at every
+    // version (glslang Scan.cpp `case SAMPLE`). See
+    // fragmentPreambleMaySampleQualify above.
     static const char* kFragmentSamplePreamble =
         "#extension GL_ARB_sample_shading : enable\n"
-        "#extension GL_OES_sample_variables : enable\n"
+        "#extension GL_OES_sample_variables : enable\n";
+    static const char* kFragmentSampleQualifierPreamble =
         "#extension GL_OES_shader_multisample_interpolation : enable\n";
     std::string preamble;
     if (usesAtomicCounters) {
@@ -7473,6 +7620,13 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     }
     if (eshStage == EShLangFragment) {
         preamble += kFragmentSamplePreamble;
+        if (fragmentPreambleMaySampleQualify(source)) {
+            preamble += kFragmentSampleQualifierPreamble;
+        } else if (std::getenv("APPGL_TRACE_GLSLANG") != nullptr) {
+            std::fprintf(stderr,
+                "[glslang-preamble] `sample` used as an identifier; "
+                "GL_OES_shader_multisample_interpolation withheld\n");
+        }
     }
     if (!preamble.empty()) {
         shader.setPreamble(preamble.c_str());
@@ -7605,7 +7759,11 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSLStageProgram(
         if (eshStage == EShLangFragment) {
             preamble += "#extension GL_ARB_sample_shading : enable\n";
             preamble += "#extension GL_OES_sample_variables : enable\n";
-            preamble += "#extension GL_OES_shader_multisample_interpolation : enable\n";
+            // R1.0-b item #13 — see fragmentPreambleMaySampleQualify.
+            if (fragmentPreambleMaySampleQualify(source)) {
+                preamble +=
+                    "#extension GL_OES_shader_multisample_interpolation : enable\n";
+            }
         }
         return preamble;
     };
