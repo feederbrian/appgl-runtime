@@ -54,6 +54,7 @@ namespace spv {
         OpImageGather = 96, OpImageDrefGather = 97,
         OpImageRead = 98, OpImageWrite = 99, OpImage = 100,
         OpImageQuerySizeLod = 103, OpImageQuerySize = 104,
+        OpImageQuerySamples = 107,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
         OpTranspose = 84,
         OpVectorShuffle = 79,
@@ -8035,6 +8036,58 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            // R1.0-b item #3: OpImageQuerySamples — the SPIR-V lowering of
+            // GLSL textureSamples()/imageSamples()
+            // (GL_ARB_shader_texture_image_samples). Scalar result; the
+            // sample count is already carried on the slot as
+            // SampledTextureSlot::samples, populated from
+            // `mtlTex.sampleCount` at GLContext.mm:21375 and already
+            // consumed by the multisample texelFetch path at :7344/:7385.
+            // No texel data is required, so this succeeds even for the
+            // multisample slots whose data blit is still absent (the
+            // "sampled texture slot has no data" family).
+            //   OpImageQuerySamples: w[0]=resultType, w[1]=resultId,
+            //                        w[2]=image
+            case spv::OpImageQuerySamples: {
+                std::uint32_t querySamples = 0;
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt != sampledImages_.end()) {
+                    const SampledImageHandle& h = sIt->second;
+                    const SampledTextureMap* mapPtr = h.isStorage
+                        ? storageImages_ : sampledTextures_;
+                    if (mapPtr != nullptr) {
+                        auto arrIt = mapPtr->find(h.arrayVarId);
+                        if (arrIt != mapPtr->end() &&
+                            h.elementIdx < arrIt->second.size()) {
+                            querySamples =
+                                arrIt->second[h.elementIdx].samples;
+                        }
+                    }
+                }
+                // GL 4.6 §11.1.3.4: textureSamples on a non-multisample
+                // texture is undefined; report at least 1 so a bound
+                // slot never yields 0.
+                if (querySamples == 0u) {
+                    querySamples = 1u;
+                }
+                bool isUnsigned = false;
+                auto tIt = module_.types.find(w[0]);
+                if (tIt != module_.types.end() &&
+                    tIt->second.kind == TypeInfo::Kind::UInt) {
+                    isUnsigned = true;
+                }
+                Value out{};
+                out.kind = isUnsigned ? Value::Kind::UInt : Value::Kind::Int;
+                out.i[0] = static_cast<std::int32_t>(querySamples);
+                if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                    std::fprintf(stderr,
+                        "[GS-img] querysamples: id=%u → %u\n",
+                        w[2], querySamples);
+                }
+                valueStore_[w[1]] = out;
+                pc += wc;
+                break;
+            }
             // CKPT162 (Sprint 14 Day 9): OpImageWrite — captures the
             // store into pendingImageWrites_ for the runtime to flush
             // to Metal via replaceRegion: after GS execution. Builds
@@ -9691,6 +9744,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
                                                 //     see body handler)
         case spv::OpImageQuerySizeLod:          // 103
         case spv::OpImageQuerySize:             // 104
+        // ─ textureSamples()/imageSamples() (R1.0-b item #3) ─
+        case spv::OpImageQuerySamples:          // 107
             return true;
         default:
             return false;

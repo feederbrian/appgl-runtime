@@ -1,0 +1,34 @@
+diff --git a/glslang/MachineIndependent/Initialize.cpp b/glslang/MachineIndependent/Initialize.cpp
+index d4f87a4..1db8d39 100644
+--- a/glslang/MachineIndependent/Initialize.cpp
++++ b/glslang/MachineIndependent/Initialize.cpp
+@@ -7474,13 +7493,28 @@ void TBuiltIns::addQueryFunctions(TSampler sampler, const TString& typeName, int
+     //
+     // textureSamples() and imageSamples()
+     //
+ 
+     // GL_ARB_shader_texture_image_samples
+     // TODO: spec issue? there are no memory qualifiers; how to query a writeonly/readonly image, etc?
+-    if (profile != EEsProfile && version >= 430 && sampler.isMultiSample()) {
++    // AppGL R1.0-b item #3: the upstream floor of 430 is the version at which
++    // textureSamples()/imageSamples() became *core-adjacent* in glslang, but
++    // GL_ARB_shader_texture_image_samples itself only requires "GLSL 1.50 or
++    // ARB_texture_multisample" (registry spec, Dependencies). Declaring the
++    // built-in at 430+ only meant a conforming `#extension
++    // GL_ARB_shader_texture_image_samples : enable` shader at #version 130/150
++    // got "no matching overloaded function found". Lower the *declaration*
++    // floor to 140 — the same floor at which glslang admits multisample
++    // sampler types at all (add2ndGenerationSamplingImaging, "if (ms && profile
++    // != EEsProfile && version < 140) continue;") — and leave the *use* gate
++    // where upstream put it: ParseHelper.cpp's
++    // profileRequires(loc, ~EEsProfile, 450, E_GL_ARB_shader_texture_image_samples, ...)
++    // still errors below 450 unless the shader declares the extension, so no
++    // shader gains the built-in silently. imageSamples stays floored at 420 by
++    // the isImage() early-return at the top of this function.
++    if (profile != EEsProfile && version >= 140 && sampler.isMultiSample()) {
+         commonBuiltins.append("int ");
+         if (sampler.isImage())
+             commonBuiltins.append("imageSamples(readonly writeonly volatile coherent nontemporal ");
+         else
+             commonBuiltins.append("textureSamples(");
+         commonBuiltins.append(typeName);

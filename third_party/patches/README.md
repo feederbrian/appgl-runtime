@@ -1834,6 +1834,20 @@ tracks the same SPIR-V `OpImageWrite` reachability as structured
 metadata (`sparseStorageImageWrite`) so Phase 7.6.3 can combine the
 program flag with the actual runtime `textureSparse` state.
 
+### `glslang-shader-texture-image-samples-version-gate.patch`
+
+**Target:** `third_party/glslang/glslang/MachineIndependent/Initialize.cpp:7514` (KhronosGroup/glslang) — one line, inside `TBuiltIns::addQueryFunctions`, lowering the version floor that declares `textureSamples()` / `imageSamples()` for multisample samplers from `version >= 430` to `version >= 140`.
+
+**Summary:** upstream gates the declaration behind `profile != EEsProfile && version >= 430 && sampler.isMultiSample()`. AppGL rewrites piglit's `#version 130` sources upward before handing them to glslang — measured, not assumed: the dumped SPIR-V carries `OpSource GLSL 330`. 330 is below 430, so the built-in is never declared and the shader dies at `'textureSamples' : no matching overloaded function found`.
+
+**Why 140 and not something lower:** 140 is the absolute floor of AppGL's compile path — below it both arms fail with glslang's own `#version: Desktop shaders for Vulkan SPIR-V require version 140 or higher` — and it is also the version at which glslang admits multisample sampler types at all (`Initialize.cpp:7349`). Nothing below 140 is reachable, so 140 is the lowest floor that can change behaviour.
+
+**Spec basis:** `ARB_shader_texture_image_samples` (Khronos registry, rev 9) states its dependencies as "Either GLSL 1.50 or ARB_texture_multisample is required." The upstream 430 floor is therefore not spec-derived. The `imageSamples` overloads carry a separate GLSL 4.20 / `ARB_shader_image_load_store` dependency and are **not** addressed here.
+
+**Composes with `glslang-gl-numsamples-spv.patch`:** that patch touches different hunks of the same file (near `:6754` and `:6846`, about `gl_NumSamples`). Verified by applying pristine + numsamples + this patch in order.
+
+**Rows advanced:** the front-end half alone leaves the 12 `gs-*` rows failing — AppGL's own SPIR-V interpreter had no handler for `OpImageQuerySamples` (opcode 107). Paired with that handler, `spec@arb_shader_texture_image_samples` goes 36 fail / 1 pass to 0 fail / 37 pass, N=4 reps, 0 regressions over a 509-row slice.
+
 ### `glslang-cull-distance-builtin-constants.patch`
 
 **Target:** `third_party/glslang/glslang/MachineIndependent/{Initialize.cpp, Versions.cpp, Versions.h}` (KhronosGroup/glslang) — three small adjustments that make `gl_MaxCullDistances` / `gl_MaxCombinedClipAndCullDistances` GLSL constants visible to shaders that declare `#extension GL_ARB_cull_distance : require` at desktop GL versions 130-440.
