@@ -789,13 +789,29 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
     out.isArray = false;
     out.arrayDimensions.clear();
     std::size_t nameIdx = 1;
-    if (nameIdx < tokens.size() && tokens[nameIdx] == "[") {
+    // GLSL 4.60 §4.1.9: the array size may sit on the TYPE rather than on
+    // the name — `vec4[2][31] v;` declares the same thing as
+    // `vec4 v[2][31];`. Both forms may carry MORE THAN ONE dimension when
+    // GL_ARB_arrays_of_arrays is in play.  This loop used to run once: it
+    // consumed `[2]`, then took the NEXT token — the literal `[` of `[31]` —
+    // as the variable name, stripped it to the empty string, and returned
+    // false, so the whole declaration was dropped.  piglit
+    // ext_transform_feedback-max-varyings@max-varying-arrays-of-arrays
+    // declares exactly `varying vec4[2][15] v;`, so `v` never reached
+    // declaredOutputs and glTransformFeedbackVaryings("v[0][0]") failed to
+    // link with "is not an output of the last vertex-processing stage".
+    // arraySize keeps its GL meaning — the OUTERMOST dimension, matching
+    // what the postfix form already recorded — while arrayDimensions carries
+    // the full outer-to-inner shape.
+    while (nameIdx < tokens.size() && tokens[nameIdx] == "[") {
         std::size_t closeBracket = nameIdx;
         GLint arraySize = 0;
         if (!parseArraySuffix(tokens, nameIdx, closeBracket, arraySize)) {
             return false;
         }
-        out.arraySize = arraySize;
+        if (out.arrayDimensions.empty()) {
+            out.arraySize = arraySize;
+        }
         out.isArray = true;
         out.arrayDimensions.push_back(arraySize);
         nameIdx = closeBracket + 1;

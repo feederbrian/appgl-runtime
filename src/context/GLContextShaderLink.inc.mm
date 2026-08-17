@@ -1852,6 +1852,14 @@ bool GLContext::linkProgram(GLuint program) {
             std::string tfSourceName;
             GLint tfComponentOffset = 0;
             GLint tfComponentCount = 0;
+            // Full outer-to-inner shape when the output was declared as an
+            // array of arrays (`out vec4 v[2][15]`). `arraySize` keeps the
+            // GL query meaning — the OUTERMOST dimension only — so the flat
+            // element count needed to resolve a `v[i][j]` capture has to be
+            // recomputed from this. Empty for non-arrays and for plain
+            // one-dimensional arrays, where `arraySize` is already the
+            // element count.
+            std::vector<GLint> arrayDimensions;
         };
         // Helper: component count for a GL type.
         auto glTypeComponents = [](GLenum t) -> GLsizei {
@@ -1904,9 +1912,26 @@ bool GLContext::linkProgram(GLuint program) {
                     }
                     const GLint arraySize = decl.arraySize > 0
                         ? decl.arraySize : 1;
-                    outputTypeMap[decl.name] = makeOutputInfo(
+                    OutputInfo info = makeOutputInfo(
                         decl.type, arraySize, decl.isArray, decl.name, 0,
                         glTypeComponents(decl.type) * arraySize);
+                    if (decl.arrayDimensions.size() > 1) {
+                        info.arrayDimensions = decl.arrayDimensions;
+                        // An array of arrays occupies the product of every
+                        // dimension, not just the outermost one, and the
+                        // whole thing is what the stage writes out.
+                        GLint flatElems = 1;
+                        bool dimsKnown = true;
+                        for (GLint dim : decl.arrayDimensions) {
+                            if (dim <= 0) { dimsKnown = false; break; }
+                            flatElems *= dim;
+                        }
+                        if (dimsKnown) {
+                            info.tfComponentCount =
+                                glTypeComponents(decl.type) * flatElems;
+                        }
+                    }
+                    outputTypeMap[decl.name] = std::move(info);
                 }
             }
         }
@@ -2445,6 +2470,32 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 return false;
             };
+            // Arrays-of-arrays capture: `v[1][3]` names one element of
+            // `out vec4 v[2][15]`.  GL 4.6 §11.1.2.1 requires the API name to
+            // spell out EVERY dimension, so stripping a single `[N]` (the
+            // loop below runs once for a plain array) leaves `v[1]`, which is
+            // not a declared output and used to fail the link outright with
+            // "is not an output of the last vertex-processing stage" —
+            // piglit ext_transform_feedback-max-varyings@max-varying-arrays-
+            // of-arrays captures exactly `v[0][0]`…`v[1][14]`.
+            // Peel the whole trailing subscript chain, then flatten the
+            // indices against the declared shape (row-major, outermost
+            // first) so the rest of this function can keep treating the
+            // capture as a single flat element index — which is also what
+            // the draw-time gather in GLContext.mm expects, since the stage
+            // writes the array out flattened.
+            auto parseTrailingSubscriptChain = [&](const std::string& name,
+                                                   std::string& base,
+                                                   std::vector<GLint>& indices) {
+                base = name;
+                indices.clear();
+                std::string outer;
+                GLint index = 0;
+                while (parseTrailingArrayElement(base, outer, index)) {
+                    indices.insert(indices.begin(), index);
+                    base = outer;
+                }
+            };
             if (haveOutputDecls) {
                 auto it = outputTypeMap.find(varyName);
                 if (it == outputTypeMap.end()) {
@@ -2454,6 +2505,47 @@ bool GLContext::linkProgram(GLuint program) {
                         it = outputTypeMap.find(lookupName);
                     }
                     if (it == outputTypeMap.end()) {
+                        // Multi-dimensional subscript. Peel the rest of the
+                        // chain and flatten. Only taken when the single-strip
+                        // lookup above already missed, so plain arrays and
+                        // struct leaves keep their existing resolution.
+                        std::string aoaBase;
+                        std::vector<GLint> aoaIndices;
+                        parseTrailingSubscriptChain(varyName, aoaBase, aoaIndices);
+                        if (aoaIndices.size() > 1) {
+                            auto aoaIt = outputTypeMap.find(aoaBase);
+                            if (aoaIt != outputTypeMap.end() &&
+                                aoaIt->second.arrayDimensions.size() ==
+                                    aoaIndices.size()) {
+                                const auto& dims = aoaIt->second.arrayDimensions;
+                                bool inBounds = true;
+                                GLint flatIndex = 0;
+                                for (std::size_t d = 0; d < dims.size(); ++d) {
+                                    if (dims[d] <= 0 || aoaIndices[d] < 0 ||
+                                        aoaIndices[d] >= dims[d]) {
+                                        inBounds = false;
+                                        break;
+                                    }
+                                    flatIndex = flatIndex * dims[d] + aoaIndices[d];
+                                }
+                                if (!inBounds) {
+                                    programObject->linkLog =
+                                        "transform feedback varying '" + varyName +
+                                        "' array index is out of bounds";
+                                    Runtime::shared().recordShaderTranslation({
+                                        programTag, "link", "", "", "",
+                                        programObject->linkLog, "", false
+                                    });
+                                    return false;
+                                }
+                                lookupName = aoaBase;
+                                captureIsArrayElement = true;
+                                captureArrayElementIndex = flatIndex;
+                                it = aoaIt;
+                            }
+                        }
+                    }
+                    if (it == outputTypeMap.end()) {
                         programObject->linkLog = "transform feedback varying '" + varyName +
                             "' is not an output of the last vertex-processing stage";
                         Runtime::shared().recordShaderTranslation({
@@ -2461,8 +2553,25 @@ bool GLContext::linkProgram(GLuint program) {
                         });
                         return false;
                     }
+                    // Bound against the FLAT element count. For a plain array
+                    // that is `arraySize`; for an array of arrays the index
+                    // has already been flattened above, so `arraySize` (the
+                    // outermost dimension alone) would reject every element
+                    // past the first row.
+                    GLint declaredElementCount = it->second.arraySize;
+                    if (it->second.arrayDimensions.size() > 1) {
+                        GLint flatElems = 1;
+                        bool dimsKnown = true;
+                        for (GLint dim : it->second.arrayDimensions) {
+                            if (dim <= 0) { dimsKnown = false; break; }
+                            flatElems *= dim;
+                        }
+                        if (dimsKnown) {
+                            declaredElementCount = flatElems;
+                        }
+                    }
                     if (captureIsArrayElement && it->second.isArray &&
-                        captureArrayElementIndex >= it->second.arraySize) {
+                        captureArrayElementIndex >= declaredElementCount) {
                         programObject->linkLog = "transform feedback varying '" + varyName +
                             "' array index is out of bounds";
                         Runtime::shared().recordShaderTranslation({
