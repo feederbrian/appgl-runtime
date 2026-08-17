@@ -3119,6 +3119,11 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // Captured before the write so the level-materialization below can ask
+    // whether the value actually MOVED, rather than whether it was merely
+    // assigned. See the early-out at the end of this function.
+    const GLint previousBaseLevel = object->params.baseLevel;
+    const GLint previousMaxLevel = object->params.maxLevel;
     if (!setTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
@@ -3141,8 +3146,19 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pname == GL_TEXTURE_MAX_LEVEL) {
         object->swizzleDirty = true;
     }
-    if (pname == GL_TEXTURE_BASE_LEVEL ||
-        pname == GL_TEXTURE_MAX_LEVEL) {
+    if ((pname == GL_TEXTURE_BASE_LEVEL ||
+         pname == GL_TEXTURE_MAX_LEVEL) &&
+        (object->params.baseLevel != previousBaseLevel ||
+         object->params.maxLevel != previousMaxLevel)) {
+        // replaceMetalTexture allocates a whole new MTLTexture and copies
+        // the surviving levels into it, so running it on every call -- and
+        // not only when the level range actually moved -- reallocates the
+        // texture for writes that changed nothing. A test that walks the
+        // mip chain re-setting the same base level per level per texture
+        // turns that into thousands of full-texture reallocations, and the
+        // wired memory behind them is not fully returned: four such rows
+        // were measured retaining 2.2 GiB permanently. Re-setting the value
+        // a texture already has is a no-op in GL, so it must be one here.
         const GLuint textureName = impl_->state != nullptr
             ? impl_->state->boundTexture(target)
             : 0u;
