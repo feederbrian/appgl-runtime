@@ -326,5 +326,46 @@ inline bool encodeImage(GLenum internalFormat,
     return true;
 }
 
+// GL_COMPRESSED_RGBA_S3TC_DXT1_EXT punch-through alpha, applied to the RGBA8
+// image the level actually samples from.
+//
+// EXT_texture_compression_s3tc: in a DXT1 block with c0 <= c1, index 3 is
+// "transparent black" -- the texel decodes to (0,0,0,0), NOT to (rgb,0).
+// So the format quantises alpha to one bit AND destroys the colour of every
+// texel it makes transparent. Both halves are observable:
+//
+//   fbo-generatemipmap-formats.c:396-402 expects the alpha-0.0 and
+//   alpha-0.25 quadrants to read back BLACK, and the alpha-0.5 quadrant to
+//   read back with alpha 1.0.
+//   texwrap.c:1589-1598 encodes the same rule for its expected image.
+//
+// encodeImage already emits exactly this (encodeColorBlock's punchThrough
+// arm), but those blocks are only kept for glGetCompressedTexImage and the
+// size queries -- sampling reads image.rgba8. Without this pass the sampled
+// texture is the pristine upload, which for DXT1-RGBA is an image the format
+// cannot represent.
+//
+// The rule is per-texel even though the encoder's mode choice is per-block:
+// a block with no sub-128 texel is encoded 4-colour and every texel there is
+// opaque anyway, so "alpha < 128 -> transparent black, else opaque" is the
+// same function either way.
+//
+// Idempotent, so it is safe to run before encodeImage: the alphas it writes
+// are 0 and 255, and re-applying maps them to themselves.
+inline void applyDXT1PunchThrough(GLenum internalFormat,
+                                  std::uint8_t* rgba8,
+                                  std::size_t texelCount) {
+    if (internalFormat != GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) return;
+    if (rgba8 == nullptr) return;
+    for (std::size_t i = 0; i < texelCount; ++i) {
+        std::uint8_t* t = rgba8 + i * 4u;
+        if (t[3] < 128u) {
+            t[0] = t[1] = t[2] = t[3] = 0u;
+        } else {
+            t[3] = 255u;
+        }
+    }
+}
+
 }  // namespace s3tc
 }  // namespace appgl

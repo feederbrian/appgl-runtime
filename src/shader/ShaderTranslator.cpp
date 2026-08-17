@@ -10243,8 +10243,49 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // uses (struct definitions, threadgroup/spvUnsafeArray locals
         // for mesh-shader gl_PerVertex / gl_in / gl_out) lack the
         // leading dot and are preserved.
+        // The dangling shape is specifically `_NN.<marker>...` — the
+        // receiver is a SPIRV-Cross *synthetic temporary* (`_` followed by
+        // digits) whose declaration the SPIR-V optimizer removed. Every
+        // OTHER receiver names a real, declared object. `out.<marker>` in
+        // particular is the entry point's own output struct: SPIRV-Cross
+        // renames any variable literally called `gl_*` to
+        // `_RESERVED_IDENTIFIER_FIXUP_gl_*`, and a GLSL shader reaches MSL
+        // with a literal `gl_FragColor` output whenever the frontend's
+        // textual gl_FragColor→appgl_FragColor rewrite could not see the
+        // use (e.g. it is hidden behind a macro:
+        // `#define piglit_FragColor gl_FragColor`). Stripping receiver-
+        // agnostic access chains therefore deleted the fragment shader's
+        // only colour write, leaving `main0_out out = {}` returned
+        // unmodified — spec@ext_texture_array@compressed {teximage,
+        // texsubimage}[ pbo] read back 0,0,0,0 on every probe.
         {
             const std::string kAccessMarker = "._RESERVED_IDENTIFIER_FIXUP_gl_";
+            const auto accessesUndeclaredTemp =
+                [&kAccessMarker](std::string_view line) -> bool {
+                std::size_t at = line.find(kAccessMarker);
+                while (at != std::string_view::npos) {
+                    std::size_t cursor = at;
+                    std::size_t digits = 0;
+                    while (cursor > 0 &&
+                           line[cursor - 1] >= '0' && line[cursor - 1] <= '9') {
+                        --cursor;
+                        ++digits;
+                    }
+                    if (digits > 0 && cursor > 0 && line[cursor - 1] == '_') {
+                        const std::size_t underscore = cursor - 1;
+                        const bool identifierStart =
+                            underscore == 0 ||
+                            !(std::isalnum(static_cast<unsigned char>(
+                                  line[underscore - 1])) ||
+                              line[underscore - 1] == '_');
+                        if (identifierStart) {
+                            return true;
+                        }
+                    }
+                    at = line.find(kAccessMarker, at + 1);
+                }
+                return false;
+            };
             std::string out;
             out.reserve(msl.size());
             std::size_t pos = 0;
@@ -10252,7 +10293,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 const std::size_t nl = msl.find('\n', pos);
                 const std::size_t lineEnd = (nl == std::string::npos) ? msl.size() : nl + 1;
                 const std::string_view line(msl.data() + pos, lineEnd - pos);
-                if (line.find(kAccessMarker) == std::string_view::npos) {
+                if (!accessesUndeclaredTemp(line)) {
                     out.append(line);
                 }
                 pos = lineEnd;

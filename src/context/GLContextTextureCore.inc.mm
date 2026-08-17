@@ -721,6 +721,24 @@ bool GLContext::texImage(
         // fbo-generatemipmap-formats:119-124 allocates every mip above 0
         // that way.
         if (resolvedPixels != nullptr && !image.rgba8.empty()) {
+            // ...with one exception, and it is the reason two
+            // `fbo-generatemipmap-formats` subtests fail. For
+            // GL_COMPRESSED_RGBA_S3TC_DXT1_EXT the uncompressed upload is
+            // NOT a strictly better image: it is an image the format cannot
+            // represent. Punch-through alpha maps every texel with alpha <
+            // 0.5 to transparent BLACK, discarding its colour, and every
+            // other texel to alpha 1.0. Sampling the pristine upload hands
+            // back the discarded colour. MEASURED at d1691d6:
+            // fbo-generatemipmap-formats GL_EXT_texture_compression_s3tc
+            // probe (1,1) expected 0 0 0 0, observed 255 0 0 0 -- the
+            // alpha-0 red quadrant, still red.
+            //
+            // See applyDXT1PunchThrough in S3TCEncode.h. Run before the
+            // encode so the blocks and the sampled image agree; it is
+            // idempotent and the encoder's own mode choice is unaffected.
+            appgl::s3tc::applyDXT1PunchThrough(
+                internalFormatEnum, image.rgba8.data(),
+                image.rgba8.size() / 4u);
             std::vector<std::uint8_t> encodedBlocks;
             if (appgl::s3tc::encodeImage(
                     internalFormatEnum, image.rgba8.data(),
@@ -2234,6 +2252,24 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         object->desc.layers = (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
                                effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY ||
                                effectiveTarget == GL_TEXTURE_CUBE_MAP) ? object->desc.depth : 1;
+    }
+
+    // `data` is a GL_PIXEL_UNPACK_BUFFER byte offset — not a client
+    // pointer — whenever a PBO is bound, exactly as in
+    // compressedTextureSubImage2D / compressedTextureSubImage3D (see
+    // GLContextTexture.inc.mm:689 and :909, which already do this).
+    // Without the resolve, a PBO upload arrives as `data == nullptr`
+    // (offset 0) and both the CPU shadow and the Metal replaceRegion are
+    // skipped, leaving the texture zero-filled:
+    // spec@ext_texture_array@compressed "teximage pbo" sampled all-black.
+    {
+        auto [resolvedData, pboOk] = impl_->resolveUnpackPBO(
+            data, static_cast<std::size_t>(std::max<GLsizei>(imageSize, 0)), 1);
+        if (!pboOk) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        data = resolvedData;
     }
 
     GLTextureImageLevel image;

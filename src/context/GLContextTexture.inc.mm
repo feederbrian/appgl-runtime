@@ -2322,8 +2322,16 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                 const std::uint16_t c1 = readLE16(colorBlock + 2);
                 expand565(c0, colors[0]);
                 expand565(c1, colors[1]);
+                // DXT3/DXT5 carry alpha separately and always use the
+                // 4-colour ramp. BOTH DXT1 variants pick their mode from the
+                // c0/c1 ordering: c0 <= c1 selects the 3-colour ramp whose
+                // index 3 is black. The variants differ only in that index
+                // 3's alpha is 1.0 for the RGB format (whose alpha is defined
+                // to be 1.0 everywhere) and 0.0 for the RGBA format, where it
+                // is the one-bit punch-through. Forcing RGB_DXT1 to four
+                // colours here decoded that black texel as the c0/c1 endpoint
+                // colour instead.
                 const bool forceFourColor =
-                    internalFormat == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ||
                     internalFormat == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT ||
                     internalFormat == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT ||
                     c0 > c1;
@@ -2345,7 +2353,10 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                     colors[3][c] = 0u;
                 }
                 colors[2][3] = 255u;
-                colors[3][3] = 0u;
+                colors[3][3] =
+                    internalFormat == GL_COMPRESSED_RGB_S3TC_DXT1_EXT
+                        ? 255u
+                        : 0u;
             };
             const auto decodeExplicitAlphaDXT3 =
                 [](const std::uint8_t* blockBytes, std::uint8_t alphas[16]) {
@@ -2454,6 +2465,175 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             }
             return true;
         };
+    // Pack one decoded RGBA8 texel into a packed destination type. Field i of
+    // the packed word takes RGBA component order[i], per the base format.
+    // Returns false for any format/type combination this helper does not
+    // implement, so the caller can fall through unchanged.
+    const auto packedTexelFromRGBA8 =
+        [&](const std::uint8_t rgba[4], std::uint8_t* dp) -> bool {
+            int order[4] = {0, 1, 2, 3};
+            std::size_t fields = 0;
+            switch (format) {
+                case GL_RGB:
+                    order[0] = 0; order[1] = 1; order[2] = 2; fields = 3; break;
+                case GL_BGR:
+                    order[0] = 2; order[1] = 1; order[2] = 0; fields = 3; break;
+                case GL_RGBA:
+                    order[0] = 0; order[1] = 1; order[2] = 2; order[3] = 3;
+                    fields = 4; break;
+                case GL_BGRA:
+                    order[0] = 2; order[1] = 1; order[2] = 0; order[3] = 3;
+                    fields = 4; break;
+                default:
+                    return false;
+            }
+            const auto q = [&](std::size_t field, unsigned bits) -> std::uint32_t {
+                const unsigned maxVal = (1u << bits) - 1u;
+                const unsigned v = rgba[order[field]];
+                return static_cast<std::uint32_t>((v * maxVal + 127u) / 255u);
+            };
+            const auto put16 = [&](std::uint16_t v) { std::memcpy(dp, &v, 2); };
+            const auto put32 = [&](std::uint32_t v) { std::memcpy(dp, &v, 4); };
+            switch (type) {
+                case GL_UNSIGNED_BYTE_3_3_2:
+                    if (fields != 3) return false;
+                    dp[0] = static_cast<std::uint8_t>(
+                        (q(0, 3) << 5) | (q(1, 3) << 2) | q(2, 2));
+                    return true;
+                case GL_UNSIGNED_BYTE_2_3_3_REV:
+                    if (fields != 3) return false;
+                    dp[0] = static_cast<std::uint8_t>(
+                        (q(2, 2) << 6) | (q(1, 3) << 3) | q(0, 3));
+                    return true;
+                case GL_UNSIGNED_SHORT_5_6_5:
+                    if (fields != 3) return false;
+                    put16(static_cast<std::uint16_t>(
+                        (q(0, 5) << 11) | (q(1, 6) << 5) | q(2, 5)));
+                    return true;
+                case GL_UNSIGNED_SHORT_5_6_5_REV:
+                    if (fields != 3) return false;
+                    put16(static_cast<std::uint16_t>(
+                        (q(2, 5) << 11) | (q(1, 6) << 5) | q(0, 5)));
+                    return true;
+                case GL_UNSIGNED_SHORT_4_4_4_4:
+                    if (fields != 4) return false;
+                    put16(static_cast<std::uint16_t>(
+                        (q(0, 4) << 12) | (q(1, 4) << 8) |
+                        (q(2, 4) << 4) | q(3, 4)));
+                    return true;
+                case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+                    if (fields != 4) return false;
+                    put16(static_cast<std::uint16_t>(
+                        (q(3, 4) << 12) | (q(2, 4) << 8) |
+                        (q(1, 4) << 4) | q(0, 4)));
+                    return true;
+                case GL_UNSIGNED_SHORT_5_5_5_1:
+                    if (fields != 4) return false;
+                    put16(static_cast<std::uint16_t>(
+                        (q(0, 5) << 11) | (q(1, 5) << 6) |
+                        (q(2, 5) << 1) | q(3, 1)));
+                    return true;
+                case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+                    if (fields != 4) return false;
+                    put16(static_cast<std::uint16_t>(
+                        (q(3, 1) << 15) | (q(2, 5) << 10) |
+                        (q(1, 5) << 5) | q(0, 5)));
+                    return true;
+                case GL_UNSIGNED_INT_8_8_8_8:
+                    if (fields != 4) return false;
+                    put32((q(0, 8) << 24) | (q(1, 8) << 16) |
+                          (q(2, 8) << 8) | q(3, 8));
+                    return true;
+                case GL_UNSIGNED_INT_8_8_8_8_REV:
+                    if (fields != 4) return false;
+                    put32((q(3, 8) << 24) | (q(2, 8) << 16) |
+                          (q(1, 8) << 8) | q(0, 8));
+                    return true;
+                case GL_UNSIGNED_INT_10_10_10_2:
+                    if (fields != 4) return false;
+                    put32((q(0, 10) << 22) | (q(1, 10) << 12) |
+                          (q(2, 10) << 2) | q(3, 2));
+                    return true;
+                case GL_UNSIGNED_INT_2_10_10_10_REV:
+                    if (fields != 4) return false;
+                    put32((q(3, 2) << 30) | (q(2, 10) << 20) |
+                          (q(1, 10) << 10) | q(0, 10));
+                    return true;
+                default:
+                    return false;
+            }
+        };
+    // glGetTexImage of a compressed level into a *packed* destination type.
+    // The decoded RGBA8 cannot go through copySimpleTextureLevelShadow: that
+    // helper is component-oriented and rejects packed types outright (see the
+    // `if (isPackedPixelType(type)) return false;` guard in GLContext.mm), so
+    // the readback used to write nothing at all — which is exactly why
+    // `s3tc-targeted` read back its own 0xBEEF poison from all four probes.
+    // Pack here instead, scoped to this S3TC decode path.
+    const auto writeDecodedRGBA8AsPackedType =
+        [&](const std::vector<std::uint8_t>& rgba8,
+            const GLTextureDesc& desc,
+            void* dstPixels) -> bool {
+            const GLPixelStoreState& packStore = impl_->state->pixelStore();
+            if (dstPixels == nullptr || packStore.packSwapBytes == GL_TRUE) {
+                return false;
+            }
+            const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+            if (dstPixelBytes == 0 || dstPixelBytes > 4u) {
+                return false;
+            }
+            // Probe before writing anything: packedTexelFromRGBA8 depends only
+            // on format/type, so this either succeeds for every texel or for
+            // none, and no partial destination is ever left behind.
+            std::uint8_t probe[4] = {};
+            const std::uint8_t zeroTexel[4] = {0u, 0u, 0u, 0u};
+            if (!packedTexelFromRGBA8(zeroTexel, probe)) {
+                return false;
+            }
+            const std::size_t texW =
+                static_cast<std::size_t>(std::max<GLsizei>(desc.width, 1));
+            const std::size_t texH =
+                static_cast<std::size_t>(std::max<GLsizei>(desc.height, 1));
+            const std::size_t texD =
+                static_cast<std::size_t>(textureDepthForReadback(desc));
+            if (rgba8.size() < texW * texH * texD * 4u) {
+                return false;
+            }
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : texW;
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+            const std::size_t dstImageHeight = packStore.packImageHeight > 0
+                ? static_cast<std::size_t>(packStore.packImageHeight)
+                : texH;
+            const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+            const std::size_t dstSkipBytes =
+                static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+                static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+                static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+            const std::size_t lastByte =
+                dstSkipBytes +
+                (texD - 1u) * dstSliceBytes +
+                (texH - 1u) * dstRowBytes +
+                texW * dstPixelBytes;
+            if (bufSize > 0 && static_cast<std::size_t>(bufSize) < lastByte) {
+                return false;
+            }
+            auto* dstBase = static_cast<std::uint8_t*>(dstPixels) + dstSkipBytes;
+            for (std::size_t z = 0; z < texD; ++z) {
+                for (std::size_t y = 0; y < texH; ++y) {
+                    std::uint8_t* dstRow =
+                        dstBase + z * dstSliceBytes + y * dstRowBytes;
+                    for (std::size_t x = 0; x < texW; ++x) {
+                        const std::uint8_t* srcTexel = rgba8.data() +
+                            (((z * texH + y) * texW + x) * 4u);
+                        packedTexelFromRGBA8(srcTexel, dstRow + x * dstPixelBytes);
+                    }
+                }
+            }
+            return true;
+        };
     const auto tryCompressedDataDecompressedReadback =
         [&]() -> std::pair<bool, bool> {
             const GLTextureImageLevel* image = levelImageForReadback();
@@ -2508,6 +2688,19 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                     return {true, false};
                 }
                 dst = packDest;
+            }
+
+            if (isPackedPixelType(type)) {
+                if (!writeDecodedRGBA8AsPackedType(
+                        decodedRGBA8, image->desc, dst)) {
+                    return {false, false};
+                }
+                impl_->drainPendingGpuProducers({
+                    {Impl::GpuResourceAccess::Kind::Texture,
+                     texture,
+                     kProducerAll},
+                });
+                return {true, true};
             }
 
             GLTextureImageLevel decoded = *image;
