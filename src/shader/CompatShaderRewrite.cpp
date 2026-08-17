@@ -490,6 +490,10 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
         "    return vec4(texture(s, p));\n"
         "}\n",
         nullptr,
+        // ARB_texture_rectangle (not just EXT_gpu_shader4) adds this builtin
+        // to GLSL 1.10/1.20, so it has to be wrapped on the plain legacy path
+        // as well — see the sibling comment on `isLegacyDesktopTextureAlias`.
+        true,
     },
     {
         "shadow2DRectProj",
@@ -498,6 +502,7 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
         "    return vec4(textureProj(s, p));\n"
         "}\n",
         nullptr,
+        true,
     },
     {
         "shadow1DArrayOffset",
@@ -847,9 +852,24 @@ bool startsWith(std::string_view text, std::string_view prefix) {
            text.substr(0, prefix.size()) == prefix;
 }
 
+// This list is exactly the set of legacy texture builtins whose spelling
+// collides with a glslang *type* keyword once the front end is driven with
+// Vulkan client semantics, which is how we drive it
+// (`ShaderTranslator.cpp:7489` sets `EShClientVulkan`). In that mode
+// `Scan.cpp:1757-1763` promotes TEXTURE1D / TEXTURE2DRECT / TEXTURE1DARRAY
+// (and `:1621-1632` TEXTURE2D / TEXTURECUBE / TEXTURE2DARRAY / TEXTURE3D)
+// from identifiers to separate-image type keywords, while
+// `Initialize.cpp:1780-1827` withholds the matching legacy *functions*
+// because they sit behind `if (spvVersion.spv == 0)`. A legacy call such as
+// `texture2DRect(tex, uv)` therefore parses as a constructor for an opaque
+// image type, and glslang reports
+// "'sampler/image' : cannot construct this type".
+// `texture2D`/`textureCube` are renamed by the section-4 source rewrite
+// below; every other colliding spelling has to be renamed here.
 bool isLegacyDesktopTextureAlias(std::string_view legacyName) {
     return startsWith(legacyName, "texture1DArray") ||
            startsWith(legacyName, "texture2DArray") ||
+           startsWith(legacyName, "texture2DRect") ||
            startsWith(legacyName, "texture1D") ||
            startsWith(legacyName, "texture3D");
 }
