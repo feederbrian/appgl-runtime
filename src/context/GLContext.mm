@@ -499,6 +499,69 @@ static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
 #ifndef GL_LUMINANCE_ALPHA8I_EXT
 #define GL_LUMINANCE_ALPHA8I_EXT 0x8D93
 #endif
+// R1.0-c item #10 — EXT_texture_integer ALPHA / LUMINANCE / INTENSITY
+// sized internal formats and their integer external upload formats. The
+// 8-bit row of this table was already present; the 16- and 32-bit rows
+// and all three integer external formats were missing entirely, so
+// glTexImage2D(GL_ALPHA16I_EXT, ...) fell through the upload validator
+// and dropped its payload with GL_INVALID_ENUM.
+#ifndef GL_ALPHA32UI_EXT
+#define GL_ALPHA32UI_EXT 0x8D72
+#endif
+#ifndef GL_INTENSITY32UI_EXT
+#define GL_INTENSITY32UI_EXT 0x8D73
+#endif
+#ifndef GL_LUMINANCE32UI_EXT
+#define GL_LUMINANCE32UI_EXT 0x8D74
+#endif
+#ifndef GL_LUMINANCE_ALPHA32UI_EXT
+#define GL_LUMINANCE_ALPHA32UI_EXT 0x8D75
+#endif
+#ifndef GL_ALPHA16UI_EXT
+#define GL_ALPHA16UI_EXT 0x8D78
+#endif
+#ifndef GL_INTENSITY16UI_EXT
+#define GL_INTENSITY16UI_EXT 0x8D79
+#endif
+#ifndef GL_LUMINANCE16UI_EXT
+#define GL_LUMINANCE16UI_EXT 0x8D7A
+#endif
+#ifndef GL_LUMINANCE_ALPHA16UI_EXT
+#define GL_LUMINANCE_ALPHA16UI_EXT 0x8D7B
+#endif
+#ifndef GL_ALPHA32I_EXT
+#define GL_ALPHA32I_EXT 0x8D84
+#endif
+#ifndef GL_INTENSITY32I_EXT
+#define GL_INTENSITY32I_EXT 0x8D85
+#endif
+#ifndef GL_LUMINANCE32I_EXT
+#define GL_LUMINANCE32I_EXT 0x8D86
+#endif
+#ifndef GL_LUMINANCE_ALPHA32I_EXT
+#define GL_LUMINANCE_ALPHA32I_EXT 0x8D87
+#endif
+#ifndef GL_ALPHA16I_EXT
+#define GL_ALPHA16I_EXT 0x8D8A
+#endif
+#ifndef GL_INTENSITY16I_EXT
+#define GL_INTENSITY16I_EXT 0x8D8B
+#endif
+#ifndef GL_LUMINANCE16I_EXT
+#define GL_LUMINANCE16I_EXT 0x8D8C
+#endif
+#ifndef GL_LUMINANCE_ALPHA16I_EXT
+#define GL_LUMINANCE_ALPHA16I_EXT 0x8D8D
+#endif
+#ifndef GL_ALPHA_INTEGER_EXT
+#define GL_ALPHA_INTEGER_EXT 0x8D97
+#endif
+#ifndef GL_LUMINANCE_INTEGER_EXT
+#define GL_LUMINANCE_INTEGER_EXT 0x8D9C
+#endif
+#ifndef GL_LUMINANCE_ALPHA_INTEGER_EXT
+#define GL_LUMINANCE_ALPHA_INTEGER_EXT 0x8D9D
+#endif
 #ifndef GL_ALPHA32F_ARB
 #define GL_ALPHA32F_ARB 0x8816
 #endif
@@ -6461,6 +6524,51 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
             return appglCompatProfileEnabled()
                 ? MTLPixelFormatRG8Uint
                 : MTLPixelFormatInvalid;
+        // R1.0-c item #10 — 16/32-bit rows of the same table. ALPHA,
+        // LUMINANCE and INTENSITY are all single-channel storage on Metal
+        // (the channel-fill difference is a sampling/swizzle concern, not a
+        // storage one, exactly as for the 8-bit row above);
+        // LUMINANCE_ALPHA is two-channel.
+        case GL_ALPHA16I_EXT:
+        case GL_LUMINANCE16I_EXT:
+        case GL_INTENSITY16I_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatR16Sint
+                : MTLPixelFormatInvalid;
+        case GL_LUMINANCE_ALPHA16I_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRG16Sint
+                : MTLPixelFormatInvalid;
+        case GL_ALPHA16UI_EXT:
+        case GL_LUMINANCE16UI_EXT:
+        case GL_INTENSITY16UI_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatR16Uint
+                : MTLPixelFormatInvalid;
+        case GL_LUMINANCE_ALPHA16UI_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRG16Uint
+                : MTLPixelFormatInvalid;
+        case GL_ALPHA32I_EXT:
+        case GL_LUMINANCE32I_EXT:
+        case GL_INTENSITY32I_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatR32Sint
+                : MTLPixelFormatInvalid;
+        case GL_LUMINANCE_ALPHA32I_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRG32Sint
+                : MTLPixelFormatInvalid;
+        case GL_ALPHA32UI_EXT:
+        case GL_LUMINANCE32UI_EXT:
+        case GL_INTENSITY32UI_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatR32Uint
+                : MTLPixelFormatInvalid;
+        case GL_LUMINANCE_ALPHA32UI_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRG32Uint
+                : MTLPixelFormatInvalid;
         // Generic "compressed" internal formats — resolve to the
         // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
         // driver to choose compression or keep the texture uncompressed.
@@ -6766,6 +6874,12 @@ bool isLegacyCompatTextureExternalFormat(GLenum format) {
         case GL_LUMINANCE_ALPHA:
         case GL_INTENSITY:
         case GL_ABGR_EXT:
+        // R1.0-c item #10 — EXT_texture_integer external formats. These
+        // carry the same channel-fill semantics as their non-integer
+        // spellings above.
+        case GL_ALPHA_INTEGER_EXT:
+        case GL_LUMINANCE_INTEGER_EXT:
+        case GL_LUMINANCE_ALPHA_INTEGER_EXT:
             return true;
         default:
             return false;
@@ -6840,6 +6954,23 @@ bool isLegacyCompatTextureInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        // R1.0-c item #10 — 16/32-bit rows.
+        case GL_ALPHA16I_EXT:
+        case GL_ALPHA16UI_EXT:
+        case GL_ALPHA32I_EXT:
+        case GL_ALPHA32UI_EXT:
+        case GL_LUMINANCE16I_EXT:
+        case GL_LUMINANCE16UI_EXT:
+        case GL_LUMINANCE32I_EXT:
+        case GL_LUMINANCE32UI_EXT:
+        case GL_INTENSITY16I_EXT:
+        case GL_INTENSITY16UI_EXT:
+        case GL_INTENSITY32I_EXT:
+        case GL_INTENSITY32UI_EXT:
+        case GL_LUMINANCE_ALPHA16I_EXT:
+        case GL_LUMINANCE_ALPHA16UI_EXT:
+        case GL_LUMINANCE_ALPHA32I_EXT:
+        case GL_LUMINANCE_ALPHA32UI_EXT:
         case GL_COMPRESSED_ALPHA:
         case GL_COMPRESSED_LUMINANCE:
         case GL_COMPRESSED_LUMINANCE_ALPHA:
@@ -7187,6 +7318,27 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
         case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        // R1.0-c item #10 — 16/32-bit rows of the same EXT_texture_integer
+        // table. This is the third and last gate an A/L/I integer upload has
+        // to clear (after isValidLegacyUploadInternalFormat and
+        // isFormatCompatibleWithInternalFormat); metalRenderbufferFormat
+        // resolves each to the matching R/RG {16,32} {Sint,Uint} format.
+        case GL_ALPHA16I_EXT:
+        case GL_ALPHA16UI_EXT:
+        case GL_ALPHA32I_EXT:
+        case GL_ALPHA32UI_EXT:
+        case GL_LUMINANCE16I_EXT:
+        case GL_LUMINANCE16UI_EXT:
+        case GL_LUMINANCE32I_EXT:
+        case GL_LUMINANCE32UI_EXT:
+        case GL_INTENSITY16I_EXT:
+        case GL_INTENSITY16UI_EXT:
+        case GL_INTENSITY32I_EXT:
+        case GL_INTENSITY32UI_EXT:
+        case GL_LUMINANCE_ALPHA16I_EXT:
+        case GL_LUMINANCE_ALPHA16UI_EXT:
+        case GL_LUMINANCE_ALPHA32I_EXT:
+        case GL_LUMINANCE_ALPHA32UI_EXT:
             return appglCompatProfileEnabled();
         case GL_COMPRESSED_ALPHA:
         case GL_COMPRESSED_LUMINANCE:
@@ -7575,6 +7727,21 @@ GLfloat linearToSRGBValue(GLfloat value) {
         return 12.92f * clamped;
     }
     return 1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f;
+}
+
+// GL 4.6 core §8.24 equation 8.14 — the sRGB DECODE, inverse of
+// linearToSRGBValue above. Used by BlitFramebuffer (§18.3.1 rule (1)):
+// "When values are taken from the read buffer, if FRAMEBUFFER_SRGB is
+// enabled and the value of FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING for the
+// framebuffer attachment corresponding to the read buffer is SRGB, the
+// red, green, and blue components are converted from the non-linear sRGB
+// color space according to equation 8.14."
+GLfloat srgbToLinearValue(GLfloat value) {
+    const GLfloat clamped = std::clamp(value, 0.0f, 1.0f);
+    if (clamped <= 0.04045f) {
+        return clamped / 12.92f;
+    }
+    return std::pow((clamped + 0.055f) / 1.055f, 2.4f);
 }
 
 std::uint8_t normalizedSignedByte(GLfloat value) {
@@ -11183,6 +11350,9 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
+        // §17.3.9 linear render-target view lives on the storage.
+        releaseRetainedMetalObject(object.metalLinearRenderView);
+        object.metalLinearRenderView = nullptr;
         object.r5SwizzledViewLastUseSerial = 0;
         object.r5SwizzledViewLastUseBoundarySerial = 0;
         object.r5SwizzledViewEvicted = false;
@@ -11309,6 +11479,9 @@ struct GLContext::Impl {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
+        // §17.3.9 linear render-target view lives on the storage.
+        releaseRetainedMetalObject(object.metalLinearRenderView);
+        object.metalLinearRenderView = nullptr;
         object.internalFormat = 0;
         object.width = 0;
         object.height = 0;
@@ -15786,6 +15959,17 @@ struct GLContext::Impl {
                 if (samples <= 1) {
                     rbUsage |= MTLTextureUsageShaderWrite;
                 }
+                // ARB_framebuffer_sRGB §17.3.9 — an sRGB renderbuffer must
+                // be bindable as a *linear* render target while
+                // GL_FRAMEBUFFER_SRGB is disabled, otherwise Metal's ROP
+                // applies an encode GL never asked for. That needs a
+                // format view over the same storage. Restricted to sRGB
+                // formats so no other renderbuffer loses lossless
+                // compression to an unnecessary usage bit.
+                if (linearCounterpartForSRGBFormat(pixelFormat) !=
+                    MTLPixelFormatInvalid) {
+                    rbUsage |= MTLTextureUsagePixelFormatView;
+                }
                 descriptor.usage = rbUsage;
                 if (samples > 1) {
                     descriptor.textureType = MTLTextureType2DMultisample;
@@ -18367,12 +18551,32 @@ struct GLContext::Impl {
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer.metalTexture;
         if (metalTex.sampleCount > 1) return false;
         const MTLPixelFormat pf = metalTex.pixelFormat;
-        if (pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
-            pf != MTLPixelFormatDepth32Float_Stencil8) {
+        // R1.0-c item #6: this gate accepted ONLY the two packed
+        // depth-stencil Metal formats, so a GL_DEPTH_COMPONENT16/24/32/32F
+        // renderbuffer — MTLPixelFormatDepth16Unorm or
+        // MTLPixelFormatDepth32Float (GLCapabilities.mm:618-621) — was
+        // rejected here. writeDepthAttachmentPixels then fell back to the CPU
+        // shadow alone and cleared `wasMetalDepthRendered`, so every CPU depth
+        // write to a depth-only renderbuffer became invisible to the GPU and
+        // any render pass that followed it was read back from a stale shadow.
+        // That is why `fbo-depth …-blit` failed on exactly the four
+        // DEPTH_COMPONENT formats while the two packed formats passed.
+        const bool packedDepthStencilFormat =
+            pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            pf == MTLPixelFormatDepth32Float_Stencil8;
+        const bool depthOnlyFormat =
+            pf == MTLPixelFormatDepth32Float ||
+            pf == MTLPixelFormatDepth16Unorm;
+        if (!packedDepthStencilFormat && !depthOnlyFormat) {
             return false;
         }
 
-        const NSUInteger depthBpp = 4;
+        // Depth16Unorm stores two bytes per texel; every other accepted
+        // format stores four. MTLBlitOptionDepthFromDepthStencil is only
+        // legal against a combined depth-stencil texture — a depth-only
+        // destination must use MTLBlitOptionNone.
+        const NSUInteger depthBpp =
+            pf == MTLPixelFormatDepth16Unorm ? 2 : 4;
         const NSUInteger depthTightRowBytes =
             static_cast<NSUInteger>(width) * depthBpp;
         const NSUInteger depthRowBytes = static_cast<NSUInteger>(
@@ -18389,9 +18593,15 @@ struct GLContext::Impl {
                            static_cast<std::size_t>(width) +
                            static_cast<std::size_t>(col)],
                     0.0f, 1.0f);
-                if (pf == MTLPixelFormatDepth32Float_Stencil8) {
+                if (pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                    pf == MTLPixelFormatDepth32Float) {
                     std::memcpy(dstRow + static_cast<std::size_t>(col) * depthBpp,
                                 &d, sizeof(d));
+                } else if (pf == MTLPixelFormatDepth16Unorm) {
+                    const std::uint16_t depth16 = static_cast<std::uint16_t>(
+                        packReadbackBits(static_cast<double>(d), 0xFFFFu, false));
+                    std::memcpy(dstRow + static_cast<std::size_t>(col) * depthBpp,
+                                &depth16, sizeof(depth16));
                 } else {
                     const std::uint32_t depth24 =
                         packReadbackBits(static_cast<double>(d), 0x00FFFFFFu, false);
@@ -18421,7 +18631,9 @@ struct GLContext::Impl {
             destinationSlice:0
             destinationLevel:0
            destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
-                     options:MTLBlitOptionDepthFromDepthStencil];
+                     options:(packedDepthStencilFormat
+                                  ? MTLBlitOptionDepthFromDepthStencil
+                                  : MTLBlitOptionNone)];
         [blit endEncoding];
         lease.commitAndWait(AppGLCommandReason::RenderbufferMirror);
         renderbuffer.wasMetalDepthRendered = true;
@@ -24894,6 +25106,102 @@ struct GLContext::Impl {
         return nullptr;
     }
 
+    // ------------------------------------------------------------------
+    // ARB_framebuffer_sRGB write path (GL 4.6 §17.3.9 "sRGB Conversion").
+    //
+    //   "If FRAMEBUFFER_SRGB is enabled and the value of
+    //    FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING for the framebuffer
+    //    attachment corresponding to the destination buffer is SRGB, the
+    //    R, G, and B values after blending are converted into the
+    //    non-linear sRGB color space [...]. If FRAMEBUFFER_SRGB is
+    //    disabled [...] then [no conversion is applied]."
+    //
+    // Metal has no equivalent switch: an *_sRGB render-target pixel
+    // format applies the encode in the ROP on every store, whatever the
+    // GL state says. GL_SRGB8_ALPHA8 maps to
+    // MTLPixelFormatRGBA8Unorm_sRGB (GLCapabilities.mm:571), so a draw
+    // into an sRGB FBO with GL_FRAMEBUFFER_SRGB *disabled* stored
+    // encode(x) instead of x — piglit `arb_framebuffer_srgb-blit
+    // <backing> srgb <blit> disabled render` observed 13/255 where it
+    // expected 1/255, which is exactly linearToSRGBValue(1/255)*255.
+    // The clear path never had this defect because it goes through the
+    // CPU shadow and is already gated
+    // (encodeRGBA8ClearBytesForAttachment, called from the clear site
+    // with state->isEnabled(GL_FRAMEBUFFER_SRGB)); that asymmetry is
+    // why `srgb ... disabled clear` passed while `... disabled render`
+    // failed with otherwise identical state.
+    //
+    // The gate: while GL_FRAMEBUFFER_SRGB is disabled, bind a
+    // linear-format MTLTexture view over the same storage as the colour
+    // attachment, so the ROP stores raw values. While it is enabled the
+    // sRGB texture itself is bound and Metal's encode is exactly the
+    // conversion GL asks for. The render-pipeline colour format is
+    // derived from the bound attachment's pixelFormat
+    // (MetalFrameGraph.mm:8390), so the pipeline follows automatically.
+    //
+    // This generalises the "Mode 2" workaround already applied to MS
+    // sRGB textures at MS-allocation time (see GLContext.mm ~17984),
+    // which was recorded as platform-blocked. It is not: Metal permits
+    // an sRGB<->linear format view on any texture created with
+    // MTLTextureUsagePixelFormatView.
+    static MTLPixelFormat linearCounterpartForSRGBFormat(MTLPixelFormat pf) {
+        switch (pf) {
+            case MTLPixelFormatRGBA8Unorm_sRGB: return MTLPixelFormatRGBA8Unorm;
+            case MTLPixelFormatBGRA8Unorm_sRGB: return MTLPixelFormatBGRA8Unorm;
+            case MTLPixelFormatR8Unorm_sRGB:    return MTLPixelFormatR8Unorm;
+            case MTLPixelFormatRG8Unorm_sRGB:   return MTLPixelFormatRG8Unorm;
+            default: return MTLPixelFormatInvalid;
+        }
+    }
+
+    // Returns `baseTextureRaw` unchanged unless the storage is an
+    // *_sRGB Metal format AND GL_FRAMEBUFFER_SRGB is currently
+    // disabled; in that case returns a cached linear-format view over
+    // the same storage. `cachedView` is the owning slot on the GL
+    // object. Falls back to the unmodified texture whenever the view
+    // cannot be created (e.g. the storage lacks
+    // MTLTextureUsagePixelFormatView), which reproduces the previous
+    // behaviour rather than failing the draw.
+    void* linearRenderTargetViewForSRGBAttachment(void*& cachedView,
+                                                  void* baseTextureRaw) {
+        if (baseTextureRaw == nullptr) {
+            return baseTextureRaw;
+        }
+        if (state != nullptr && state->isEnabled(GL_FRAMEBUFFER_SRGB)) {
+            return baseTextureRaw;
+        }
+        id<MTLTexture> baseTex = metalTextureFromRaw(baseTextureRaw);
+        if (baseTex == nil) {
+            return baseTextureRaw;
+        }
+        const MTLPixelFormat linearFormat =
+            linearCounterpartForSRGBFormat(baseTex.pixelFormat);
+        if (linearFormat == MTLPixelFormatInvalid) {
+            return baseTextureRaw;
+        }
+        if (cachedView != nullptr) {
+            id<MTLTexture> existing = metalTextureFromRaw(cachedView);
+            // `parentTexture` identity is the staleness check: a
+            // respecified texture/renderbuffer replaces metalTexture,
+            // and the old view (which still retains its own parent, so
+            // this is never a dangling read) no longer matches.
+            if (existing != nil &&
+                existing.pixelFormat == linearFormat &&
+                existing.parentTexture == baseTex) {
+                return cachedView;
+            }
+            releaseRetainedMetalObject(cachedView);
+            cachedView = nullptr;
+        }
+        id<MTLTexture> view =
+            [baseTex newTextureViewWithPixelFormat:linearFormat];
+        if (view == nil) {
+            return baseTextureRaw;
+        }
+        cachedView = transferRetainedMetalObject(view);
+        return cachedView;
+    }
+
     // Resolve the bound draw-framebuffer's color attachment to a Metal
     // texture suitable for use as a render target.  Returns nullptr when
     // the default framebuffer is bound (FBO 0) or when the attachment
@@ -24982,7 +25290,11 @@ struct GLContext::Impl {
                                                           att->object);
                 }
                 if (texObj != nullptr && texObj->metalTexture != nullptr) {
-                    tex = texObj->metalTexture;
+                    // §17.3.9 write-path gate — see
+                    // linearRenderTargetViewForSRGBAttachment.
+                    tex = linearRenderTargetViewForSRGBAttachment(
+                        texObj->metalLinearRenderView,
+                        texObj->metalTexture);
                     slotAlphaMode =
                         fboColorAlphaModeForInternalFormat(
                             texObj->desc.internalFormat);
@@ -25067,9 +25379,13 @@ struct GLContext::Impl {
                     }
                 }
             } else if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
-                const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
+                GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
                 if (rb != nullptr && rb->metalTexture != nullptr) {
-                    tex = rb->metalTexture;
+                    // §17.3.9 write-path gate — see
+                    // linearRenderTargetViewForSRGBAttachment.
+                    tex = linearRenderTargetViewForSRGBAttachment(
+                        rb->metalLinearRenderView,
+                        rb->metalTexture);
                     slotAlphaMode =
                         fboColorAlphaModeForInternalFormat(rb->internalFormat);
                     w = rb->width;
@@ -31131,6 +31447,92 @@ struct GLContext::Impl {
             // depth-only FBOs. Treat a missing color attachment as a color
             // no-op, matching the depth/stencil branches below.
             if (readDefaultFramebuffer || srcAttachment != nullptr) {
+                // GL 4.6 §18.3.1 rule (1) (read side, equation 8.14) and
+                // §17.3.9 (write side, equation 17.1): with FRAMEBUFFER_SRGB
+                // ENABLED a blit DECODES values taken from a read buffer whose
+                // FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING is SRGB, and ENCODES
+                // values written to a draw buffer whose COLOR_ENCODING is
+                // SRGB. With FRAMEBUFFER_SRGB DISABLED neither conversion
+                // happens and the blit preserves the stored bit pattern (the
+                // pre-4.4 GL rule that piglit's arb_framebuffer_srgb-blit
+                // still checks). sRGB -> sRGB under the enable is
+                // decode-then-encode, i.e. the identity, so it is
+                // short-circuited below to stay bit-exact.
+                const bool blitFramebufferSRGBEnabled =
+                    state->isEnabled(GL_FRAMEBUFFER_SRGB);
+                auto blitAttachmentEncodingIsSRGB =
+                    [&](const GLFramebufferAttachment* attachment) -> bool {
+                    // A null attachment means the default framebuffer, which
+                    // reports GL_LINEAR for COLOR_ENCODING
+                    // (GLContextFramebuffer.inc.mm:1138).
+                    if (attachment == nullptr) {
+                        return false;
+                    }
+                    if (attachment->kind ==
+                        GLFramebufferAttachment::Kind::Texture) {
+                        const ResolvedTextureAttachment resolved =
+                            resolveTextureAttachmentStorage(*attachment);
+                        const GLTextureObject* texture =
+                            resolved.storageTexture;
+                        if (!resolved.valid || texture == nullptr) {
+                            return false;
+                        }
+                        if (resolved.attachedTexture != nullptr &&
+                            resolved.attachedTexture->desc.internalFormat != 0) {
+                            return isSRGBTextureFormat(
+                                resolved.attachedTexture->desc.internalFormat);
+                        }
+                        const auto level = texture->levels.find(resolved.level);
+                        return level != texture->levels.end() &&
+                               level->second.defined &&
+                               isSRGBTextureFormat(
+                                   level->second.desc.internalFormat);
+                    }
+                    if (attachment->kind ==
+                        GLFramebufferAttachment::Kind::Renderbuffer) {
+                        const GLRenderbufferObject* renderbuffer =
+                            objects->renderbuffers().get(attachment->object);
+                        return renderbuffer != nullptr &&
+                               renderbuffer->storageDefined &&
+                               isSRGBTextureFormat(
+                                   renderbuffer->internalFormat);
+                    }
+                    return false;
+                };
+                const bool blitDecodeSourceSRGB =
+                    blitFramebufferSRGBEnabled &&
+                    blitAttachmentEncodingIsSRGB(srcAttachment);
+                auto applyBlitColorEncoding =
+                    [&](const std::uint8_t* pixels,
+                        bool encodeDestinationSRGB,
+                        GLsizei width,
+                        GLsizei height,
+                        std::vector<std::uint8_t>& stage)
+                        -> const std::uint8_t* {
+                    if (blitDecodeSourceSRGB == encodeDestinationSRGB ||
+                        width <= 0 || height <= 0) {
+                        return pixels;
+                    }
+                    const std::size_t pixelCount =
+                        static_cast<std::size_t>(width) *
+                        static_cast<std::size_t>(height);
+                    stage.resize(pixelCount * 4u);
+                    for (std::size_t i = 0; i < pixelCount; ++i) {
+                        const std::uint8_t* in = pixels + i * 4u;
+                        std::uint8_t* out = stage.data() + i * 4u;
+                        for (std::size_t c = 0; c < 3u; ++c) {
+                            const GLfloat v =
+                                static_cast<GLfloat>(in[c]) / 255.0f;
+                            out[c] = normalizedByte(
+                                blitDecodeSourceSRGB
+                                    ? srgbToLinearValue(v)
+                                    : linearToSRGBValue(v));
+                        }
+                        // R, G and B only — alpha is never converted.
+                        out[3] = in[3];
+                    }
+                    return stage.data();
+                };
                 const GLBlendState& blitBlend = state->blendState();
                 const bool fullBlitColorMask =
                     blitBlend.colorMask[0] != GL_FALSE &&
@@ -31152,6 +31554,16 @@ struct GLContext::Impl {
                             continue;
                         }
                         sawColorDestination = true;
+                        // Both bit-exact fast paths below copy the stored
+                        // bytes verbatim, so neither can carry the sRGB
+                        // decode/encode this pair needs. Force the staged
+                        // path for that case.
+                        if (blitDecodeSourceSRGB !=
+                            (blitFramebufferSRGBEnabled &&
+                             blitAttachmentEncodingIsSRGB(dstAttachment))) {
+                            allColorDestinationsResolved = false;
+                            break;
+                        }
                         if (tryRenderbufferNativeShadowColorBlit(
                                 *srcAttachment, *dstAttachment)) {
                             continue;
@@ -31224,6 +31636,14 @@ struct GLContext::Impl {
                         std::vector<std::uint8_t> clippedColor;
                         const std::uint8_t* writeSrc =
                             copyColorWindow(copySrc, clippedColor);
+                        std::vector<std::uint8_t> encodedColor;
+                        writeSrc = applyBlitColorEncoding(
+                            writeSrc,
+                            blitFramebufferSRGBEnabled &&
+                                blitAttachmentEncodingIsSRGB(dstAttachment),
+                            writeWindow.width,
+                            writeWindow.height,
+                            encodedColor);
                         if (!writeColorAttachmentPixels(*dstAttachment,
                                                         writeWindow.x, writeWindow.y,
                                                         writeWindow.width,

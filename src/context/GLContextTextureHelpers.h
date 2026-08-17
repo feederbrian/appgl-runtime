@@ -31,6 +31,16 @@
 #ifndef GL_LUMINANCE_ALPHA
 #define GL_LUMINANCE_ALPHA 0x190A
 #endif
+// R1.0-c item #10 — EXT_texture_integer external upload formats.
+#ifndef GL_ALPHA_INTEGER_EXT
+#define GL_ALPHA_INTEGER_EXT 0x8D97
+#endif
+#ifndef GL_LUMINANCE_INTEGER_EXT
+#define GL_LUMINANCE_INTEGER_EXT 0x8D9C
+#endif
+#ifndef GL_LUMINANCE_ALPHA_INTEGER_EXT
+#define GL_LUMINANCE_ALPHA_INTEGER_EXT 0x8D9D
+#endif
 #ifndef GL_LUMINANCE4
 #define GL_LUMINANCE4 0x803F
 #endif

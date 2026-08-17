@@ -118,6 +118,69 @@
 #ifndef GL_LUMINANCE_ALPHA8I_EXT
 #define GL_LUMINANCE_ALPHA8I_EXT 0x8D93
 #endif
+// R1.0-c item #10 — EXT_texture_integer ALPHA / LUMINANCE / INTENSITY
+// sized internal formats and their integer external upload formats. The
+// 8-bit row of this table was already present; the 16- and 32-bit rows
+// and all three integer external formats were missing entirely, so
+// glTexImage2D(GL_ALPHA16I_EXT, ...) fell through the upload validator
+// and dropped its payload with GL_INVALID_ENUM.
+#ifndef GL_ALPHA32UI_EXT
+#define GL_ALPHA32UI_EXT 0x8D72
+#endif
+#ifndef GL_INTENSITY32UI_EXT
+#define GL_INTENSITY32UI_EXT 0x8D73
+#endif
+#ifndef GL_LUMINANCE32UI_EXT
+#define GL_LUMINANCE32UI_EXT 0x8D74
+#endif
+#ifndef GL_LUMINANCE_ALPHA32UI_EXT
+#define GL_LUMINANCE_ALPHA32UI_EXT 0x8D75
+#endif
+#ifndef GL_ALPHA16UI_EXT
+#define GL_ALPHA16UI_EXT 0x8D78
+#endif
+#ifndef GL_INTENSITY16UI_EXT
+#define GL_INTENSITY16UI_EXT 0x8D79
+#endif
+#ifndef GL_LUMINANCE16UI_EXT
+#define GL_LUMINANCE16UI_EXT 0x8D7A
+#endif
+#ifndef GL_LUMINANCE_ALPHA16UI_EXT
+#define GL_LUMINANCE_ALPHA16UI_EXT 0x8D7B
+#endif
+#ifndef GL_ALPHA32I_EXT
+#define GL_ALPHA32I_EXT 0x8D84
+#endif
+#ifndef GL_INTENSITY32I_EXT
+#define GL_INTENSITY32I_EXT 0x8D85
+#endif
+#ifndef GL_LUMINANCE32I_EXT
+#define GL_LUMINANCE32I_EXT 0x8D86
+#endif
+#ifndef GL_LUMINANCE_ALPHA32I_EXT
+#define GL_LUMINANCE_ALPHA32I_EXT 0x8D87
+#endif
+#ifndef GL_ALPHA16I_EXT
+#define GL_ALPHA16I_EXT 0x8D8A
+#endif
+#ifndef GL_INTENSITY16I_EXT
+#define GL_INTENSITY16I_EXT 0x8D8B
+#endif
+#ifndef GL_LUMINANCE16I_EXT
+#define GL_LUMINANCE16I_EXT 0x8D8C
+#endif
+#ifndef GL_LUMINANCE_ALPHA16I_EXT
+#define GL_LUMINANCE_ALPHA16I_EXT 0x8D8D
+#endif
+#ifndef GL_ALPHA_INTEGER_EXT
+#define GL_ALPHA_INTEGER_EXT 0x8D97
+#endif
+#ifndef GL_LUMINANCE_INTEGER_EXT
+#define GL_LUMINANCE_INTEGER_EXT 0x8D9C
+#endif
+#ifndef GL_LUMINANCE_ALPHA_INTEGER_EXT
+#define GL_LUMINANCE_ALPHA_INTEGER_EXT 0x8D9D
+#endif
 #ifndef GL_INTENSITY12
 #define GL_INTENSITY12 0x804C
 #endif
@@ -297,6 +360,22 @@ void markStateFunction(FunctionId id, std::string_view note) {
 #ifndef GL_LINE_STIPPLE
 #define GL_LINE_STIPPLE 0x0B24
 #endif
+// R1.0-c item #14 — compat-profile antialiasing/stipple enables. These are
+// real GL 1.0 caps (GL 4.6 compatibility §17.3.3 "Antialiasing", §14.6.2
+// "Polygon Stipple") that the enable allowlist never listed, so
+// glEnable/glDisable/glIsEnabled pushed GL_INVALID_ENUM for them. They are
+// tracked state with no Metal-side rasteriser effect: point antialiasing is
+// spec-ignored while a multisample buffer is bound (§14.4.1), which is
+// exactly what ext_framebuffer_multisample-point-smooth asserts.
+#ifndef GL_POINT_SMOOTH
+#define GL_POINT_SMOOTH 0x0B10
+#endif
+#ifndef GL_POLYGON_STIPPLE
+#define GL_POLYGON_STIPPLE 0x0B42
+#endif
+#ifndef GL_POINT_SMOOTH_HINT
+#define GL_POINT_SMOOTH_HINT 0x0C51
+#endif
 
 // Phase A state mirror allowlist — every cap that glEnable/glDisable/glIsEnabled
 // accepts without raising GL_INVALID_ENUM. Keeping this list explicit means BAR's
@@ -422,6 +501,13 @@ bool isValidEnableCap(GLenum cap) {
         case GL_POLYGON_OFFSET_LINE:
         case GL_POLYGON_OFFSET_POINT:
         case GL_POLYGON_SMOOTH:
+        // R1.0-c item #14. GL_POINT_SMOOTH and GL_POLYGON_STIPPLE are
+        // tracked here rather than on the compat no-op list because
+        // glIsEnabled must report them back: the no-op list answers
+        // GL_FALSE unconditionally, which is wrong for a cap the caller
+        // just enabled.
+        case GL_POINT_SMOOTH:
+        case GL_POLYGON_STIPPLE:
         case GL_PRIMITIVE_RESTART:
         case GL_PRIMITIVE_RESTART_FIXED_INDEX:
         case GL_PROGRAM_POINT_SIZE:
@@ -731,6 +817,11 @@ bool isValidHintTarget(GLenum target) {
         case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
         case GL_LINE_SMOOTH_HINT:
         case GL_POLYGON_SMOOTH_HINT:
+        // R1.0-c item #14 — GL_POINT_SMOOTH_HINT is the point-antialiasing
+        // companion to GL_LINE_SMOOTH_HINT / GL_POLYGON_SMOOTH_HINT, which
+        // were already accepted. Omitting it made glHint(GL_POINT_SMOOTH_HINT,
+        // GL_NICEST) leave a GL_INVALID_ENUM behind.
+        case GL_POINT_SMOOTH_HINT:
         case GL_TEXTURE_COMPRESSION_HINT:
             return true;
         default:
@@ -1155,6 +1246,27 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        // R1.0-c item #10 — the 16- and 32-bit rows of the same
+        // EXT_texture_integer table. Only the 8-bit row above was listed, so
+        // `texwrap formats bordercolor` walked GL_RGB8I .. GL_RGBA16I and then
+        // tripped GL_INVALID_ENUM on the very next format, GL_ALPHA16I_EXT
+        // (texwrap.c:1680).
+        case GL_ALPHA16I_EXT:
+        case GL_ALPHA16UI_EXT:
+        case GL_ALPHA32I_EXT:
+        case GL_ALPHA32UI_EXT:
+        case GL_LUMINANCE16I_EXT:
+        case GL_LUMINANCE16UI_EXT:
+        case GL_LUMINANCE32I_EXT:
+        case GL_LUMINANCE32UI_EXT:
+        case GL_INTENSITY16I_EXT:
+        case GL_INTENSITY16UI_EXT:
+        case GL_INTENSITY32I_EXT:
+        case GL_INTENSITY32UI_EXT:
+        case GL_LUMINANCE_ALPHA16I_EXT:
+        case GL_LUMINANCE_ALPHA16UI_EXT:
+        case GL_LUMINANCE_ALPHA32I_EXT:
+        case GL_LUMINANCE_ALPHA32UI_EXT:
         case GL_COMPRESSED_ALPHA:
         case GL_COMPRESSED_LUMINANCE:
         case GL_COMPRESSED_LUMINANCE_ALPHA:
@@ -1285,6 +1397,14 @@ bool isValidTextureUploadFormat(GLenum format) {
         case GL_LUMINANCE:
         case GL_LUMINANCE_ALPHA:
         case GL_INTENSITY:
+        // R1.0-c item #10 — EXT_texture_integer §3.6.4 external formats.
+        // GL_RED_INTEGER .. GL_BGRA_INTEGER were listed; the three
+        // ALPHA/LUMINANCE spellings were not, so every
+        // `ext_texture_integer-texformats` upload with format=0x8D97 was
+        // rejected before it reached the texture.
+        case GL_ALPHA_INTEGER_EXT:
+        case GL_LUMINANCE_INTEGER_EXT:
+        case GL_LUMINANCE_ALPHA_INTEGER_EXT:
             return true;
         case GL_COLOR_INDEX:
             return appglCompatProfileEnabled();
@@ -1340,11 +1460,17 @@ bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) 
     const bool isDepthFormat = (format == GL_DEPTH_COMPONENT);
     const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
     const bool isStencilFormat = (format == GL_STENCIL_INDEX);
+    // R1.0-c item #10 — EXT_texture_integer's ALPHA / LUMINANCE /
+    // LUMINANCE_ALPHA _INTEGER spellings belong to this class too; leaving
+    // them out classified them as plain colour formats.
     const bool isIntegerFormat = (format == GL_RED_INTEGER
         || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
         || format == GL_RG_INTEGER
         || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
-        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER
+        || format == GL_ALPHA_INTEGER_EXT
+        || format == GL_LUMINANCE_INTEGER_EXT
+        || format == GL_LUMINANCE_ALPHA_INTEGER_EXT);
     const bool isColorFormat = !isDepthFormat && !isDepthStencilFormat
         && !isStencilFormat && !isIntegerFormat;
 
@@ -1381,6 +1507,19 @@ bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) 
         case GL_LUMINANCE8I_EXT: case GL_LUMINANCE8UI_EXT:
         case GL_INTENSITY8I_EXT: case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT: case GL_LUMINANCE_ALPHA8UI_EXT:
+        // R1.0-c item #10 — 16/32-bit rows. Missing here, they fell to the
+        // `default: return isColorFormat` arm, so an upload of
+        // GL_ALPHA16I_EXT + GL_RGBA_INTEGER was rejected with
+        // GL_INVALID_OPERATION even after the enum passed the upload
+        // validator.
+        case GL_ALPHA16I_EXT: case GL_ALPHA16UI_EXT:
+        case GL_ALPHA32I_EXT: case GL_ALPHA32UI_EXT:
+        case GL_LUMINANCE16I_EXT: case GL_LUMINANCE16UI_EXT:
+        case GL_LUMINANCE32I_EXT: case GL_LUMINANCE32UI_EXT:
+        case GL_INTENSITY16I_EXT: case GL_INTENSITY16UI_EXT:
+        case GL_INTENSITY32I_EXT: case GL_INTENSITY32UI_EXT:
+        case GL_LUMINANCE_ALPHA16I_EXT: case GL_LUMINANCE_ALPHA16UI_EXT:
+        case GL_LUMINANCE_ALPHA32I_EXT: case GL_LUMINANCE_ALPHA32UI_EXT:
             return isIntegerFormat;
         // Everything else is a color (non-integer) internal format
         default:
@@ -1400,11 +1539,17 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
     const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
     const bool isStencilFormat = (format == GL_STENCIL_INDEX);
     const bool isColorIndexFormat = (format == GL_COLOR_INDEX);
+    // R1.0-c item #10 — EXT_texture_integer's ALPHA / LUMINANCE /
+    // LUMINANCE_ALPHA _INTEGER spellings belong to this class too; leaving
+    // them out classified them as plain colour formats.
     const bool isIntegerFormat = (format == GL_RED_INTEGER
         || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
         || format == GL_RG_INTEGER
         || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
-        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER
+        || format == GL_ALPHA_INTEGER_EXT
+        || format == GL_LUMINANCE_INTEGER_EXT
+        || format == GL_LUMINANCE_ALPHA_INTEGER_EXT);
     const bool isRGB = (format == GL_RGB || format == GL_RGB_INTEGER);
     const bool isBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
     const bool isRGBA_family = (format == GL_RGBA || format == GL_RGBA_INTEGER

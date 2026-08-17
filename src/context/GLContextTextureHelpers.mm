@@ -245,8 +245,15 @@ std::size_t componentCountForFormat(GLenum format) {
         case GL_ALPHA:
         case GL_LUMINANCE:
         case GL_INTENSITY:
+        // R1.0-c item #10 — EXT_texture_integer external formats carry the
+        // same component counts as their non-integer spellings. Without
+        // these, componentCountForFormat returned 0 for an ALPHA_INTEGER
+        // upload and bytesPerPixel collapsed to 0 with it.
+        case GL_ALPHA_INTEGER_EXT:
+        case GL_LUMINANCE_INTEGER_EXT:
             return 1;
         case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE_ALPHA_INTEGER_EXT:
             return 2;
         default:
             return 0;

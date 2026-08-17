@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <limits>
 #include <unordered_set>
 
 #ifndef GL_ALPHA4
@@ -978,49 +979,90 @@ static void APIENTRY glCompressedTexImage1D(GLenum target, GLint level, GLenum i
     warnDataDroppedOnce("glCompressedTexImage1D");
 }
 
+// R1.0-c item #19 — target → texture-name resolution for the non-DSA
+// compressed entry points. GL 4.6 §8.11.4: the cube-face targets address the
+// texture bound to the parent GL_TEXTURE_CUBE_MAP binding point. Mirrors the
+// translation already done inline in glGetTexImage above.
+static GLuint compressedBoundTexture(appgl::GLContext* ctx, GLenum target) {
+    GLenum bindTarget = target;
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+            bindTarget = GL_TEXTURE_CUBE_MAP;
+            break;
+        default:
+            break;
+    }
+    return ctx->state().boundTexture(bindTarget);
+}
+
+// R1.0-c item #19 — these four were pure `(void)arg;` drop-data stubs: the
+// byte payload was discarded and the call returned without touching the
+// texture. The DSA spellings of exactly the same operations are fully
+// implemented on GLContext (compressedTextureSubImage{1,2,3}D,
+// getCompressedTextureImage) and are what glCompressedTextureSubImage2D and
+// glGetCompressedTextureImage already dispatch to. The non-DSA entry points
+// now resolve target → bound texture and call the same code, so
+// glCompressedTexSubImage2D and glGetCompressedTexImage stop being a second,
+// silently-lossy implementation of a path that already works.
 static void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data) {
-    (void)target;
-    (void)level;
-    (void)xoffset;
-    (void)yoffset;
-    (void)zoffset;
-    (void)width;
-    (void)height;
-    (void)depth;
-    (void)format;
-    (void)imageSize;
-    (void)data;
-    warnDataDroppedOnce("glCompressedTexSubImage3D");
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    const GLuint texture = compressedBoundTexture(ctx, target);
+    if (texture == 0) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    (void)ctx->compressedTextureSubImage3D(texture, level, xoffset, yoffset, zoffset,
+                                           width, height, depth,
+                                           format, imageSize, data);
 }
 
 static void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data) {
-    (void)target;
-    (void)level;
-    (void)xoffset;
-    (void)yoffset;
-    (void)width;
-    (void)height;
-    (void)format;
-    (void)imageSize;
-    (void)data;
-    warnDataDroppedOnce("glCompressedTexSubImage2D");
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    const GLuint texture = compressedBoundTexture(ctx, target);
+    if (texture == 0) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    (void)ctx->compressedTextureSubImage2D(texture, level, xoffset, yoffset,
+                                           width, height,
+                                           format, imageSize, data);
 }
 
 static void APIENTRY glCompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data) {
-    (void)target;
-    (void)level;
-    (void)xoffset;
-    (void)width;
-    (void)format;
-    (void)imageSize;
-    (void)data;
-    warnDataDroppedOnce("glCompressedTexSubImage1D");
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    const GLuint texture = compressedBoundTexture(ctx, target);
+    if (texture == 0) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    (void)ctx->compressedTextureSubImage1D(texture, level, xoffset, width,
+                                           format, imageSize, data);
 }
 
 static void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void *img) {
-    (void)target;
-    (void)level;
-    (void)img;
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    const GLuint texture = compressedBoundTexture(ctx, target);
+    if (texture == 0) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    // glGetCompressedTexImage carries no bufSize; the caller sized the
+    // buffer from GL_TEXTURE_COMPRESSED_IMAGE_SIZE (see item #12). Pass the
+    // sentinel maximum so the shared implementation's "buffer too small"
+    // clause — which only the glGetnCompressedTexImage spelling can trip —
+    // never fires here.
+    (void)ctx->getCompressedTextureImage(texture, level,
+                                         std::numeric_limits<GLsizei>::max(),
+                                         img);
 }
 
 static void APIENTRY glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {

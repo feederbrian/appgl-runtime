@@ -680,6 +680,20 @@ bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint x
     if (static_cast<NSUInteger>(imageSize) < tightImageBytes) {
         return true;
     }
+    // R1.0-c item #19 — GL 4.6 §8.5: with GL_PIXEL_UNPACK_BUFFER bound,
+    // `data` is a BYTE OFFSET into the bound buffer, not a client pointer,
+    // and offset 0 is legal. Dereferencing it directly segfaults; the crash
+    // was latent until glCompressedTexSubImage2D/3D started routing here
+    // (`ext_texture_array@compressed texsubimage pbo` reproduces it).
+    {
+        auto [resolvedData, pboOk] = impl_->resolveUnpackPBO(
+            data, static_cast<std::size_t>(std::max<GLsizei>(imageSize, 0)), 1);
+        if (!pboOk) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        data = resolvedData;
+    }
     if (data == nullptr) {
         return true;
     }
@@ -887,6 +901,18 @@ bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint x
     const NSUInteger tightVolumeBytes = tightImageBytes * subBlocksZ;
     if (static_cast<NSUInteger>(imageSize) < tightVolumeBytes) {
         return true;
+    }
+    // R1.0-c item #19 — see the matching comment in
+    // compressedTextureSubImage2D. `data` is a PBO byte offset whenever
+    // GL_PIXEL_UNPACK_BUFFER is bound.
+    {
+        auto [resolvedData, pboOk] = impl_->resolveUnpackPBO(
+            data, static_cast<std::size_t>(std::max<GLsizei>(imageSize, 0)), 1);
+        if (!pboOk) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        data = resolvedData;
     }
     if (data == nullptr) {
         return true;
@@ -4946,7 +4972,27 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
     }
     if (pixels != nullptr && obj->metalTexture != nullptr) {
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
-        if (block.bytes != 0) {
+        // R1.0-c item #19 — the byte counts below are block arithmetic
+        // derived from the GL internal format. They are only valid if the
+        // Metal texture actually carries the matching block-compressed
+        // pixel format. A generic/unsupported compressed internal format
+        // falls back to an UNCOMPRESSED Metal format (see
+        // metalRenderbufferFormat: GL_COMPRESSED_RGB -> RGBA8Unorm), and
+        // getBytes then writes width*height*4 bytes into a buffer the
+        // caller sized for blocks — AGX reports "bytes_per_row >=
+        // used_bytes_per_row" and the process segfaults on DXT3/DXT5.
+        // Same guard the write path already applies before replaceRegion in
+        // compressedTextureSubImage2D.
+        MTLPixelFormat expectedFormat = MTLPixelFormatInvalid;
+        if (impl_->capabilities != nullptr) {
+            auto fmtCap = impl_->capabilities->format(obj->desc.internalFormat);
+            if (fmtCap.has_value()) {
+                expectedFormat = static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat);
+            }
+        }
+        if (block.bytes != 0 &&
+            expectedFormat != MTLPixelFormatInvalid &&
+            metalTex.pixelFormat == expectedFormat) {
             const NSUInteger lvl = static_cast<NSUInteger>(level);
             const NSUInteger w = mipDimensionAtLevel(metalTex.width, lvl);
             const NSUInteger h = mipDimensionAtLevel(metalTex.height, lvl);

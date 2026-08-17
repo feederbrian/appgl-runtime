@@ -24,6 +24,17 @@
 #ifndef GL_COLOR_SUM
 #define GL_COLOR_SUM 0x8458
 #endif
+// R1.0-c item #14 — compat antialiasing/stipple state. See the matching
+// allowlist entries in AppGLRuntime.cpp (isValidEnableCap / isValidHintTarget).
+#ifndef GL_POINT_SMOOTH
+#define GL_POINT_SMOOTH 0x0B10
+#endif
+#ifndef GL_POLYGON_STIPPLE
+#define GL_POLYGON_STIPPLE 0x0B42
+#endif
+#ifndef GL_POINT_SMOOTH_HINT
+#define GL_POINT_SMOOTH_HINT 0x0C51
+#endif
 
 namespace appgl {
 namespace {
@@ -198,6 +209,8 @@ bool queryValue(
         case GL_POLYGON_OFFSET_POINT:
         case GL_POLYGON_OFFSET_FILL:
         case GL_POLYGON_SMOOTH:
+        case GL_POINT_SMOOTH:
+        case GL_POLYGON_STIPPLE:
         case GL_SAMPLE_COVERAGE:
         case GL_SCISSOR_TEST:
         case GL_STENCIL_TEST:
@@ -318,6 +331,7 @@ bool queryValue(
         case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
         case GL_LINE_SMOOTH_HINT:
         case GL_POLYGON_SMOOTH_HINT:
+        case GL_POINT_SMOOTH_HINT:
         case GL_TEXTURE_COMPRESSION_HINT: {
             const auto found = hints.find(pname);
             writeScalar(out, found == hints.end() ? GL_DONT_CARE : found->second);
@@ -1150,6 +1164,12 @@ std::uint32_t dirtyBitsForCap(GLenum cap) {
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
         case GL_TEXTURE_CUBE_MAP_SEAMLESS:
         case GL_COLOR_SUM:
+        // R1.0-c item #14 — mirror-only compat caps. Point antialiasing is
+        // spec-ignored while a multisample buffer is bound, and AppGL has no
+        // polygon-stipple rasteriser stage, so neither invalidates a cached
+        // Metal pipeline state object.
+        case GL_POINT_SMOOTH:
+        case GL_POLYGON_STIPPLE:
         // Selected through a synthesized fragment uniform at draw time.
         case GL_VERTEX_PROGRAM_TWO_SIDE:
             return 0u;

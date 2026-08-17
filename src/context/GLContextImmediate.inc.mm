@@ -2219,6 +2219,216 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                dstY < sc.y + sc.height;
     };
 
+    // R1.0-c item #6: glDrawPixels(GL_DEPTH_COMPONENT / GL_DEPTH_STENCIL) had
+    // no framebuffer-object destination at all — the only depth/stencil writer
+    // below is the default-framebuffer shadow, gated on
+    // `boundDrawFramebuffer() == 0`, so with an FBO bound the call silently
+    // updated the *default* framebuffer's shadow and returned. The bound FBO's
+    // depth attachment kept its cleared contents, which is what
+    // `fbo-depth drawpixels GL_DEPTH_COMPONENT24` observed (0.0 everywhere,
+    // 14884 = 122x122 mismatches) while the `clear` variant of the same binary
+    // and the same attachment passed.
+    if ((format == GL_DEPTH_COMPONENT || format == GL_DEPTH_STENCIL) &&
+        impl_->state->boundDrawFramebuffer() != 0) {
+        GLFramebufferObject* depthFbo =
+            impl_->objects->framebuffers().get(
+                impl_->state->boundDrawFramebuffer());
+        if (depthFbo == nullptr) {
+            return false;
+        }
+        GLFramebufferAttachment* depthAttachment =
+            impl_->framebufferAttachment(*depthFbo, GL_DEPTH_ATTACHMENT);
+        if (depthAttachment == nullptr) {
+            return true;
+        }
+        const auto depthInfo =
+            impl_->framebufferAttachmentInfo(*depthAttachment);
+        if (!depthInfo.complete || !isDepthFormat(depthInfo.internalFormat)) {
+            return true;
+        }
+        const GLsizei targetWidth = std::max<GLsizei>(depthInfo.width, 1);
+        const GLsizei targetHeight = std::max<GLsizei>(depthInfo.height, 1);
+        const std::size_t targetPixels =
+            static_cast<std::size_t>(targetWidth) *
+            static_cast<std::size_t>(targetHeight);
+        std::vector<GLfloat> depthTarget(targetPixels, 0.0f);
+        const bool depthTestActive =
+            impl_->state->isEnabled(GL_DEPTH_TEST) &&
+            impl_->state->depthState().func != GL_ALWAYS;
+        if (!impl_->readDepthAttachmentPixels(*depthAttachment, 0, 0,
+                                              targetWidth, targetHeight,
+                                              depthTarget.data())) {
+            // No readable destination means the depth comparison has no second
+            // operand. Only an unconditional write is defensible here.
+            if (depthTestActive) {
+                return true;
+            }
+            std::fill(depthTarget.begin(), depthTarget.end(), 0.0f);
+        }
+        GLFramebufferAttachment* stencilAttachment =
+            format == GL_DEPTH_STENCIL
+                ? impl_->framebufferAttachment(*depthFbo, GL_STENCIL_ATTACHMENT)
+                : nullptr;
+        std::vector<std::uint8_t> stencilTarget;
+        bool stencilUsable = false;
+        if (stencilAttachment != nullptr) {
+            const auto stencilInfo =
+                impl_->framebufferAttachmentInfo(*stencilAttachment);
+            if (stencilInfo.complete &&
+                isStencilFormat(stencilInfo.internalFormat) &&
+                std::max<GLsizei>(stencilInfo.width, 1) == targetWidth &&
+                std::max<GLsizei>(stencilInfo.height, 1) == targetHeight) {
+                stencilTarget.assign(targetPixels, 0);
+                stencilUsable = impl_->readStencilAttachmentPixels(
+                    *stencilAttachment, 0, 0, targetWidth, targetHeight,
+                    stencilTarget.data());
+            }
+        }
+        const bool depthWriteEnabled =
+            impl_->state->depthState().writeMask != GL_FALSE;
+        const std::uint8_t fboStencilWriteMask = static_cast<std::uint8_t>(
+            impl_->state->stencilState().front.writeMask & 0xffu);
+        auto fboDepthPasses = [&](GLfloat incoming, GLfloat current) -> bool {
+            if (!impl_->state->isEnabled(GL_DEPTH_TEST)) {
+                return true;
+            }
+            switch (impl_->state->depthState().func) {
+                case GL_NEVER:    return false;
+                case GL_LESS:     return incoming < current;
+                case GL_LEQUAL:   return incoming <= current;
+                case GL_GREATER:  return incoming > current;
+                case GL_GEQUAL:   return incoming >= current;
+                case GL_EQUAL:    return incoming == current;
+                case GL_NOTEQUAL: return incoming != current;
+                case GL_ALWAYS:
+                default:          return true;
+            }
+        };
+        GLint hitMinX = std::numeric_limits<GLint>::max();
+        GLint hitMinY = std::numeric_limits<GLint>::max();
+        GLint hitMaxX = std::numeric_limits<GLint>::min();
+        GLint hitMaxY = std::numeric_limits<GLint>::min();
+        const GLfloat rasterX = impl_->fixedFunctionRasterPosition[0];
+        const GLfloat rasterY = impl_->fixedFunctionRasterPosition[1];
+        for (GLsizei row = 0; row < height; ++row) {
+            const auto* srcRow =
+                source + static_cast<std::size_t>(row) * rowBytes;
+            GLint y0 = 0;
+            GLint y1 = 0;
+            appglPixelZoomSpan(rasterY + static_cast<GLfloat>(row) * zoomY,
+                               rasterY + static_cast<GLfloat>(row + 1) * zoomY,
+                               y0,
+                               y1);
+            y0 = std::max<GLint>(y0, 0);
+            y1 = std::min<GLint>(y1, targetHeight);
+            if (y0 >= y1) {
+                continue;
+            }
+            for (GLsizei col = 0; col < width; ++col) {
+                GLint x0 = 0;
+                GLint x1 = 0;
+                appglPixelZoomSpan(rasterX + static_cast<GLfloat>(col) * zoomX,
+                                   rasterX + static_cast<GLfloat>(col + 1) * zoomX,
+                                   x0,
+                                   x1);
+                x0 = std::max<GLint>(x0, 0);
+                x1 = std::min<GLint>(x1, targetWidth);
+                if (x0 >= x1) {
+                    continue;
+                }
+                const auto* pixel =
+                    srcRow + static_cast<std::size_t>(col) * pixelBytes;
+                const GLfloat incomingDepth = std::clamp(
+                    format == GL_DEPTH_STENCIL ? readDepthStencilDepth(pixel)
+                                               : readScalar(pixel),
+                    0.0f,
+                    1.0f);
+                const std::uint8_t incomingStencil =
+                    format == GL_DEPTH_STENCIL ? readDepthStencilStencil(pixel)
+                                               : static_cast<std::uint8_t>(0);
+                for (GLint dstY = y0; dstY < y1; ++dstY) {
+                    for (GLint dstX = x0; dstX < x1; ++dstX) {
+                        if (!insideScissor(dstX, dstY)) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(targetWidth) +
+                            static_cast<std::size_t>(dstX);
+                        if (!fboDepthPasses(incomingDepth, depthTarget[offset])) {
+                            continue;
+                        }
+                        if (depthWriteEnabled) {
+                            depthTarget[offset] = incomingDepth;
+                        }
+                        if (stencilUsable) {
+                            stencilTarget[offset] = static_cast<std::uint8_t>(
+                                (stencilTarget[offset] & ~fboStencilWriteMask) |
+                                (incomingStencil & fboStencilWriteMask));
+                        }
+                        hitMinX = std::min(hitMinX, dstX);
+                        hitMinY = std::min(hitMinY, dstY);
+                        hitMaxX = std::max(hitMaxX, dstX);
+                        hitMaxY = std::max(hitMaxY, dstY);
+                    }
+                }
+            }
+        }
+        if (hitMinX > hitMaxX || hitMinY > hitMaxY) {
+            return true;
+        }
+        const GLsizei writeWidth = hitMaxX - hitMinX + 1;
+        const GLsizei writeHeight = hitMaxY - hitMinY + 1;
+        const std::size_t writePixels =
+            static_cast<std::size_t>(writeWidth) *
+            static_cast<std::size_t>(writeHeight);
+        if (depthWriteEnabled) {
+            std::vector<GLfloat> depthRegion(writePixels, 0.0f);
+            for (GLsizei row = 0; row < writeHeight; ++row) {
+                std::memcpy(
+                    depthRegion.data() +
+                        static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(writeWidth),
+                    depthTarget.data() +
+                        static_cast<std::size_t>(hitMinY + row) *
+                            static_cast<std::size_t>(targetWidth) +
+                        static_cast<std::size_t>(hitMinX),
+                    static_cast<std::size_t>(writeWidth) * sizeof(GLfloat));
+            }
+            if (!impl_->writeDepthAttachmentPixels(*depthAttachment,
+                                                   hitMinX, hitMinY,
+                                                   writeWidth, writeHeight,
+                                                   depthRegion.data())) {
+                return false;
+            }
+            impl_->markFramebufferAttachmentWrite(
+                *depthAttachment, kProducerCopyWrite | kProducerFboDepthStencilWrite);
+        }
+        if (stencilUsable && fboStencilWriteMask != 0) {
+            std::vector<std::uint8_t> stencilRegion(writePixels, 0);
+            for (GLsizei row = 0; row < writeHeight; ++row) {
+                std::memcpy(
+                    stencilRegion.data() +
+                        static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(writeWidth),
+                    stencilTarget.data() +
+                        static_cast<std::size_t>(hitMinY + row) *
+                            static_cast<std::size_t>(targetWidth) +
+                        static_cast<std::size_t>(hitMinX),
+                    static_cast<std::size_t>(writeWidth));
+            }
+            if (!impl_->writeStencilAttachmentPixels(*stencilAttachment,
+                                                     hitMinX, hitMinY,
+                                                     writeWidth, writeHeight,
+                                                     stencilRegion.data())) {
+                return false;
+            }
+            impl_->markFramebufferAttachmentWrite(
+                *stencilAttachment, kProducerCopyWrite | kProducerFboDepthStencilWrite);
+        }
+        return true;
+    }
+
     if (format == GL_STENCIL_INDEX &&
         impl_->state->boundDrawFramebuffer() != 0) {
         GLFramebufferObject* fbo =
@@ -3483,6 +3693,269 @@ bool GLContext::copyPixelsCompat(GLint x,
                     copyDepth ? depthUpload.data() : nullptr,
                     copyDepth, stencilValue, copyStencil);
             }
+        }
+        return true;
+    }
+
+    // R1.0-c item #6: glCopyPixels(GL_DEPTH / GL_DEPTH_STENCIL) with an FBO
+    // bound fell through every branch below to the bare `type != GL_COLOR`
+    // early-out and became a silent no-op. Only GL_STENCIL had an FBO route
+    // (the glBlitFramebuffer hand-off below), which is why
+    // `fbo-stencil …-copypixels` passed while every `fbo-depth …-copypixels`
+    // and `fbo-depthstencil …-copypixels` row failed with the destination
+    // still holding its cleared value.
+    if ((type == GL_DEPTH || type == GL_DEPTH_STENCIL) &&
+        impl_->state->boundDrawFramebuffer() != 0) {
+        GLFramebufferObject* drawFbo =
+            impl_->objects->framebuffers().get(
+                impl_->state->boundDrawFramebuffer());
+        if (drawFbo == nullptr) {
+            return false;
+        }
+        GLFramebufferAttachment* dstDepth =
+            impl_->framebufferAttachment(*drawFbo, GL_DEPTH_ATTACHMENT);
+        if (dstDepth == nullptr) {
+            return true;
+        }
+        const auto dstDepthInfo = impl_->framebufferAttachmentInfo(*dstDepth);
+        if (!dstDepthInfo.complete ||
+            !isDepthFormat(dstDepthInfo.internalFormat)) {
+            return true;
+        }
+        const GLsizei dstWidth = std::max<GLsizei>(dstDepthInfo.width, 1);
+        const GLsizei dstHeight = std::max<GLsizei>(dstDepthInfo.height, 1);
+        const std::size_t dstPixels =
+            static_cast<std::size_t>(dstWidth) *
+            static_cast<std::size_t>(dstHeight);
+        const std::size_t srcPixels =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        const bool copyStencilToo = (type == GL_DEPTH_STENCIL);
+
+        // Snapshot the source region before touching the destination — source
+        // and destination are routinely the same attachment here.
+        std::vector<GLfloat> srcDepth(srcPixels, 0.0f);
+        std::vector<std::uint8_t> srcStencil;
+        bool haveSrcStencil = false;
+        if (impl_->state->boundReadFramebuffer() != 0) {
+            GLFramebufferObject* readFbo =
+                impl_->objects->framebuffers().get(
+                    impl_->state->boundReadFramebuffer());
+            if (readFbo == nullptr) {
+                return false;
+            }
+            GLFramebufferAttachment* srcDepthAttachment =
+                impl_->framebufferAttachment(*readFbo, GL_DEPTH_ATTACHMENT);
+            if (srcDepthAttachment == nullptr ||
+                !impl_->readDepthAttachmentPixels(*srcDepthAttachment, x, y,
+                                                  width, height,
+                                                  srcDepth.data())) {
+                return true;
+            }
+            if (copyStencilToo) {
+                GLFramebufferAttachment* srcStencilAttachment =
+                    impl_->framebufferAttachment(*readFbo,
+                                                 GL_STENCIL_ATTACHMENT);
+                if (srcStencilAttachment != nullptr) {
+                    srcStencil.assign(srcPixels, 0);
+                    haveSrcStencil = impl_->readStencilAttachmentPixels(
+                        *srcStencilAttachment, x, y, width, height,
+                        srcStencil.data());
+                }
+            }
+        } else {
+            impl_->ensureDefaultFramebufferDepthStencilShadow();
+            if (!impl_->defaultFramebufferDepthShadowValid ||
+                !impl_->copyDefaultFramebufferDepthPixels(
+                    x, y, width, height, srcDepth.data())) {
+                return true;
+            }
+            if (copyStencilToo && impl_->defaultFramebufferStencilShadowValid) {
+                srcStencil.assign(srcPixels, 0);
+                haveSrcStencil = impl_->copyDefaultFramebufferStencilPixels(
+                    x, y, width, height, srcStencil.data());
+            }
+        }
+
+        std::vector<GLfloat> dstDepthPixels(dstPixels, 0.0f);
+        const bool copyDepthTestActive =
+            impl_->state->isEnabled(GL_DEPTH_TEST) &&
+            impl_->state->depthState().func != GL_ALWAYS;
+        if (!impl_->readDepthAttachmentPixels(*dstDepth, 0, 0,
+                                              dstWidth, dstHeight,
+                                              dstDepthPixels.data())) {
+            if (copyDepthTestActive) {
+                return true;
+            }
+            std::fill(dstDepthPixels.begin(), dstDepthPixels.end(), 0.0f);
+        }
+        GLFramebufferAttachment* dstStencil =
+            copyStencilToo
+                ? impl_->framebufferAttachment(*drawFbo, GL_STENCIL_ATTACHMENT)
+                : nullptr;
+        std::vector<std::uint8_t> dstStencilPixels;
+        bool dstStencilUsable = false;
+        if (dstStencil != nullptr && haveSrcStencil) {
+            const auto dstStencilInfo =
+                impl_->framebufferAttachmentInfo(*dstStencil);
+            if (dstStencilInfo.complete &&
+                isStencilFormat(dstStencilInfo.internalFormat) &&
+                std::max<GLsizei>(dstStencilInfo.width, 1) == dstWidth &&
+                std::max<GLsizei>(dstStencilInfo.height, 1) == dstHeight) {
+                dstStencilPixels.assign(dstPixels, 0);
+                dstStencilUsable = impl_->readStencilAttachmentPixels(
+                    *dstStencil, 0, 0, dstWidth, dstHeight,
+                    dstStencilPixels.data());
+            }
+        }
+
+        const bool copyDepthWrite =
+            impl_->state->depthState().writeMask != GL_FALSE;
+        const std::uint8_t copyStencilWriteMask = static_cast<std::uint8_t>(
+            impl_->state->stencilState().front.writeMask & 0xffu);
+        auto copyDepthPasses = [&](GLfloat incoming, GLfloat current) -> bool {
+            if (!impl_->state->isEnabled(GL_DEPTH_TEST)) {
+                return true;
+            }
+            switch (impl_->state->depthState().func) {
+                case GL_NEVER:    return false;
+                case GL_LESS:     return incoming < current;
+                case GL_LEQUAL:   return incoming <= current;
+                case GL_GREATER:  return incoming > current;
+                case GL_GEQUAL:   return incoming >= current;
+                case GL_EQUAL:    return incoming == current;
+                case GL_NOTEQUAL: return incoming != current;
+                case GL_ALWAYS:
+                default:          return true;
+            }
+        };
+        auto copyInsideScissor = [&](GLint dstX, GLint dstY) -> bool {
+            if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+                return true;
+            }
+            const auto& sc = impl_->state->scissor();
+            return dstX >= sc.x && dstY >= sc.y &&
+                   dstX < sc.x + sc.width &&
+                   dstY < sc.y + sc.height;
+        };
+        GLint hitMinX = std::numeric_limits<GLint>::max();
+        GLint hitMinY = std::numeric_limits<GLint>::max();
+        GLint hitMaxX = std::numeric_limits<GLint>::min();
+        GLint hitMaxY = std::numeric_limits<GLint>::min();
+        const GLfloat rasterX = impl_->fixedFunctionRasterPosition[0];
+        const GLfloat rasterY = impl_->fixedFunctionRasterPosition[1];
+        for (GLsizei srcRow = 0; srcRow < height; ++srcRow) {
+            GLint y0 = 0;
+            GLint y1 = 0;
+            appglPixelZoomSpan(rasterY + static_cast<GLfloat>(srcRow) * zoomY,
+                               rasterY + static_cast<GLfloat>(srcRow + 1) * zoomY,
+                               y0,
+                               y1);
+            y0 = std::max<GLint>(y0, 0);
+            y1 = std::min<GLint>(y1, dstHeight);
+            if (y0 >= y1) {
+                continue;
+            }
+            for (GLsizei srcCol = 0; srcCol < width; ++srcCol) {
+                GLint x0 = 0;
+                GLint x1 = 0;
+                appglPixelZoomSpan(rasterX + static_cast<GLfloat>(srcCol) * zoomX,
+                                   rasterX + static_cast<GLfloat>(srcCol + 1) * zoomX,
+                                   x0,
+                                   x1);
+                x0 = std::max<GLint>(x0, 0);
+                x1 = std::min<GLint>(x1, dstWidth);
+                if (x0 >= x1) {
+                    continue;
+                }
+                const std::size_t srcOffset =
+                    static_cast<std::size_t>(srcRow) *
+                    static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(srcCol);
+                const GLfloat incomingDepth =
+                    std::clamp(srcDepth[srcOffset], 0.0f, 1.0f);
+                for (GLint dstY = y0; dstY < y1; ++dstY) {
+                    for (GLint dstX = x0; dstX < x1; ++dstX) {
+                        if (!copyInsideScissor(dstX, dstY)) {
+                            continue;
+                        }
+                        const std::size_t dstOffset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(dstWidth) +
+                            static_cast<std::size_t>(dstX);
+                        if (!copyDepthPasses(incomingDepth,
+                                             dstDepthPixels[dstOffset])) {
+                            continue;
+                        }
+                        if (copyDepthWrite) {
+                            dstDepthPixels[dstOffset] = incomingDepth;
+                        }
+                        if (dstStencilUsable) {
+                            dstStencilPixels[dstOffset] =
+                                static_cast<std::uint8_t>(
+                                    (dstStencilPixels[dstOffset] &
+                                     ~copyStencilWriteMask) |
+                                    (srcStencil[srcOffset] &
+                                     copyStencilWriteMask));
+                        }
+                        hitMinX = std::min(hitMinX, dstX);
+                        hitMinY = std::min(hitMinY, dstY);
+                        hitMaxX = std::max(hitMaxX, dstX);
+                        hitMaxY = std::max(hitMaxY, dstY);
+                    }
+                }
+            }
+        }
+        if (hitMinX > hitMaxX || hitMinY > hitMaxY) {
+            return true;
+        }
+        const GLsizei writeWidth = hitMaxX - hitMinX + 1;
+        const GLsizei writeHeight = hitMaxY - hitMinY + 1;
+        const std::size_t writePixels =
+            static_cast<std::size_t>(writeWidth) *
+            static_cast<std::size_t>(writeHeight);
+        if (copyDepthWrite) {
+            std::vector<GLfloat> depthRegion(writePixels, 0.0f);
+            for (GLsizei row = 0; row < writeHeight; ++row) {
+                std::memcpy(
+                    depthRegion.data() +
+                        static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(writeWidth),
+                    dstDepthPixels.data() +
+                        static_cast<std::size_t>(hitMinY + row) *
+                            static_cast<std::size_t>(dstWidth) +
+                        static_cast<std::size_t>(hitMinX),
+                    static_cast<std::size_t>(writeWidth) * sizeof(GLfloat));
+            }
+            if (!impl_->writeDepthAttachmentPixels(*dstDepth,
+                                                   hitMinX, hitMinY,
+                                                   writeWidth, writeHeight,
+                                                   depthRegion.data())) {
+                return false;
+            }
+            impl_->markFramebufferAttachmentWrite(
+                *dstDepth, kProducerCopyWrite | kProducerFboDepthStencilWrite);
+        }
+        if (dstStencilUsable && copyStencilWriteMask != 0) {
+            std::vector<std::uint8_t> stencilRegion(writePixels, 0);
+            for (GLsizei row = 0; row < writeHeight; ++row) {
+                std::memcpy(
+                    stencilRegion.data() +
+                        static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(writeWidth),
+                    dstStencilPixels.data() +
+                        static_cast<std::size_t>(hitMinY + row) *
+                            static_cast<std::size_t>(dstWidth) +
+                        static_cast<std::size_t>(hitMinX),
+                    static_cast<std::size_t>(writeWidth));
+            }
+            if (!impl_->writeStencilAttachmentPixels(*dstStencil,
+                                                     hitMinX, hitMinY,
+                                                     writeWidth, writeHeight,
+                                                     stencilRegion.data())) {
+                return false;
+            }
+            impl_->markFramebufferAttachmentWrite(
+                *dstStencil, kProducerCopyWrite | kProducerFboDepthStencilWrite);
         }
         return true;
     }

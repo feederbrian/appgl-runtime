@@ -361,6 +361,15 @@ struct GLTextureObject {
     // changes, so the view is rebuilt on the next draw.
     void* metalSwizzledView = nullptr;
     bool swizzleDirty = true;
+    // ARB_framebuffer_sRGB §17.3.9 — a Metal render target whose pixel
+    // format is an *_sRGB variant applies the linear->sRGB encode in the
+    // ROP unconditionally, but GL only wants that encode while
+    // GL_FRAMEBUFFER_SRGB is enabled. This caches a linear-format
+    // MTLTexture view over the same storage, bound as the colour
+    // attachment while GL_FRAMEBUFFER_SRGB is disabled. It is validated
+    // by `parentTexture` identity at every use, so a stale view left
+    // behind by a storage respecification is detected and rebuilt.
+    void* metalLinearRenderView = nullptr;
     std::uint64_t r5SwizzledViewLastUseSerial = 0;
     std::uint64_t r5SwizzledViewLastUseBoundarySerial = 0;
     bool r5SwizzledViewEvicted = false;
@@ -564,6 +573,11 @@ struct GLRenderbufferObject {
     // and depth readback use it to decide whether GL row 0 must sample the
     // bottom Metal row.
     bool framebufferReadbackYFlip = true;
+    // Renderbuffer twin of GLTextureObject::metalLinearRenderView — the
+    // linear-format MTLTexture view bound as the colour attachment while
+    // GL_FRAMEBUFFER_SRGB is disabled and the storage is an *_sRGB
+    // Metal format. See that field for the full rationale.
+    void* metalLinearRenderView = nullptr;
     GLProducerPendingState producerPending;
 };
 
