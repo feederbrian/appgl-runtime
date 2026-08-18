@@ -30620,16 +30620,88 @@ struct GLContext::Impl {
             return false;
         }
 
-        const GLint srcX = std::min(srcX0, srcX1);
-        const GLint srcY = std::min(srcY0, srcY1);
-        const GLsizei copyWidth = static_cast<GLsizei>(std::abs(srcX1 - srcX0));
-        const GLsizei copyHeight = static_cast<GLsizei>(std::abs(srcY1 - srcY0));
-        const GLint dstX = std::min(dstX0, dstX1);
-        const GLint dstY = std::min(dstY0, dstY1);
-        const GLsizei dstWidth = static_cast<GLsizei>(std::abs(dstX1 - dstX0));
-        const GLsizei dstHeight = static_cast<GLsizei>(std::abs(dstY1 - dstY0));
+        GLint srcX = std::min(srcX0, srcX1);
+        GLint srcY = std::min(srcY0, srcY1);
+        GLsizei copyWidth = static_cast<GLsizei>(std::abs(srcX1 - srcX0));
+        GLsizei copyHeight = static_cast<GLsizei>(std::abs(srcY1 - srcY0));
+        GLint dstX = std::min(dstX0, dstX1);
+        GLint dstY = std::min(dstY0, dstY1);
+        GLsizei dstWidth = static_cast<GLsizei>(std::abs(dstX1 - dstX0));
+        GLsizei dstHeight = static_cast<GLsizei>(std::abs(dstY1 - dstY0));
         if (copyWidth <= 0 || copyHeight <= 0) {
             return true;  // empty blit is a no-op success per spec
+        }
+        // GL 4.6 §18.3.2 "Blitting Pixel Rectangles":
+        //
+        //   "If the source and destination rectangles [...] extend beyond
+        //    the bounds of the corresponding buffer, the blit is clipped:
+        //    only the portion of the source rectangle that lies within the
+        //    read framebuffer is read, and the destination rectangle is
+        //    reduced by the corresponding proportional amount."
+        //
+        // The destination side of that clip already falls out of the
+        // per-pixel bounds rejection in the attachment writers, and the
+        // scissor side is handled by computeWriteWindow() below.  The
+        // *source* side had no clip at all: an out-of-range read rectangle
+        // was handed to the attachment readers verbatim, and whatever they
+        // returned for the out-of-range rows and columns was then written
+        // over destination pixels that the spec requires be left untouched.
+        // (In the piglit clip-and-scissor-blit case those pixels came back
+        // as zero, so the destination showed black where the reference
+        // shows the clear colour.)
+        //
+        // Clip in the already-normalized (origin + extent) space, and move
+        // the destination edge by the proportional amount so the surviving
+        // source texels still land where they belong.  This is the identity
+        // transform whenever the source rectangle is inside the source
+        // framebuffer, so it cannot perturb an in-bounds blit.
+        if (!readDefaultFramebuffer && readFb != nullptr) {
+            GLsizei srcLimitWidth = 0;
+            GLsizei srcLimitHeight = 0;
+            if (framebufferIntersectionSize(*readFb, srcLimitWidth,
+                                            srcLimitHeight)) {
+                auto clipAxisToSource = [](GLint& srcOrigin,
+                                           GLsizei& srcExtent,
+                                           GLint& dstOrigin,
+                                           GLsizei& dstExtent,
+                                           GLsizei srcLimit) {
+                    const GLsizei originalExtent = srcExtent;
+                    if (originalExtent <= 0) {
+                        return;
+                    }
+                    const GLint lowCut = srcOrigin < 0 ? -srcOrigin : 0;
+                    const GLint highCut =
+                        (srcOrigin + originalExtent > srcLimit)
+                            ? (srcOrigin + originalExtent - srcLimit)
+                            : 0;
+                    if (lowCut <= 0 && highCut <= 0) {
+                        return;  // fully in bounds: nothing to do
+                    }
+                    if (lowCut + highCut >= originalExtent) {
+                        srcExtent = 0;
+                        dstExtent = 0;
+                        return;
+                    }
+                    const GLint dstLowCut = static_cast<GLint>(
+                        (static_cast<std::int64_t>(lowCut) * dstExtent) /
+                        originalExtent);
+                    const GLint dstHighCut = static_cast<GLint>(
+                        (static_cast<std::int64_t>(highCut) * dstExtent) /
+                        originalExtent);
+                    srcOrigin += lowCut;
+                    srcExtent = originalExtent - lowCut - highCut;
+                    dstOrigin += dstLowCut;
+                    dstExtent = dstExtent - dstLowCut - dstHighCut;
+                };
+                clipAxisToSource(srcX, copyWidth, dstX, dstWidth,
+                                 srcLimitWidth);
+                clipAxisToSource(srcY, copyHeight, dstY, dstHeight,
+                                 srcLimitHeight);
+                if (copyWidth <= 0 || copyHeight <= 0 ||
+                    dstWidth <= 0 || dstHeight <= 0) {
+                    return true;  // clipped away entirely
+                }
+            }
         }
         // GL 4.6 §18.3.1 — blit supports scaling via filter parameter.
         // Implement nearest-neighbor scaling via CPU-side staging for
