@@ -31144,6 +31144,27 @@ struct GLContext::Impl {
             std::vector<std::uint8_t> clippedColor;
             const std::uint8_t* writeSrc =
                 copyColorWindow(copySrc, clippedColor);
+            // A partial write into FB0's colour shadow promotes that shadow to
+            // authoritative (ensureDefaultFramebufferShadowAtLeast sets
+            // defaultFramebufferShadowValid), so whatever the GPU rendered
+            // outside the write window is silently dropped -- a later
+            // glReadPixels answers from the shadow and sees zeros there. When
+            // the shadow is stale, pull the drawable's current contents in
+            // before overwriting part of it.
+            if (!defaultFramebufferShadowValid && frameGraph != nullptr) {
+                ensureDefaultFramebufferShadowAtLeast(
+                    writeWindow.x + writeWindow.width,
+                    writeWindow.y + writeWindow.height);
+                encodePendingWork();
+                frameGraph->flushForReadback();
+                if (!defaultFramebufferRGBA8.empty()) {
+                    (void)frameGraph->copyRGBA8Pixels(
+                        0, 0,
+                        defaultFramebufferShadowWidth,
+                        defaultFramebufferShadowHeight,
+                        defaultFramebufferRGBA8.data());
+                }
+            }
             ensureDefaultFramebufferShadowAtLeast(
                 writeWindow.x + writeWindow.width,
                 writeWindow.y + writeWindow.height);
@@ -31824,7 +31845,29 @@ struct GLContext::Impl {
                         if (!copyDefaultFramebufferShadowPixels(
                                 srcX, srcY, copyWidth, copyHeight,
                                 srcStage.data())) {
-                            return false;
+                            // FB0's colour shadow is invalidated by every GPU
+                            // draw into the default framebuffer, so a blit
+                            // whose source is FB0 cannot rely on the shadow
+                            // alone -- drawing then blitting out of FB0 always
+                            // landed here. glReadPixels already handles this
+                            // exact case by flushing pending work and falling
+                            // back to a Metal readback; mirror that chain here
+                            // instead of failing the blit, which the caller
+                            // reports as GL_INVALID_OPERATION.
+                            encodePendingWork();
+                            if (frameGraph != nullptr) {
+                                frameGraph->flushForReadback();
+                            }
+                            materializeDefaultFbShadowClear();
+                            if (!copyDefaultFramebufferShadowPixels(
+                                    srcX, srcY, copyWidth, copyHeight,
+                                    srcStage.data()) &&
+                                (frameGraph == nullptr ||
+                                 !frameGraph->copyRGBA8Pixels(
+                                     srcX, srcY, copyWidth, copyHeight,
+                                     srcStage.data()))) {
+                                return false;
+                            }
                         }
                     } else if (!readColorAttachmentPixels(*srcAttachment,
                                                           srcX, srcY,
