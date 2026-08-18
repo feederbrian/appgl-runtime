@@ -246,25 +246,6 @@ extern "C" void APIENTRY glColorP4uiv(GLenum type, const GLuint *color) {
     return;
 }
 
-extern "C" void APIENTRY glEdgeFlag(GLboolean flag) {
-    (void)flag;
-    appgl::Runtime::shared().recordFixedFunctionStub("glEdgeFlag");
-    return;
-}
-
-extern "C" void APIENTRY glEdgeFlagPointer(GLsizei stride, const void *pointer) {
-    (void)stride;
-    (void)pointer;
-    appgl::Runtime::shared().recordFixedFunctionStub("glEdgeFlagPointer");
-    return;
-}
-
-extern "C" void APIENTRY glEdgeFlagv(const GLboolean *flag) {
-    (void)flag;
-    appgl::Runtime::shared().recordFixedFunctionStub("glEdgeFlagv");
-    return;
-}
-
 extern "C" void APIENTRY glEvalCoord1d(GLdouble u) {
     (void)u;
     appgl::Runtime::shared().recordFixedFunctionStub("glEvalCoord1d");

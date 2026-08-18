@@ -7,7 +7,7 @@
 
 namespace appgl::extensions {
 
-inline constexpr std::size_t kExtensionAdvertisingFlagCount = 10;
+inline constexpr std::size_t kExtensionAdvertisingFlagCount = 12;
 
 struct ExtensionAdvertisingState {
     const char* extensionName = nullptr;

@@ -225,6 +225,23 @@ struct LegacyCompatUsage {
     // wrapper that keeps the legacy `vec4` return type. See
     // `rewriteCompatShader` section 5h.
     bool rewroteShadow2DProj = false;
+    // `shadow1DProj(...)` — the 1D sibling of the above. Never had any
+    // rewrite at all before this round, so `spec@glsl-1.20@execution@
+    // tex-miplevel-selection gl2:textureProj 1DShadow` (and its `(bias)`
+    // variant) died on "'shadow1DProj' : no matching overloaded function
+    // found". Rewritten to the preamble-synthesized `appgl_shadow1DProj`
+    // wrapper — same legacy `vec4` return-type contract as shadow2DProj.
+    bool rewroteShadow1DProj = false;
+    // `gl_DepthRange.near` / `.far` / `.diff`. The rewriter emits a `core`
+    // version line, which drops the compatibility `gl_DepthRangeParameters`
+    // struct, so every reference cascaded into "undeclared identifier" plus
+    // a "scalar swizzle" error on the field access. Each field becomes a
+    // flat `appgl_DepthRange*` uniform mirrored from draw-time state.
+    bool usesDepthRangeNear = false;
+    bool usesDepthRangeFar = false;
+    bool usesDepthRangeDiff = false;
+    // `gl_NormalScale` — the fixed-function rescale-normal factor.
+    bool usesNormalScale = false;
 
     bool anyAttribute() const {
         if (attrVertex || attrNormal || attrColor || attrSecondaryColor) return true;
@@ -248,7 +265,9 @@ struct LegacyCompatUsage {
                usesLightModelAmbient || anyLight() ||
                usesClipVertex || synthesizesLegacyClipPlanes ||
                usesFtransform || rewroteTexture2D ||
-               rewroteTextureCube || rewroteShadow2DProj;
+               rewroteTextureCube || rewroteShadow2DProj ||
+               rewroteShadow1DProj || usesDepthRangeNear ||
+               usesDepthRangeFar || usesDepthRangeDiff || usesNormalScale;
     }
 };
 
@@ -396,6 +415,14 @@ inline constexpr const char* kLegacyClipPlanes =
     "appgl_LegacyClipPlanes";  // vec4[8] array
 inline constexpr const char* kVertexProgramTwoSide =
     "appgl_VertexProgramTwoSide";
+inline constexpr const char* kDepthRangeNear =
+    "appgl_DepthRangeNear";
+inline constexpr const char* kDepthRangeFar =
+    "appgl_DepthRangeFar";
+inline constexpr const char* kDepthRangeDiff =
+    "appgl_DepthRangeDiff";
+inline constexpr const char* kNormalScale =
+    "appgl_NormalScale";
 }  // namespace SynthesizedUniformNames
 
 // Length of the synthesized texture matrix array. Matches

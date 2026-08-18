@@ -7985,9 +7985,38 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                ? slot.depth
                                : std::max<std::uint32_t>(queryLayers / 6u, 1u))
                         : queryLayers;
-                    if (h.isStorage &&
-                        slot.textureTarget == kGLTexture1DArray) {
-                        qh = qd;
+                    // 1D-array queries report ivec2(width, LAYERS): the
+                    // second component of textureSize(sampler1DArray) /
+                    // imageSize(image1DArray) is the layer count, never the
+                    // backing texture's height (which is 1 for the 2D-array
+                    // backing this runtime allocates). The storage-image
+                    // half of this was already handled; the SAMPLED half
+                    // was not, so textureSize(sampler1DArray) in an
+                    // emulated geometry shader returned ivec2(width, 1) for
+                    // every sampler flavour — float, int and uint alike.
+                    const bool query1DArray =
+                        (h.isStorage &&
+                         slot.textureTarget == kGLTexture1DArray) ||
+                        (!h.isStorage &&
+                         (slot.samplerType == GL_SAMPLER_1D_ARRAY ||
+                          slot.samplerType == GL_INT_SAMPLER_1D_ARRAY ||
+                          slot.samplerType == GL_UNSIGNED_INT_SAMPLER_1D_ARRAY ||
+                          slot.samplerType == GL_SAMPLER_1D_ARRAY_SHADOW ||
+                          slot.textureTarget == kGLTexture1DArray));
+                    if (query1DArray) {
+                        // The two slot-population paths disagree about
+                        // WHICH field holds the layer count, and both are
+                        // in use — measured with APPGL_TRACE_GS_EMUL_TEX on
+                        // `textureSize 140 gs <sampler> -fbo`:
+                        //   sampler1DArray       -> (qw,qh,qd) = (65,1,40)
+                        //   sampler1DArrayShadow -> (qw,qh,qd) = (65,40,1)
+                        // A 1D array's backing height is 1 by construction,
+                        // so at most one of the two can exceed 1 and the
+                        // larger is always the layer count. Taking qd
+                        // unconditionally clobbered the shadow slot's 40
+                        // with 1 and regressed
+                        // glsl-1.50 gs-texturesize-sampler1darrayshadow.
+                        qh = std::max(qh, qd);
                     }
                 }
                 // Result component count from SPIR-V resultType. Vector

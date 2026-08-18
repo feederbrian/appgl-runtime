@@ -867,11 +867,24 @@ bool startsWith(std::string_view text, std::string_view prefix) {
 // `texture2D`/`textureCube` are renamed by the section-4 source rewrite
 // below; every other colliding spelling has to be renamed here.
 bool isLegacyDesktopTextureAlias(std::string_view legacyName) {
+    // The BARE spellings `texture2D` / `textureCube` keep going through the
+    // section-4 `legacy.rewroteTexture2D` / `legacy.rewroteTextureCube`
+    // rename — leaving them out here preserves that division of labour.
+    // Every LONGER spelling built on the same stem (`texture2DLod`,
+    // `texture2DProj`, `textureCubeLod`, ...) is a *distinct* identifier,
+    // so the whole-identifier rename never sees it and it reached glslang
+    // untouched: `spec@!opengl 2.0@fragment-and-vertex-texturing` failed
+    // with "'texture2DLod' : no matching overloaded function found".
+    if (legacyName == "texture2D" || legacyName == "textureCube") {
+        return false;
+    }
     return startsWith(legacyName, "texture1DArray") ||
            startsWith(legacyName, "texture2DArray") ||
            startsWith(legacyName, "texture2DRect") ||
            startsWith(legacyName, "texture1D") ||
-           startsWith(legacyName, "texture3D");
+           startsWith(legacyName, "texture2D") ||
+           startsWith(legacyName, "texture3D") ||
+           startsWith(legacyName, "textureCube");
 }
 
 bool replaceLegacyDesktopTextureCalls(std::string& src) {
@@ -3852,6 +3865,49 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.rewroteTexture2D = containsIdentifier(source, "texture2D");
     legacy.rewroteTextureCube = containsIdentifier(source, "textureCube");
     legacy.rewroteShadow2DProj = containsIdentifier(source, "shadow2DProj");
+    legacy.rewroteShadow1DProj = containsIdentifier(source, "shadow1DProj");
+    // gl_DepthRange.* field accesses — literal-substring scans, matching
+    // the `gl_Fog.*` treatment above: `gl_DepthRange` alone is not a
+    // meaningful reference, the dot suffix is what makes it one.
+    legacy.usesDepthRangeNear =
+        (source.find("gl_DepthRange.near") != std::string_view::npos);
+    legacy.usesDepthRangeFar =
+        (source.find("gl_DepthRange.far") != std::string_view::npos);
+    legacy.usesDepthRangeDiff =
+        (source.find("gl_DepthRange.diff") != std::string_view::npos);
+    legacy.usesNormalScale = containsIdentifier(source, "gl_NormalScale");
+    // Transposed matrix-family builtins. Core GLSL dropped them, but each
+    // is exactly `transpose()` of a matrix the synthesized-uniform path
+    // already mirrors — so route the identifier through that path and let
+    // section 4 rewrite the reference. The usage flags must be OR-ed in
+    // HERE (not at the rewrite site) because section 5a builds the
+    // preamble from `result.usage`, and `containsIdentifier` matches whole
+    // identifiers: `gl_ModelViewMatrixTranspose` does NOT set
+    // `usage.modelView` on its own.
+    const bool usesModelViewTranspose =
+        containsIdentifier(source, "gl_ModelViewMatrixTranspose");
+    const bool usesProjectionTranspose =
+        containsIdentifier(source, "gl_ProjectionMatrixTranspose");
+    const bool usesModelViewProjectionTranspose =
+        containsIdentifier(source, "gl_ModelViewProjectionMatrixTranspose");
+    const bool usesModelViewInverseTranspose =
+        containsIdentifier(source, "gl_ModelViewMatrixInverseTranspose");
+    const bool usesProjectionInverseTranspose =
+        containsIdentifier(source, "gl_ProjectionMatrixInverseTranspose");
+    const bool usesModelViewProjectionInverseTranspose = containsIdentifier(
+        source, "gl_ModelViewProjectionMatrixInverseTranspose");
+    result.usage.modelView |= usesModelViewTranspose;
+    result.usage.projection |= usesProjectionTranspose;
+    result.usage.modelViewProjection |= usesModelViewProjectionTranspose;
+    result.usage.modelViewInverse |= usesModelViewInverseTranspose;
+    result.usage.projectionInverse |= usesProjectionInverseTranspose;
+    result.usage.modelViewProjectionInverse |=
+        usesModelViewProjectionInverseTranspose;
+    const bool anyTransposeMatrix =
+        usesModelViewTranspose || usesProjectionTranspose ||
+        usesModelViewProjectionTranspose || usesModelViewInverseTranspose ||
+        usesProjectionInverseTranspose ||
+        usesModelViewProjectionInverseTranspose;
     const bool needsExplicitLocationPreamble =
         (isVertex &&
          (legacy.attrVertex || legacy.attrNormal || legacy.attrColor ||
@@ -4400,6 +4456,55 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         replaceIdentifier(result.source, "shadow2DProj",
                           "appgl_shadow2DProj");
     }
+    // Same treatment for the 1D sibling. `replaceIdentifier` (not the
+    // code-only `replaceCodeFunctionIdentifier`) because Piglit's
+    // tex-miplevel-selection routes the call through an object-like macro
+    // — `#define textureInst shadow1DProj` — and the code-only rewriter
+    // deliberately skips preprocessor lines.
+    if (legacy.rewroteShadow1DProj) {
+        replaceIdentifier(result.source, "shadow1DProj",
+                          "appgl_shadow1DProj");
+    }
+    // Transposed matrix builtins → `transpose()` of the mirrored matrix.
+    // The `gl_*` operand left behind is itself rewritten by the section-5a
+    // `#define gl_ModelViewMatrix appgl_ModelViewMatrix` preamble, so the
+    // reference resolves without a second pass here. Longest spellings
+    // first is not required (whole-identifier matching keeps
+    // `...MatrixInverseTranspose` distinct from `...MatrixTranspose`) but
+    // the order mirrors the geometry-stage block for readability.
+    if (anyTransposeMatrix) {
+        replaceCodeIdentifier(result.source,
+                              "gl_ModelViewMatrixInverseTranspose",
+                              "transpose(gl_ModelViewMatrixInverse)");
+        replaceCodeIdentifier(result.source,
+                              "gl_ProjectionMatrixInverseTranspose",
+                              "transpose(gl_ProjectionMatrixInverse)");
+        replaceCodeIdentifier(
+            result.source,
+            "gl_ModelViewProjectionMatrixInverseTranspose",
+            "transpose(gl_ModelViewProjectionMatrixInverse)");
+        replaceCodeIdentifier(result.source, "gl_ModelViewMatrixTranspose",
+                              "transpose(gl_ModelViewMatrix)");
+        replaceCodeIdentifier(result.source, "gl_ProjectionMatrixTranspose",
+                              "transpose(gl_ProjectionMatrix)");
+        replaceCodeIdentifier(result.source,
+                              "gl_ModelViewProjectionMatrixTranspose",
+                              "transpose(gl_ModelViewProjectionMatrix)");
+    }
+    // gl_DepthRange.<field> → flat uniform. Literal replacement, same as
+    // `gl_Fog.<field>` below: the dotted form is the whole reference.
+    if (legacy.usesDepthRangeNear) {
+        replaceLiteral(result.source, "gl_DepthRange.near",
+                       SynthesizedUniformNames::kDepthRangeNear);
+    }
+    if (legacy.usesDepthRangeFar) {
+        replaceLiteral(result.source, "gl_DepthRange.far",
+                       SynthesizedUniformNames::kDepthRangeFar);
+    }
+    if (legacy.usesDepthRangeDiff) {
+        replaceLiteral(result.source, "gl_DepthRange.diff",
+                       SynthesizedUniformNames::kDepthRangeDiff);
+    }
     if (legacy.rewroteTexture2D) {
         replaceIdentifier(result.source, "texture2D", "texture");
     }
@@ -4672,6 +4777,30 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         // MatrixStateMirror::Matrix4::normalFromModelView() for why we
         // still store it as a Matrix4 internally.
         addUniform("gl_NormalMatrix", SUN::kNormalMatrix, "mat3");
+    }
+    // 5a-bis. Scalar fixed-function depth-range / rescale-normal state.
+    // The gl_DepthRange fields were already flattened to their
+    // `appgl_DepthRange*` spellings by section 4's literal rewrite, so
+    // only the declaration is needed — no `#define` (there is no surviving
+    // `gl_DepthRange` identifier to redirect, and defining one would be a
+    // struct-shaped macro this rewriter does not model).
+    if (legacy.usesDepthRangeNear) {
+        preamble.append("uniform float ")
+            .append(SUN::kDepthRangeNear)
+            .append(";\n");
+    }
+    if (legacy.usesDepthRangeFar) {
+        preamble.append("uniform float ")
+            .append(SUN::kDepthRangeFar)
+            .append(";\n");
+    }
+    if (legacy.usesDepthRangeDiff) {
+        preamble.append("uniform float ")
+            .append(SUN::kDepthRangeDiff)
+            .append(";\n");
+    }
+    if (legacy.usesNormalScale) {
+        addUniform("gl_NormalScale", SUN::kNormalScale, "float");
     }
     if (result.usage.texture) {
         // gl_TextureMatrix is an array indexed by texture unit. Declare
@@ -5044,18 +5173,58 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // hardware depth compare still runs once per call — broadcasting a
     // scalar through a vec4 constructor is a no-op on Metal.
     //
-    // Only `shadow2DProj` is observed in BAR's shader corpus this
-    // round, so only that overload is synthesized. The sibling
-    // legacy shadow overloads (`shadow2D` / `shadow2DLod` /
-    // `shadow2DProjLod` / `shadowCube`) have the identical
-    // return-type contract gap and would each be a ~5-line addition
-    // to this block if they surface in a future round.
+    // The sibling legacy shadow overloads (`shadow2D` / `shadow2DLod` /
+    // `shadow2DProjLod` / `shadowCube`) have the identical return-type
+    // contract gap and would each be a ~5-line addition to this block if
+    // they surface in a future round.
+    //
+    // fw²² — two of the gaps this block predicted have now surfaced in
+    // the Piglit sweep and are closed here:
+    //
+    //   · the 3-argument `(sampler, coord, bias)` form of shadow2DProj.
+    //     Section 4 renames EVERY `shadow2DProj` call site, but only the
+    //     2-arg wrapper existed, so `tex-miplevel-selection
+    //     gl2:textureProj(bias) 2DShadow` failed with
+    //     "'appgl_shadow2DProj' : no matching overloaded function found".
+    //     Bias is fragment-stage-only in GLSL, hence the `isFragment`
+    //     guard — emitting it in a vertex shader is itself an error.
+    //
+    //   · `shadow1DProj`, which had no rewrite at all.
     if (legacy.rewroteShadow2DProj) {
         preamble.append(
             "vec4 appgl_shadow2DProj(sampler2DShadow s, vec4 p) {\n"
             "    float v = textureProj(s, p);\n"
             "    return vec4(v, v, v, v);\n"
             "}\n");
+        if (isFragment) {
+            preamble.append(
+                "vec4 appgl_shadow2DProj(sampler2DShadow s, vec4 p, "
+                "float b) {\n"
+                "    float v = textureProj(s, p, b);\n"
+                "    return vec4(v, v, v, v);\n"
+                "}\n");
+        }
+    }
+    // Presence-guarded: when `GL_EXT_gpu_shader4` is declared, the
+    // section-3b wrapper loop has already claimed the call sites for
+    // `appgl_gpu_shader4_shadow1DProj`, so nothing here would be called.
+    // Emitting the helper anyway would put an implicit-LOD `textureProj`
+    // into whatever stage this is, which is not legal everywhere.
+    if (legacy.rewroteShadow1DProj &&
+        containsIdentifier(result.source, "appgl_shadow1DProj")) {
+        preamble.append(
+            "vec4 appgl_shadow1DProj(sampler1DShadow s, vec4 p) {\n"
+            "    float v = textureProj(s, p);\n"
+            "    return vec4(v, v, v, v);\n"
+            "}\n");
+        if (isFragment) {
+            preamble.append(
+                "vec4 appgl_shadow1DProj(sampler1DShadow s, vec4 p, "
+                "float b) {\n"
+                "    float v = textureProj(s, p, b);\n"
+                "    return vec4(v, v, v, v);\n"
+                "}\n");
+        }
     }
 
     // ---- 6. Inject preamble ----------------------------------------------

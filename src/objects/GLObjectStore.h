@@ -998,6 +998,14 @@ struct GLSynthesizedMatrixSlots {
     GLint fogScale = -1;
     GLint legacyClipPlanes = -1;
     GLint vertexProgramTwoSide = -1;
+    // gl_DepthRange.{near,far,diff} flattened by the compat rewriter into
+    // three scalar `appgl_DepthRange*` uniforms.
+    GLint depthRangeNear = -1;
+    GLint depthRangeFar = -1;
+    GLint depthRangeDiff = -1;
+    // gl_NormalScale — derived from the normal matrix, not a separate
+    // piece of tracked state.
+    GLint normalScale = -1;
 
     bool hasAny() const {
         return modelView >= 0 || projection >= 0 || modelViewProjection >= 0 ||
@@ -1006,7 +1014,8 @@ struct GLSynthesizedMatrixSlots {
                textureEnvColor >= 0 || lightModelAmbient >= 0 ||
                fogColor >= 0 || fogDensity >= 0 || fogStart >= 0 ||
                fogEnd >= 0 || fogScale >= 0 || legacyClipPlanes >= 0 ||
-               vertexProgramTwoSide >= 0;
+               vertexProgramTwoSide >= 0 || depthRangeNear >= 0 ||
+               depthRangeFar >= 0 || depthRangeDiff >= 0 || normalScale >= 0;
     }
 };
 

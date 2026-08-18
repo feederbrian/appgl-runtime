@@ -110,6 +110,9 @@
 #ifndef GL_SECONDARY_COLOR_ARRAY
 #define GL_SECONDARY_COLOR_ARRAY 0x845E
 #endif
+#ifndef GL_EDGE_FLAG_ARRAY
+#define GL_EDGE_FLAG_ARRAY 0x8079
+#endif
 #ifndef GL_SECONDARY_COLOR_ARRAY_SIZE
 #define GL_SECONDARY_COLOR_ARRAY_SIZE 0x845A
 #endif
@@ -16079,7 +16082,10 @@ struct GLContext::Impl {
         const GLTextureImageLevel baseLevel = baseIt->second;
         const GLint tailOffset = mipTailOffsetForDimensions(
             baseLevel.desc.width,
-            object.target == GL_TEXTURE_1D ? 1 : baseLevel.desc.height,
+            // 1D-array layer count (carried in `height`) is not a spatial
+            // axis and takes no part in the mip tail.
+            (object.target == GL_TEXTURE_1D ||
+             object.target == GL_TEXTURE_1D_ARRAY) ? 1 : baseLevel.desc.height,
             object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1
         );
         GLint finalLevel = std::min(baseLevelIndex + tailOffset, object.params.maxLevel);
@@ -16128,10 +16134,15 @@ struct GLContext::Impl {
                 generated.desc = chainBase.desc;
                 generated.desc.width = glMipDimensionAtLevel(
                     chainBase.desc.width, offsetFromBase);
+                // GL_TEXTURE_1D_ARRAY's `height` is the LAYER COUNT and
+                // stays constant down the generated chain, exactly as the
+                // depth line below keeps 2D-array / cube-array layers.
                 generated.desc.height = object.target == GL_TEXTURE_1D
                     ? 1
-                    : glMipDimensionAtLevel(
-                          chainBase.desc.height, offsetFromBase);
+                    : (object.target == GL_TEXTURE_1D_ARRAY
+                           ? chainBase.desc.height
+                           : glMipDimensionAtLevel(
+                                 chainBase.desc.height, offsetFromBase));
                 generated.desc.depth = object.target == GL_TEXTURE_3D
                     ? glMipDimensionAtLevel(
                           chainBase.desc.depth, offsetFromBase)
@@ -16742,6 +16753,78 @@ struct GLContext::Impl {
         return internalFormat == GL_DEPTH_STENCIL ||
                internalFormat == GL_DEPTH24_STENCIL8 ||
                internalFormat == GL_DEPTH32F_STENCIL8;
+    }
+
+    // GL_DEPTH_TEXTURE_MODE base-format expansion, as a sampling swizzle.
+    //
+    // ARB_depth_texture, new section 3.8.5 "Depth Component Textures":
+    //   "Depth textures can be treated as LUMINANCE, INTENSITY or ALPHA
+    //    textures during texture filtering and application. Initially,
+    //    depth textures are interpreted as LUMINANCE."
+    // ARB_shadow section 3.8.13.1 gives the assignment: with
+    // TEXTURE_COMPARE_MODE = NONE, "r = Dt", then "if DEPTH_TEXTURE_MODE
+    // = LUMINANCE, Lt = r; else if INTENSITY, It = r; else if ALPHA,
+    // At = r" -- and Lt/It/At expand through the ordinary base-format
+    // table to (r,r,r,1), (r,r,r,r) and (0,0,0,r) respectively.
+    // ARB_texture_rg adds RED to that list -- (r,0,0,1) -- and widens the
+    // sentence above to "Depth textures *and the depth components of
+    // depth/stencil textures* can be treated as RED, LUMINANCE, INTENSITY
+    // or ALPHA textures", which is why GL_DEPTH24_STENCIL8 and
+    // GL_DEPTH32F_STENCIL8 belong here too and not only DEPTH_COMPONENT*.
+    //
+    // EXT_texture_swizzle issue 4 fixes the composition order:
+    //   "How does this interact with depth component textures?
+    //    RESOLVED: The swizzle is applied after the DEPTH_TEXTURE_MODE.
+    //    This naturally falls out of specifying the swizzle in terms of
+    //    Table 3.20."
+    // so the expansion must sit *underneath* GL_TEXTURE_SWIZZLE_*, exactly
+    // like the LUMINANCE/ALPHA/INTENSITY colour base formats already handled
+    // by legacyCompatBaseSamplingSwizzle() above.
+    //
+    // Metal hands a depth (or depth-stencil) texture back as (D, 0, 0, 1) --
+    // the GL_RED rule -- for every DEPTH_TEXTURE_MODE, so the other three
+    // modes need this fold-in. Doing it on the sampling view rather than in
+    // the fixed-function fragment shader is what makes it reach the
+    // programmable paths too (plain GLSL samplers, textureOffset, and
+    // ARB_fragment_program), which is where the expansion was missing
+    // outright.
+    static bool depthTextureModeBaseSamplingSwizzle(
+        const GLTextureObject& texObj,
+        std::array<GLint, 4>& swizzle
+    ) {
+        if (!appglCompatProfileEnabled()) {
+            return false;
+        }
+        if (!isDepthFormat(texObj.desc.internalFormat)) {
+            return false;
+        }
+        // A DEPTH_STENCIL texture sampled with DEPTH_STENCIL_TEXTURE_MODE
+        // == STENCIL_INDEX has base internal format STENCIL_INDEX, not
+        // DEPTH_COMPONENT; DEPTH_TEXTURE_MODE does not apply to it.
+        if (isPackedDepthStencilInternalFormat(texObj.desc.internalFormat) &&
+            texObj.params.depthStencilTextureMode == GL_STENCIL_INDEX) {
+            return false;
+        }
+        // The comparison path samples through metalDepthCompareView and
+        // expands the comparison result on its own; leave it untouched.
+        if (texObj.params.compareMode != GL_NONE) {
+            return false;
+        }
+        switch (texObj.params.depthTextureMode) {
+            case GL_ALPHA:
+                swizzle = {GL_ZERO, GL_ZERO, GL_ZERO, GL_RED};
+                return true;
+            case GL_INTENSITY:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_RED};
+                return true;
+            case GL_RED:
+                // (r, 0, 0, 1) is already what the depth texture reads as.
+                return false;
+            case GL_LUMINANCE:
+            default:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_ONE};
+                return true;
+        }
     }
 
     static bool depthStencilSwizzleProxyTarget(GLenum target) {
@@ -17959,7 +18042,8 @@ struct GLContext::Impl {
         };
         const bool hasLegacyBaseSwizzle =
             legacyCompatBaseSamplingSwizzle(texObj.desc.internalFormat,
-                                            legacyBaseSwizzle);
+                                            legacyBaseSwizzle) ||
+            depthTextureModeBaseSamplingSwizzle(texObj, legacyBaseSwizzle);
         std::array<GLint, 4> effectiveSwizzle = sw;
         if (hasLegacyBaseSwizzle) {
             for (std::size_t component = 0; component < effectiveSwizzle.size();
@@ -18255,9 +18339,17 @@ struct GLContext::Impl {
             effectiveMax = std::min(
                 texObj.params.maxLevel,
                 texObj.params.baseLevel +
-                    mipTailOffsetForDimensions(base.desc.width,
-                                               target == GL_TEXTURE_1D ? 1 : base.desc.height,
-                                               target == GL_TEXTURE_3D ? base.desc.depth : 1));
+                    mipTailOffsetForDimensions(
+                        base.desc.width,
+                        // GL_TEXTURE_1D_ARRAY joins GL_TEXTURE_1D here: the
+                        // `height` argument of the 2-arg GL entry point is
+                        // the LAYER COUNT, not a spatial axis, so it takes
+                        // no part in the mip tail (GL 4.6 §8.14.3). Feeding
+                        // the layer count in claims a longer chain than the
+                        // 1D width actually has whenever layers > width.
+                        (target == GL_TEXTURE_1D ||
+                         target == GL_TEXTURE_1D_ARRAY) ? 1 : base.desc.height,
+                        target == GL_TEXTURE_3D ? base.desc.depth : 1));
             if (texObj.desc.immutable && texObj.desc.levels > 0) {
                 effectiveMax = std::min<GLint>(
                     effectiveMax,
@@ -18272,8 +18364,21 @@ struct GLContext::Impl {
             if (level.desc.width != glMipDimensionAtLevel(base.desc.width, levelOffset)) {
                 return false;
             }
+            // GL_TEXTURE_1D_ARRAY carries its layer count in `height`
+            // (glTexImage2D(GL_TEXTURE_1D_ARRAY, level, fmt, width,
+            // LAYERS, ...)). Layer count is NOT halved down the mip chain
+            // — GL 4.6 §8.17 requires every level of a 1D array to have
+            // the same number of layers — so halving it here declared
+            // every multi-level 1D array texture incomplete from level 1
+            // on, and the incomplete-sampler path substituted the 1×1
+            // (0,0,0,1) fallback texture for the real one.
             const GLsizei expectedHeight =
-                target == GL_TEXTURE_1D ? 1 : glMipDimensionAtLevel(base.desc.height, levelOffset);
+                target == GL_TEXTURE_1D
+                    ? 1
+                    : (target == GL_TEXTURE_1D_ARRAY
+                           ? base.desc.height
+                           : glMipDimensionAtLevel(base.desc.height,
+                                                   levelOffset));
             if (level.desc.height != expectedHeight) {
                 return false;
             }
@@ -34488,6 +34593,9 @@ struct GLContext::Impl {
     LegacyClientArray legacyColorArray;
     LegacyClientArray legacySecondaryColorArray;
     LegacyClientArray legacyTexCoordArray;
+    // GL_EDGE_FLAG_ARRAY. `size`/`type` stay unused — glEdgeFlagPointer
+    // takes neither; the element is always a single GLboolean.
+    LegacyClientArray legacyEdgeFlagArray;
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // capture state.
@@ -34708,6 +34816,17 @@ struct GLContext::Impl {
         float currentTexcoord[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         std::vector<ImmediateModeVertex> vertices;
         std::vector<ImmediateModeMaterialSnapshot> materialSnapshots;
+        // GL 2.1 §2.6.2: the edge flag is CURRENT state, not per-primitive
+        // — `gl-1.0-edgeflag-const` sets it once OUTSIDE glBegin/glEnd and
+        // expects it to apply to every vertex of the following polygon. So
+        // this is deliberately NOT cleared by beginImmediate(); only the
+        // per-vertex latch vector below is.
+        //
+        // The bits live in a PARALLEL vector rather than in
+        // ImmediateModeVertex because that struct is pinned at 48 bytes by
+        // a static_assert against the Metal vertex descriptor.
+        bool currentEdgeFlag = true;
+        std::vector<std::uint8_t> edgeFlags;
     };
     ImmediateModeCapture immediate;
     std::vector<ImmediateModeVertex> legacyClientArrayVertices;
@@ -45720,7 +45839,9 @@ static bool pushSynthesizedMatrixUniforms(
     GLfloat fogStart = 0.0f,
     GLfloat fogEnd = 1.0f,
     const std::array<std::array<double, 4>, 8>* legacyClipPlanes = nullptr,
-    std::uint8_t legacyClipPlaneMask = 0)
+    std::uint8_t legacyClipPlaneMask = 0,
+    GLfloat depthRangeNear = 0.0f,
+    GLfloat depthRangeFar = 1.0f)
 {
     bool changed = false;
     if (program.shaderDrawIDUniformLocation >= 0) {
@@ -45881,6 +46002,41 @@ static bool pushSynthesizedMatrixUniforms(
         changed |= assignSynthesizedUniformFloats(
             value, GL_FLOAT_VEC4, 1, ambient, 4);
     }
+    if (slots.depthRangeNear >= 0) {
+        auto& value = program.uniformValues[slots.depthRangeNear];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &depthRangeNear, 1);
+    }
+    if (slots.depthRangeFar >= 0) {
+        auto& value = program.uniformValues[slots.depthRangeFar];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &depthRangeFar, 1);
+    }
+    if (slots.depthRangeDiff >= 0) {
+        const GLfloat diff = depthRangeFar - depthRangeNear;
+        auto& value = program.uniformValues[slots.depthRangeDiff];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &diff, 1);
+    }
+    if (slots.normalScale >= 0) {
+        // GL 2.1 §2.11.3: the rescale-normal factor is
+        // 1 / sqrt(m31² + m32² + m33²) taken from the INVERSE modelview's
+        // third row — which is exactly the third COLUMN of the normal
+        // matrix (normal matrix == transpose of the inverse modelview).
+        // MatrixStateMirror stores the 3x3 normal matrix in the upper-left
+        // of a Matrix4, column-major, so column 2 is elements 8/9/10.
+        const Matrix4 normalMatrix = matrixState.normalMatrix();
+        const float nx = normalMatrix.m[8];
+        const float ny = normalMatrix.m[9];
+        const float nz = normalMatrix.m[10];
+        const float lengthSquared = nx * nx + ny * ny + nz * nz;
+        const GLfloat scale = lengthSquared > 0.0f
+            ? 1.0f / std::sqrt(lengthSquared)
+            : 1.0f;
+        auto& value = program.uniformValues[slots.normalScale];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &scale, 1);
+    }
     if (slots.fogColor >= 0) {
         const GLfloat defaultFogColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         const GLfloat* color = fogColor != nullptr ? fogColor : defaultFogColor;
@@ -46029,7 +46185,9 @@ static void prepareTranslatedDrawUniformBuffers(
     std::uint8_t legacyClipPlaneMask,
     GLuint drawID,
     TranslatedDrawInfo& tdi,
-    const char* path)
+    const char* path,
+    GLfloat depthRangeNear = 0.0f,
+    GLfloat depthRangeFar = 1.0f)
 {
     if (!program.uniformLayoutComputed) {
         computeStageUniformLayout(program.vertexUniformLayout,
@@ -46045,7 +46203,8 @@ static void prepareTranslatedDrawUniformBuffers(
             tdi.shaderBaseVertex, tdi.baseInstance,
             textureEnvColor, lightModelAmbient,
             fogColor, fogDensity, fogStart, fogEnd,
-            legacyClipPlanes, legacyClipPlaneMask)) {
+            legacyClipPlanes, legacyClipPlaneMask,
+            depthRangeNear, depthRangeFar)) {
         program.markUniformsDirty();
     }
 
@@ -48957,7 +49116,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                 program, matrixState,
                 state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE), 0, 0, 0,
                 texEnv.color, lighting.modelAmbient,
-                fog.color, fog.density, fog.start, fog.end)) {
+                fog.color, fog.density, fog.start, fog.end,
+                nullptr, 0,
+                static_cast<GLfloat>(state->depthRange().nearValue),
+                static_cast<GLfloat>(state->depthRange().farValue))) {
             program.markUniformsDirty();
         }
         buildStageUniformBuffer(fragUniformScratch,
@@ -49575,7 +49737,10 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
             program, matrixState,
             state->isEnabled(GL_VERTEX_PROGRAM_TWO_SIDE), 0, 0, 0,
             texEnv.color, lighting.modelAmbient,
-            fog.color, fog.density, fog.start, fog.end)) {
+            fog.color, fog.density, fog.start, fog.end,
+            nullptr, 0,
+            static_cast<GLfloat>(state->depthRange().nearValue),
+            static_cast<GLfloat>(state->depthRange().farValue))) {
         program.markUniformsDirty();
     }
     computeStageUniformLayout(meshGsGeomUniformLayout,
@@ -49738,7 +49903,9 @@ double GLContext::Impl::prepareBindingConstructionUniformBuffers(
         texEnv.color, lighting.modelAmbient,
         fog.color, fog.density, fog.start, fog.end,
         &clipPlanes, legacyClipPlaneMask,
-        drawID, info, label);
+        drawID, info, label,
+        static_cast<GLfloat>(state->depthRange().nearValue),
+        static_cast<GLfloat>(state->depthRange().farValue));
     return bindingConstructionSizingProfile.enabled
         ? glDrawProfileElapsedUs(start, glDrawProfileNow())
         : 0.0;

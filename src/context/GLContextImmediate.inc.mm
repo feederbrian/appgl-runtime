@@ -4228,8 +4228,26 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
     return true;
 }
 
+bool GLContext::setLegacyEdgeFlagPointer(GLsizei stride, const void* pointer) {
+    if (stride < 0) {
+        pushError(GL_INVALID_VALUE, "glEdgeFlagPointer",
+                  "stride must be non-negative");
+        return false;
+    }
+    auto& state = impl_->legacyEdgeFlagArray;
+    state.size = 1;
+    state.type = GL_UNSIGNED_BYTE;
+    state.stride = stride;
+    state.pointer = pointer;
+    state.bufferName = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
+    return true;
+}
+
 bool GLContext::setLegacyClientArrayEnabled(GLenum array, bool enabled) {
     switch (array) {
+        case GL_EDGE_FLAG_ARRAY:
+            impl_->legacyEdgeFlagArray.enabled = enabled;
+            return true;
         case GL_VERTEX_ARRAY:
             impl_->legacyVertexArray.enabled = enabled;
             return true;
@@ -4255,6 +4273,8 @@ bool GLContext::setLegacyClientArrayEnabled(GLenum array, bool enabled) {
 
 bool GLContext::isLegacyClientArrayEnabled(GLenum array) const {
     switch (array) {
+        case GL_EDGE_FLAG_ARRAY:
+            return impl_->legacyEdgeFlagArray.enabled;
         case GL_VERTEX_ARRAY:
             return impl_->legacyVertexArray.enabled;
         case GL_COLOR_ARRAY:
@@ -4338,6 +4358,7 @@ void GLContext::beginImmediate(GLenum mode) {
     impl_->immediate.mode = mode;
     impl_->immediate.vertices.clear();
     impl_->immediate.materialSnapshots.clear();
+    impl_->immediate.edgeFlags.clear();
 }
 
 void GLContext::immediateVertex(float x, float y, float z, float w) {
@@ -4380,6 +4401,8 @@ void GLContext::immediateVertex(float x, float y, float z, float w) {
     v.texcoord[2] = impl_->immediate.currentTexcoord[2];
     v.texcoord[3] = impl_->immediate.currentTexcoord[3];
     impl_->immediate.vertices.push_back(v);
+    impl_->immediate.edgeFlags.push_back(
+        impl_->immediate.currentEdgeFlag ? 1u : 0u);
 
     Impl::ImmediateModeMaterialSnapshot materialSnapshot;
     materialSnapshot.valid = true;
@@ -4408,6 +4431,12 @@ void GLContext::immediateVertex(float x, float y, float z, float w) {
                 impl_->material.back.emission,
                 sizeof(materialSnapshot.backEmission));
     impl_->immediate.materialSnapshots.push_back(materialSnapshot);
+}
+
+void GLContext::immediateEdgeFlag(bool flag) {
+    // Valid inside AND outside glBegin/glEnd (GL 2.1 §2.6.2). No display
+    // list recording: no measured row compiles glEdgeFlag into a list.
+    impl_->immediate.currentEdgeFlag = flag;
 }
 
 void GLContext::immediateColor(float r, float g, float b, float a) {
@@ -4513,6 +4542,7 @@ void GLContext::endImmediate() {
             impl_->immediate.suppressNextInvalidEnd = false;
             impl_->immediate.vertices.clear();
             impl_->immediate.materialSnapshots.clear();
+    impl_->immediate.edgeFlags.clear();
             return;
         }
     }
@@ -4549,6 +4579,7 @@ void GLContext::endImmediate() {
                 if (Impl::isIntegerInternalFormat(internalFormat)) {
                     impl_->immediate.vertices.clear();
                     impl_->immediate.materialSnapshots.clear();
+    impl_->immediate.edgeFlags.clear();
                     pushError(GL_INVALID_OPERATION, "glEnd",
                               "immediate-mode color draw cannot target integer color attachment");
                     return;
@@ -4809,6 +4840,15 @@ void GLContext::endImmediate() {
     Matrix4 drawMvp = mvp;
     const bool flat = (impl_->fixedFunctionShadeModel == GL_FLAT);
     std::vector<Impl::ImmediateModeMaterialSnapshot> expandedMaterials;
+    // GL 2.1 §3.5.4: in GL_LINE polygon mode an edge is rasterised only if
+    // the edge flag of the vertex that BEGINS it is true. The flags ride in
+    // a vector parallel to `captured`; a vertex with no recorded flag (a
+    // path that fed the capture without going through immediateVertex)
+    // defaults to a boundary edge, which is the pre-existing behaviour.
+    auto edgeFlagAt = [&](std::size_t index) -> bool {
+        const auto& flags = impl_->immediate.edgeFlags;
+        return index >= flags.size() || flags[index] != 0;
+    };
     auto materialAt = [&](std::size_t index) -> const Impl::ImmediateModeMaterialSnapshot* {
         return drawMaterials != nullptr ? &drawMaterials[index] : nullptr;
     };
@@ -4883,6 +4923,16 @@ void GLContext::endImmediate() {
         const bool ccw = twiceArea >= 0.0;
         return rasterStateForPolygonMode.frontFace == GL_CW ? !ccw : ccw;
     };
+    // Only take the CPU line path when BOTH faces are in GL_LINE mode, so
+    // the per-quad facing decision cannot disagree with the decomposition
+    // this branch commits to. Mixed FILL/LINE quads keep the existing
+    // triangulate-and-let-Metal-wireframe behaviour.
+    auto quadsNeedCpuLineDecomposition =
+        [&](const std::vector<Impl::ImmediateModeVertex>& verts) {
+            return verts.size() >= 4 &&
+                   rasterStateForPolygonMode.polygonModeFront == GL_LINE &&
+                   rasterStateForPolygonMode.polygonModeBack == GL_LINE;
+        };
     auto polygonModeForFace = [&](bool frontFacing) {
         return frontFacing
             ? rasterStateForPolygonMode.polygonModeFront
@@ -4950,6 +5000,39 @@ void GLContext::endImmediate() {
             }
             break;
         case GL_QUADS:
+            // GL_LINE polygon mode has to be decomposed on the CPU rather
+            // than handed to Metal's MTLTriangleFillModeLines: a quad
+            // triangulated into two triangles has an INTERIOR diagonal, and
+            // wireframe fill draws it. GL 2.1 §3.5.4 says only the quad's
+            // own four edges are boundary edges, and each is drawn only if
+            // the edge flag of its starting vertex is set — which is what
+            // `spec@!opengl 1.0@gl-1.0-edgeflag-quads` probes.
+            if (quadsNeedCpuLineDecomposition(captured)) {
+                expanded.reserve((captured.size() / 4) * 8);
+                for (std::size_t i = 0; i + 3 < captured.size(); i += 4) {
+                    if (polygonFaceCulled(
+                            polygonIsFrontFacing(captured.data() + i, 4))) {
+                        continue;
+                    }
+                    for (std::size_t e = 0; e < 4; ++e) {
+                        if (!edgeFlagAt(i + e)) {
+                            continue;
+                        }
+                        const std::size_t next = i + ((e + 1) % 4);
+                        appendLine(captured[i + e], captured[next],
+                                   captured[i + 3],
+                                   materialAt(i + e), materialAt(next),
+                                   materialAt(i + 3));
+                    }
+                }
+                drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
+                drawCount = expanded.size();
+                drawMode = GL_LINES;
+                break;
+            }
             expanded.reserve((captured.size() / 4) * 6);
             for (std::size_t i = 0; i + 3 < captured.size(); i += 4) {
                 appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 3],
@@ -4994,11 +5077,16 @@ void GLContext::endImmediate() {
                     case GL_LINE:
                         expanded.reserve(captured.size() * 2);
                         for (std::size_t i = 0; i + 1 < captured.size(); ++i) {
+                            if (!edgeFlagAt(i)) {
+                                continue;
+                            }
                             appendLine(captured[i], captured[i + 1], captured[0],
                                        materialAt(i), materialAt(i + 1), materialAt(0));
                         }
-                        appendLine(captured.back(), captured.front(), captured[0],
-                                   materialAt(captured.size() - 1), materialAt(0), materialAt(0));
+                        if (edgeFlagAt(captured.size() - 1)) {
+                            appendLine(captured.back(), captured.front(), captured[0],
+                                       materialAt(captured.size() - 1), materialAt(0), materialAt(0));
+                        }
                         drawVerts = expanded.data();
                         if (drawMaterials != nullptr) {
                             drawMaterials = expandedMaterials.data();
@@ -6830,6 +6918,7 @@ void GLContext::endListCompat() {
     impl_->immediate.suppressNextInvalidEnd = false;
     impl_->immediate.vertices.clear();
     impl_->immediate.materialSnapshots.clear();
+    impl_->immediate.edgeFlags.clear();
 }
 
 void GLContext::callListCompat(GLuint list) {
@@ -8229,6 +8318,29 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         }
     };
 
+    // GL_EDGE_FLAG_ARRAY, gathered in lockstep with `source` so a polygon
+    // decomposed below can look its boundary bits up by vertex index.
+    // Unlike the colour/texcoord arrays there is no size/type to validate:
+    // glEdgeFlagPointer elements are always a single GLboolean.
+    const auto& edgeFlagArray = impl_->legacyEdgeFlagArray;
+    const std::uint8_t* edgeFlagBase = nullptr;
+    std::size_t edgeFlagAvailableBytes = 0;
+    std::size_t edgeFlagStride = 0;
+    bool edgeFlagArrayUsable = false;
+    if (edgeFlagArray.enabled &&
+        (edgeFlagArray.pointer != nullptr || edgeFlagArray.bufferName != 0)) {
+        if (!resolveArraySource(edgeFlagArray, "glEdgeFlagPointer",
+                                edgeFlagBase, edgeFlagAvailableBytes)) {
+            return false;
+        }
+        edgeFlagStride = edgeFlagArray.stride > 0
+            ? static_cast<std::size_t>(edgeFlagArray.stride)
+            : sizeof(GLboolean);
+        edgeFlagArrayUsable = edgeFlagBase != nullptr;
+    }
+    std::vector<std::uint8_t> sourceEdgeFlags;
+    sourceEdgeFlags.reserve(static_cast<std::size_t>(count));
+
     std::vector<Impl::ImmediateModeVertex> source;
     source.reserve(static_cast<std::size_t>(count));
     for (GLsizei i = 0; i < count; ++i) {
@@ -8315,6 +8427,20 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             ? tp[3]
             : impl_->immediate.currentTexcoord[3];
         source.push_back(v);
+        std::uint8_t edgeFlag = 1u;
+        if (edgeFlagArrayUsable) {
+            const std::size_t edgeFlagOffset =
+                static_cast<std::size_t>(srcIndex) * edgeFlagStride;
+            if (edgeFlagOffset > edgeFlagAvailableBytes ||
+                sizeof(GLboolean) > edgeFlagAvailableBytes - edgeFlagOffset) {
+                return false;
+            }
+            edgeFlag = *reinterpret_cast<const GLboolean*>(
+                           edgeFlagBase + edgeFlagOffset) != GL_FALSE
+                ? 1u
+                : 0u;
+        }
+        sourceEdgeFlags.push_back(edgeFlag);
     }
 
     auto recordSelectPrimitives = [&](GLenum primitiveMode,
@@ -8561,9 +8687,24 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 return false;
         }
     };
+    // `baseIndex` is the offset of verts[0] within `source`, used only to
+    // look up GL_EDGE_FLAG_ARRAY bits. kNoEdgeFlags means "treat every edge
+    // as a boundary edge" — passed by the strip/fan decompositions, which
+    // hand in a reordered temporary whose indices no longer map to
+    // `source` (and whose interior edges are not boundary edges anyway).
+    static constexpr std::size_t kNoEdgeFlags =
+        std::numeric_limits<std::size_t>::max();
+    auto polygonEdgeIsBoundary = [&](std::size_t baseIndex, std::size_t i) {
+        if (baseIndex == kNoEdgeFlags || !edgeFlagArrayUsable) {
+            return true;
+        }
+        const std::size_t index = baseIndex + i;
+        return index >= sourceEdgeFlags.size() || sourceEdgeFlags[index] != 0;
+    };
     auto appendPolygon = [&](const Impl::ImmediateModeVertex* verts,
                              std::size_t n,
-                             const Impl::ImmediateModeVertex& provoking) {
+                             const Impl::ImmediateModeVertex& provoking,
+                             std::size_t baseIndex = kNoEdgeFlags) {
         if (n < 3) {
             return;
         }
@@ -8588,17 +8729,25 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             case GL_LINE:
                 lineVertices.reserve(lineVertices.size() + n * 2);
                 for (std::size_t i = 0; i + 1 < n; ++i) {
+                    if (!polygonEdgeIsBoundary(baseIndex, i)) {
+                        continue;
+                    }
                     appendLine(withFacingColor(verts[i]),
                                withFacingColor(verts[i + 1]),
                                withFacingColor(provoking));
                 }
-                appendLine(withFacingColor(verts[n - 1]),
-                           withFacingColor(verts[0]),
-                           withFacingColor(provoking));
+                if (polygonEdgeIsBoundary(baseIndex, n - 1)) {
+                    appendLine(withFacingColor(verts[n - 1]),
+                               withFacingColor(verts[0]),
+                               withFacingColor(provoking));
+                }
                 break;
             case GL_POINT:
                 pointVertices.reserve(pointVertices.size() + n);
                 for (std::size_t i = 0; i < n; ++i) {
+                    if (!polygonEdgeIsBoundary(baseIndex, i)) {
+                        continue;
+                    }
                     appendPoint(withFacingColor(verts[i]), withFacingColor(provoking));
                 }
                 break;
@@ -8665,7 +8814,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             break;
         case GL_TRIANGLES:
             for (std::size_t i = 0; i + 2 < source.size(); i += 3) {
-                appendPolygon(&source[i], 3, source[i + 2]);
+                appendPolygon(&source[i], 3, source[i + 2], i);
             }
             break;
         case GL_TRIANGLE_STRIP:
@@ -8690,7 +8839,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             break;
         case GL_QUADS:
             for (std::size_t i = 0; i + 3 < source.size(); i += 4) {
-                appendPolygon(&source[i], 4, source[i + 3]);
+                appendPolygon(&source[i], 4, source[i + 3], i);
             }
             break;
         case GL_QUAD_STRIP:
@@ -8706,7 +8855,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             break;
         case GL_POLYGON:
             if (source.size() >= 3) {
-                appendPolygon(source.data(), source.size(), source[0]);
+                appendPolygon(source.data(), source.size(), source[0], 0);
             }
             break;
         default:

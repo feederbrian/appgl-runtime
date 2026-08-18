@@ -80,6 +80,22 @@ EXTRA_ALIASES = [
     ("glNamedFramebufferTextureLayerEXT", "glNamedFramebufferTextureLayer"),
     ("glNamedRenderbufferStorageEXT", "glNamedRenderbufferStorage"),
     ("glNamedRenderbufferStorageMultisampleEXT", "glNamedRenderbufferStorageMultisample"),
+    # EXT_direct_state_access named-buffer family. gl.xml declares no
+    # <alias> for these because EXT DSA nominally accepts names that were
+    # only reserved by glGenBuffers, while core DSA is specified against
+    # glCreateBuffers. In this runtime ObjectTable::reserveName() already
+    # try_emplace()s the object (GLObjectStore.h:2127), so a gen-only name
+    # is present in the table and the core entry points accept it — which
+    # makes the forwarders behaviourally exact here. Signatures are
+    # identical parameter-for-parameter.
+    ("glMapNamedBufferEXT", "glMapNamedBuffer"),
+    ("glMapNamedBufferRangeEXT", "glMapNamedBufferRange"),
+    ("glUnmapNamedBufferEXT", "glUnmapNamedBuffer"),
+    ("glFlushMappedNamedBufferRangeEXT", "glFlushMappedNamedBufferRange"),
+    ("glGetNamedBufferParameterivEXT", "glGetNamedBufferParameteriv"),
+    ("glGetNamedBufferPointervEXT", "glGetNamedBufferPointerv"),
+    ("glGetNamedBufferSubDataEXT", "glGetNamedBufferSubData"),
+    ("glNamedCopyBufferSubDataEXT", "glCopyNamedBufferSubData"),
 ]
 
 # Extension commands whose names aren't reachable through the core-
@@ -99,6 +115,14 @@ MANUAL_EXTENSION_COMMANDS = [
     # round-trips but has no threading effect.
     ("glMaxShaderCompilerThreadsARB", "void", "GLuint count"),
     ("glMaxShaderCompilerThreadsKHR", "void", "GLuint count"),
+    # GL_EXT_direct_state_access named-buffer creation. NOT a plain alias:
+    # EXT DSA says an unknown or since-deleted buffer name is created on
+    # first use ("the GL first creates a new state vector"), while core
+    # glNamedBufferData raises INVALID_OPERATION for the same name. The
+    # hand-written definition in src/runtime/AppGLGroup8.cpp materialises
+    # the name and then forwards to the core entry point.
+    ("glNamedBufferDataEXT", "void",
+     "GLuint buffer, GLsizeiptr size, const void *data, GLenum usage"),
 ]
 
 # Extension commands that are intentionally promoted into the generated
@@ -611,6 +635,13 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glLightModelfv",
     "glLightModeli",
     "glLightModeliv",
+    # Edge flags. Polygon-mode GL_LINE decomposition in
+    # GLContextImmediate.inc.mm needs the per-vertex boundary bit to
+    # decide which polygon edges become lines; a silent stub drew every
+    # edge, which is what `spec@!opengl 1.0@gl-1.0-edgeflag` measures.
+    "glEdgeFlag",
+    "glEdgeFlagv",
+    "glEdgeFlagPointer",
 }
 
 IMPLEMENTED_FUNCTIONS = {

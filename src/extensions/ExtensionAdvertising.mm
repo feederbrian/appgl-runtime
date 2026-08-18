@@ -5,7 +5,8 @@ namespace {
 
 ExtensionAdvertisingState resolveAdvertisingFlag(const char* extensionName,
                                                   const char* canonicalFlagName,
-                                                  const char* environmentVariable) {
+                                                  const char* environmentVariable,
+                                                  bool buildDefault = false) {
     return {
         extensionName,
         canonicalFlagName,
@@ -14,7 +15,7 @@ ExtensionAdvertisingState resolveAdvertisingFlag(const char* extensionName,
             canonicalFlagName,
             {},
             {environmentVariable},
-            false),
+            buildDefault),
     };
 }
 
@@ -62,6 +63,19 @@ const ExtensionAdvertisingSnapshot& extensionAdvertisingSnapshot() {
             "GL_ARB_texture_rg",
             "advertise-arb-texture-rg",
             "APPGL_ADVERTISE_ARB_TEXTURE_RG"),
+        resolveAdvertisingFlag(
+            "GL_ARB_direct_state_access",
+            "advertise-arb-direct-state-access",
+            "APPGL_ADVERTISE_ARB_DIRECT_STATE_ACCESS"),
+        // Default TRUE: GL_EXT_direct_state_access used to live in
+        // kBaseExtensions unconditionally. Moving it here keeps the default
+        // advertisement byte-identical while making de-advertisement
+        // measurable from a launch flag.
+        resolveAdvertisingFlag(
+            "GL_EXT_direct_state_access",
+            "advertise-ext-direct-state-access",
+            "APPGL_ADVERTISE_EXT_DIRECT_STATE_ACCESS",
+            true),
     }};
     return snapshot;
 }

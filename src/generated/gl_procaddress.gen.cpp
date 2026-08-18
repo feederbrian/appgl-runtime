@@ -144,6 +144,7 @@ void APIENTRY glEndTransformFeedbackNV(void);
 GLsync APIENTRY glFenceSyncAPPLE(GLenum condition, GLbitfield flags);
 void APIENTRY glFlushMappedBufferRangeAPPLE(GLenum target, GLintptr offset, GLsizeiptr length);
 void APIENTRY glFlushMappedBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length);
+void APIENTRY glFlushMappedNamedBufferRangeEXT(GLuint buffer, GLintptr offset, GLsizeiptr length);
 void APIENTRY glFogCoordPointerEXT(GLenum type, GLsizei stride, const void *pointer);
 void APIENTRY glFogCoorddEXT(GLdouble coord);
 void APIENTRY glFogCoorddvEXT(const GLdouble *coord);
@@ -195,6 +196,9 @@ void APIENTRY glGetInteger64vAPPLE(GLenum pname, GLint64 *data);
 void APIENTRY glGetInteger64vEXT(GLenum pname, GLint64 *data);
 void APIENTRY glGetIntegerIndexedvEXT(GLenum target, GLuint index, GLint *data);
 void APIENTRY glGetMultisamplefvNV(GLenum pname, GLuint index, GLfloat *val);
+void APIENTRY glGetNamedBufferParameterivEXT(GLuint buffer, GLenum pname, GLint *params);
+void APIENTRY glGetNamedBufferPointervEXT(GLuint buffer, GLenum pname, void **params);
+void APIENTRY glGetNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, void *data);
 void APIENTRY glGetNamedFramebufferAttachmentParameterivEXT(GLuint framebuffer, GLenum attachment, GLenum pname, GLint *params);
 void APIENTRY glGetNamedFramebufferParameterivEXT(GLuint framebuffer, GLenum pname, GLint *param);
 void APIENTRY glGetNamedRenderbufferParameterivEXT(GLuint renderbuffer, GLenum pname, GLint *params);
@@ -259,6 +263,8 @@ void APIENTRY glLoadTransposeMatrixfARB(const GLfloat *m);
 void * APIENTRY glMapBufferARB(GLenum target, GLenum access);
 void * APIENTRY glMapBufferOES(GLenum target, GLenum access);
 void * APIENTRY glMapBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
+void * APIENTRY glMapNamedBufferEXT(GLuint buffer, GLenum access);
+void * APIENTRY glMapNamedBufferRangeEXT(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access);
 void APIENTRY glMemoryBarrierEXT(GLbitfield barriers);
 void APIENTRY glMinSampleShadingARB(GLfloat value);
 void APIENTRY glMinSampleShadingOES(GLfloat value);
@@ -307,6 +313,7 @@ void APIENTRY glMultiTexCoord4sARB(GLenum target, GLshort s, GLshort t, GLshort 
 void APIENTRY glMultiTexCoord4svARB(GLenum target, const GLshort *v);
 void APIENTRY glNamedBufferStorageEXT(GLuint buffer, GLsizeiptr size, const void *data, GLbitfield flags);
 void APIENTRY glNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data);
+void APIENTRY glNamedCopyBufferSubDataEXT(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
 void APIENTRY glNamedFramebufferParameteriEXT(GLuint framebuffer, GLenum pname, GLint param);
 void APIENTRY glNamedFramebufferRenderbufferEXT(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
 void APIENTRY glNamedFramebufferTextureEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level);
@@ -462,6 +469,7 @@ void APIENTRY glUniformMatrix4x2fvNV(GLint location, GLsizei count, GLboolean tr
 void APIENTRY glUniformMatrix4x3fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GLboolean APIENTRY glUnmapBufferARB(GLenum target);
 GLboolean APIENTRY glUnmapBufferOES(GLenum target);
+GLboolean APIENTRY glUnmapNamedBufferEXT(GLuint buffer);
 void APIENTRY glUseProgramObjectARB(GLuint program);
 void APIENTRY glValidateProgramARB(GLuint program);
 void APIENTRY glVertexAttrib1dARB(GLuint index, GLdouble x);
@@ -993,6 +1001,7 @@ void APIENTRY glWindowPos3s(GLshort x, GLshort y, GLshort z);
 void APIENTRY glWindowPos3sv(const GLshort *v);
 void APIENTRY glMaxShaderCompilerThreadsARB(GLuint count);
 void APIENTRY glMaxShaderCompilerThreadsKHR(GLuint count);
+void APIENTRY glNamedBufferDataEXT(GLuint buffer, GLsizeiptr size, const void *data, GLenum usage);
 }  // extern "C"
 
 namespace {
@@ -1381,6 +1390,7 @@ const ProcEntry kProcTable[] = {
     {"glFlushMappedBufferRangeAPPLE", reinterpret_cast<AppGLProc>(&::glFlushMappedBufferRangeAPPLE)},
     {"glFlushMappedBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glFlushMappedBufferRangeEXT)},
     {"glFlushMappedNamedBufferRange", reinterpret_cast<AppGLProc>(&::glFlushMappedNamedBufferRange)},
+    {"glFlushMappedNamedBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glFlushMappedNamedBufferRangeEXT)},
     {"glFogCoordPointer", reinterpret_cast<AppGLProc>(&::glFogCoordPointer)},
     {"glFogCoordPointerEXT", reinterpret_cast<AppGLProc>(&::glFogCoordPointerEXT)},
     {"glFogCoordd", reinterpret_cast<AppGLProc>(&::glFogCoordd)},
@@ -1517,8 +1527,11 @@ const ProcEntry kProcTable[] = {
     {"glGetMultisamplefvNV", reinterpret_cast<AppGLProc>(&::glGetMultisamplefvNV)},
     {"glGetNamedBufferParameteri64v", reinterpret_cast<AppGLProc>(&::glGetNamedBufferParameteri64v)},
     {"glGetNamedBufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedBufferParameteriv)},
+    {"glGetNamedBufferParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetNamedBufferParameterivEXT)},
     {"glGetNamedBufferPointerv", reinterpret_cast<AppGLProc>(&::glGetNamedBufferPointerv)},
+    {"glGetNamedBufferPointervEXT", reinterpret_cast<AppGLProc>(&::glGetNamedBufferPointervEXT)},
     {"glGetNamedBufferSubData", reinterpret_cast<AppGLProc>(&::glGetNamedBufferSubData)},
+    {"glGetNamedBufferSubDataEXT", reinterpret_cast<AppGLProc>(&::glGetNamedBufferSubDataEXT)},
     {"glGetNamedFramebufferAttachmentParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferAttachmentParameteriv)},
     {"glGetNamedFramebufferAttachmentParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferAttachmentParameterivEXT)},
     {"glGetNamedFramebufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferParameteriv)},
@@ -1757,7 +1770,9 @@ const ProcEntry kProcTable[] = {
     {"glMapGrid2d", reinterpret_cast<AppGLProc>(&::glMapGrid2d)},
     {"glMapGrid2f", reinterpret_cast<AppGLProc>(&::glMapGrid2f)},
     {"glMapNamedBuffer", reinterpret_cast<AppGLProc>(&::glMapNamedBuffer)},
+    {"glMapNamedBufferEXT", reinterpret_cast<AppGLProc>(&::glMapNamedBufferEXT)},
     {"glMapNamedBufferRange", reinterpret_cast<AppGLProc>(&::glMapNamedBufferRange)},
+    {"glMapNamedBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glMapNamedBufferRangeEXT)},
     {"glMaterialf", reinterpret_cast<AppGLProc>(&::glMaterialf)},
     {"glMaterialfv", reinterpret_cast<AppGLProc>(&::glMaterialfv)},
     {"glMateriali", reinterpret_cast<AppGLProc>(&::glMateriali)},
@@ -1866,12 +1881,14 @@ const ProcEntry kProcTable[] = {
     {"glMultiTexCoordP4ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP4ui)},
     {"glMultiTexCoordP4uiv", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP4uiv)},
     {"glNamedBufferData", reinterpret_cast<AppGLProc>(&::glNamedBufferData)},
+    {"glNamedBufferDataEXT", reinterpret_cast<AppGLProc>(&::glNamedBufferDataEXT)},
     {"glNamedBufferPageCommitmentARB", reinterpret_cast<AppGLProc>(&::glNamedBufferPageCommitmentARB)},
     {"glNamedBufferPageCommitmentEXT", reinterpret_cast<AppGLProc>(&::glNamedBufferPageCommitmentEXT)},
     {"glNamedBufferStorage", reinterpret_cast<AppGLProc>(&::glNamedBufferStorage)},
     {"glNamedBufferStorageEXT", reinterpret_cast<AppGLProc>(&::glNamedBufferStorageEXT)},
     {"glNamedBufferSubData", reinterpret_cast<AppGLProc>(&::glNamedBufferSubData)},
     {"glNamedBufferSubDataEXT", reinterpret_cast<AppGLProc>(&::glNamedBufferSubDataEXT)},
+    {"glNamedCopyBufferSubDataEXT", reinterpret_cast<AppGLProc>(&::glNamedCopyBufferSubDataEXT)},
     {"glNamedFramebufferDrawBuffer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferDrawBuffer)},
     {"glNamedFramebufferDrawBuffers", reinterpret_cast<AppGLProc>(&::glNamedFramebufferDrawBuffers)},
     {"glNamedFramebufferParameteri", reinterpret_cast<AppGLProc>(&::glNamedFramebufferParameteri)},
@@ -2386,6 +2403,7 @@ const ProcEntry kProcTable[] = {
     {"glUnmapBufferARB", reinterpret_cast<AppGLProc>(&::glUnmapBufferARB)},
     {"glUnmapBufferOES", reinterpret_cast<AppGLProc>(&::glUnmapBufferOES)},
     {"glUnmapNamedBuffer", reinterpret_cast<AppGLProc>(&::glUnmapNamedBuffer)},
+    {"glUnmapNamedBufferEXT", reinterpret_cast<AppGLProc>(&::glUnmapNamedBufferEXT)},
     {"glUseProgram", reinterpret_cast<AppGLProc>(&::glUseProgram)},
     {"glUseProgramObjectARB", reinterpret_cast<AppGLProc>(&::glUseProgramObjectARB)},
     {"glUseProgramStages", reinterpret_cast<AppGLProc>(&::glUseProgramStages)},

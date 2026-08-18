@@ -2013,6 +2013,39 @@ extern "C" void APIENTRY glMaxShaderCompilerThreadsKHR(GLuint count) {
     glMaxShaderCompilerThreadsARB(count);
 }
 
+// GL_EXT_direct_state_access §"Buffer objects": "If the buffer object named
+// by the buffer parameter has not been previously bound or has been deleted
+// since the last binding, the GL first creates a new state vector,
+// initialized with a zero-sized memory buffer". Core GL 4.5
+// glNamedBufferData is specified against glCreateBuffers instead and rejects
+// such a name with INVALID_OPERATION (GLContextBuffer.inc.mm:1016). That
+// difference is the whole reason this cannot be a generated alias forwarder.
+// Name zero still has no buffer and keeps the INVALID_OPERATION path.
+extern "C" void APIENTRY glNamedBufferDataEXT(GLuint buffer,
+                                              GLsizeiptr size,
+                                              const void* data,
+                                              GLenum usage) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    if (buffer != 0) {
+        // Materialise the name the way a first glBindBuffer would. Both
+        // halves matter: insertAt() covers a name that was deleted (or never
+        // reserved at all), and `instantiated` covers a name that
+        // glGenBuffers only reserved — ObjectTable::reserveName()
+        // try_emplace()s the slot but leaves instantiated=false, and
+        // GLContext::bufferData rejects !instantiated with
+        // INVALID_OPERATION (GLContextBuffer.inc.mm:1030).
+        GLBufferObject* object = context->objects().buffers().get(buffer);
+        if (object == nullptr) {
+            object = context->objects().buffers().insertAt(buffer);
+        }
+        if (object != nullptr) {
+            object->instantiated = true;
+        }
+    }
+    ::glNamedBufferData(buffer, size, data, usage);
+}
+
 namespace {
 
 static bool uniformResourceNameMatches(const std::string& stored,

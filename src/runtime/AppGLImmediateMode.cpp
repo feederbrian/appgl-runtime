@@ -1498,6 +1498,30 @@ extern "C" void APIENTRY glColor3fv(const GLfloat* v) {
     ctx->immediateColor(v[0], v[1], v[2], 1.0f);
 }
 
+extern "C" void APIENTRY glEdgeFlag(GLboolean flag) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateEdgeFlag(flag != GL_FALSE);
+}
+
+extern "C" void APIENTRY glEdgeFlagv(const GLboolean* flag) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || flag == nullptr) {
+        return;
+    }
+    ctx->immediateEdgeFlag(*flag != GL_FALSE);
+}
+
+extern "C" void APIENTRY glEdgeFlagPointer(GLsizei stride, const void* pointer) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    (void)ctx->setLegacyEdgeFlagPointer(stride, pointer);
+}
+
 extern "C" void APIENTRY glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     auto* ctx = immediateContext();
     if (ctx == nullptr) {

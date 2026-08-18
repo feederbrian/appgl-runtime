@@ -2476,6 +2476,20 @@ bool GLContext::texStorage(
             return false;
         }
     }
+    // GL 4.6 §8.19 — the same square-face rule applies to plain
+    // GL_TEXTURE_CUBE_MAP, and it was the missing half of the check above.
+    // MTLTextureDescriptor does not error on a non-square cube, it asserts
+    // ("width must equal height for cube textures") and aborts the process,
+    // so this must be rejected here. Measured: without this guard
+    // piglit spec@arb_texture_storage@texture-storage aborts (SIGABRT) at
+    // HEAD, and spec@arb_direct_state_access@textures-storage aborts as soon
+    // as GL_ARB_direct_state_access is advertised. Both call
+    // glTextureStorage2D/glTexStorage2D with 16x18 on a cube map and expect
+    // GL_INVALID_VALUE.
+    if (target == GL_TEXTURE_CUBE_MAP && width != height) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     // GL 4.6 §8.19 — for immutable storage, `levels` must not exceed
     // floor(log2(max(width, height[, depth]))) + 1. Apply to the
     // cube-map-array path explicitly; other targets have the same
@@ -2644,8 +2658,18 @@ bool GLContext::texStorage(
         GLTextureImageLevel image;
         image.desc = object->desc;
         image.desc.width = glMipDimensionAtLevel(width, lvl);
+        // GL_TEXTURE_1D_ARRAY's `height` is the LAYER COUNT, not a spatial
+        // axis, so it does not scale down the chain — same rule the depth
+        // line below already applies to 2D-array / cube-array layers.
+        // Halving it here made glTexStorage2D(GL_TEXTURE_1D_ARRAY, …)
+        // disagree with the per-level glTexImage2D path (which stores the
+        // app-supplied layer count verbatim at every level) and also
+        // under-allocated every level's shadow by 2^lvl.
         image.desc.height = (target == GL_TEXTURE_1D)
-            ? 1 : glMipDimensionAtLevel(height, lvl);
+            ? 1
+            : (target == GL_TEXTURE_1D_ARRAY
+                   ? height
+                   : glMipDimensionAtLevel(height, lvl));
         image.desc.depth = (target == GL_TEXTURE_3D)
             ? glMipDimensionAtLevel(depth, lvl)
             : object->desc.depth;  // array / cube depth doesn't scale

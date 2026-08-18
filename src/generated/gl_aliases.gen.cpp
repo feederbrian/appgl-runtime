@@ -624,6 +624,10 @@ extern "C" void APIENTRY glFlushMappedBufferRangeEXT(GLenum target, GLintptr off
     ::glFlushMappedBufferRange(target, offset, length);
 }
 
+extern "C" void APIENTRY glFlushMappedNamedBufferRangeEXT(GLuint buffer, GLintptr offset, GLsizeiptr length) {
+    ::glFlushMappedNamedBufferRange(buffer, offset, length);
+}
+
 extern "C" void APIENTRY glFogCoordPointerEXT(GLenum type, GLsizei stride, const void *pointer) {
     ::glFogCoordPointer(type, stride, pointer);
 }
@@ -826,6 +830,18 @@ extern "C" void APIENTRY glGetIntegerIndexedvEXT(GLenum target, GLuint index, GL
 
 extern "C" void APIENTRY glGetMultisamplefvNV(GLenum pname, GLuint index, GLfloat *val) {
     ::glGetMultisamplefv(pname, index, val);
+}
+
+extern "C" void APIENTRY glGetNamedBufferParameterivEXT(GLuint buffer, GLenum pname, GLint *params) {
+    ::glGetNamedBufferParameteriv(buffer, pname, params);
+}
+
+extern "C" void APIENTRY glGetNamedBufferPointervEXT(GLuint buffer, GLenum pname, void **params) {
+    ::glGetNamedBufferPointerv(buffer, pname, params);
+}
+
+extern "C" void APIENTRY glGetNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, void *data) {
+    ::glGetNamedBufferSubData(buffer, offset, size, data);
 }
 
 extern "C" void APIENTRY glGetNamedFramebufferAttachmentParameterivEXT(GLuint framebuffer, GLenum attachment, GLenum pname, GLint *params) {
@@ -1084,6 +1100,14 @@ extern "C" void * APIENTRY glMapBufferRangeEXT(GLenum target, GLintptr offset, G
     return ::glMapBufferRange(target, offset, length, access);
 }
 
+extern "C" void * APIENTRY glMapNamedBufferEXT(GLuint buffer, GLenum access) {
+    return ::glMapNamedBuffer(buffer, access);
+}
+
+extern "C" void * APIENTRY glMapNamedBufferRangeEXT(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    return ::glMapNamedBufferRange(buffer, offset, length, access);
+}
+
 extern "C" void APIENTRY glMemoryBarrierEXT(GLbitfield barriers) {
     ::glMemoryBarrier(barriers);
 }
@@ -1274,6 +1298,10 @@ extern "C" void APIENTRY glNamedBufferStorageEXT(GLuint buffer, GLsizeiptr size,
 
 extern "C" void APIENTRY glNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data) {
     ::glNamedBufferSubData(buffer, offset, size, data);
+}
+
+extern "C" void APIENTRY glNamedCopyBufferSubDataEXT(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
+    ::glCopyNamedBufferSubData(readBuffer, writeBuffer, readOffset, writeOffset, size);
 }
 
 extern "C" void APIENTRY glNamedFramebufferParameteriEXT(GLuint framebuffer, GLenum pname, GLint param) {
@@ -1894,6 +1922,10 @@ extern "C" GLboolean APIENTRY glUnmapBufferARB(GLenum target) {
 
 extern "C" GLboolean APIENTRY glUnmapBufferOES(GLenum target) {
     return ::glUnmapBuffer(target);
+}
+
+extern "C" GLboolean APIENTRY glUnmapNamedBufferEXT(GLuint buffer) {
+    return ::glUnmapNamedBuffer(buffer);
 }
 
 extern "C" void APIENTRY glUseProgramObjectARB(GLuint program) {

@@ -684,6 +684,14 @@ public:
     void beginImmediate(GLenum mode);
     void immediateVertex(float x, float y, float z, float w);
     void immediateColor(float r, float g, float b, float a);
+    // GL 1.0 glEdgeFlag: sets the current boundary-edge bit that the
+    // NEXT glVertex* latches. Polygon-mode GL_LINE decomposition reads
+    // the latched per-vertex bit to decide which edges become lines.
+    void immediateEdgeFlag(bool flag);
+    // GL 1.1 glEdgeFlagPointer. Kept off the shared
+    // `setLegacyClientArrayPointer` path because glEdgeFlagPointer has no
+    // size/type arguments to validate.
+    bool setLegacyEdgeFlagPointer(GLsizei stride, const void* pointer);
     void immediateTexCoord(unsigned int unit, float s, float t, float r, float q);
     void endImmediate();
     void rectCompat(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2);

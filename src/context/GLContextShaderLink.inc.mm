@@ -1783,6 +1783,14 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kLegacyClipPlanes);
         programObject->synthesizedMatrixSlots.vertexProgramTwoSide =
             findLocByName(SUN::kVertexProgramTwoSide);
+        programObject->synthesizedMatrixSlots.depthRangeNear =
+            findLocByName(SUN::kDepthRangeNear);
+        programObject->synthesizedMatrixSlots.depthRangeFar =
+            findLocByName(SUN::kDepthRangeFar);
+        programObject->synthesizedMatrixSlots.depthRangeDiff =
+            findLocByName(SUN::kDepthRangeDiff);
+        programObject->synthesizedMatrixSlots.normalScale =
+            findLocByName(SUN::kNormalScale);
         programObject->shaderDrawIDUniformLocation =
             findLocByName("_appgl_DrawID");
         programObject->shaderBaseVertexUniformLocation =
