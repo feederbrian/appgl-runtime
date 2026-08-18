@@ -1065,6 +1065,31 @@ bool GLContext::linkProgram(GLuint program) {
     }
 
     {
+        // ARB_uniform_buffer_object: the same two link rules the shader-storage
+        // block path above already enforces, applied to named uniform blocks.
+        std::string validationError;
+        if (!validateLinkedUniformBlocks(attachedShaderObjects, validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+        if (!validateLinkedUniformBlockLimits(
+                attachedShaderObjects,
+                impl_->capabilities.get(),
+                validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
+    {
         std::string validationError;
         if (!validateLinkedImageUniformLimits(
                 attachedShaderObjects,

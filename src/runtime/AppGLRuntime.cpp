@@ -5799,13 +5799,20 @@ void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
         recordValidationError(context, "glBindBufferRange", GL_INVALID_OPERATION, "cannot bind transform feedback buffer while transform feedback is actively recording");
         return;
     }
-    // GL 4.6 §6.1.1: For TRANSFORM_FEEDBACK_BUFFER, size must be > 0, and
-    // both offset and size must be word-aligned (multiple of 4).
+    // GL 4.6 §6.1.1: "An INVALID_VALUE error is generated if size is less
+    // than or equal to zero." Only `size < 0` was rejected (down in
+    // GLContext::bindBufferRange), so a zero-length range bound against a
+    // real buffer silently succeeded. The rule is scoped to buffer != 0 here:
+    // GLContext::bindBufferOffset and GLContext::bindBufferBase both route
+    // their unbind path through bindBufferRange(target, index, 0, 0, 0), and
+    // size == 0 is the internal "whole buffer, live size" sentinel.
+    if (buffer != 0 && size <= 0) {
+        recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "size must be greater than zero");
+        return;
+    }
+    // GL 4.6 §6.1.1: For TRANSFORM_FEEDBACK_BUFFER, offset and size must
+    // additionally be word-aligned (multiple of 4).
     if (target == GL_TRANSFORM_FEEDBACK_BUFFER && buffer != 0) {
-        if (size <= 0) {
-            recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "size must be > 0 for transform feedback buffer");
-            return;
-        }
         if (offset % 4 != 0) {
             recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "offset must be word-aligned for transform feedback buffer");
             return;

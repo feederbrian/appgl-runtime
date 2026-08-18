@@ -218,20 +218,12 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                         }
                     }
                 }
-                switch (internalFormat) {
-                    case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
-                    case GL_R32I: case GL_R32UI:
-                    case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
-                    case GL_RG32I: case GL_RG32UI:
-                    case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
-                    case GL_RGB32I: case GL_RGB32UI:
-                    case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
-                    case GL_RGBA32I: case GL_RGBA32UI:
-                    case GL_RGB10_A2UI:
-                        fboIsInteger = true;
-                        break;
-                    default: break;
-                }
+                // One table, one predicate: this local copy omitted every
+                // EXT_texture_integer A/L/I format, so glReadPixels(
+                // GL_RGBA_INTEGER) off an ALPHA8I / LUMINANCE32UI /
+                // INTENSITY16I attachment saw "integer format, fixed-point
+                // buffer" and raised GL_INVALID_OPERATION.
+                fboIsInteger = Impl::isIntegerInternalFormat(internalFormat);
             }
             // GL 4.6 §18.3.2: format and the FBO's attachment must agree
             // on integer-ness. Integer format needs integer FBO; non-

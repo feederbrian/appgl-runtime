@@ -2098,12 +2098,23 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         const bool formatIsDepth = (format == GL_DEPTH_COMPONENT);
         const bool formatIsStencil = (format == GL_STENCIL_INDEX);
         const bool formatIsDS = (format == GL_DEPTH_STENCIL);
+        // EXT_texture_integer also defines ALPHA_INTEGER_EXT,
+        // LUMINANCE_INTEGER_EXT and LUMINANCE_ALPHA_INTEGER_EXT as integer
+        // *external* formats (new Table 3.6 rows). Leaving them out made the
+        // integer/non-integer agreement test below reject every legal
+        // single-channel integer readback: glGetTexImage(GL_RGBA32I,
+        // GL_ALPHA_INTEGER) returned GL_INVALID_OPERATION and left the
+        // destination untouched, and the A/L/LA integer textures could not be
+        // read back in their own base format at all.
         const bool formatIsIntegerChannel =
             (format == GL_RED_INTEGER
              || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
              || format == GL_RG_INTEGER
              || format == GL_RGB_INTEGER || format == GL_BGR_INTEGER
-             || format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER);
+             || format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER
+             || format == GL_ALPHA_INTEGER_EXT
+             || format == GL_LUMINANCE_INTEGER_EXT
+             || format == GL_LUMINANCE_ALPHA_INTEGER_EXT);
         const bool formatIsColor =
             !formatIsDepth && !formatIsStencil && !formatIsDS;
         const bool internalIsDepth = isDepthFormat(internalFmt);
@@ -2113,19 +2124,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
              internalFmt == GL_DEPTH24_STENCIL8 ||
              internalFmt == GL_DEPTH32F_STENCIL8);
         const bool internalIsColor = !internalIsDepth && !internalIsStencil;
-        auto isIntegerInternal = [](GLenum f) {
-            switch (f) {
-                case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI: case GL_R32I: case GL_R32UI:
-                case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI: case GL_RG32I: case GL_RG32UI:
-                case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI: case GL_RGB32I: case GL_RGB32UI:
-                case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
-                case GL_RGBA32I: case GL_RGBA32UI: case GL_RGB10_A2UI:
-                    return true;
-                default:
-                    return false;
-            }
-        };
-        const bool internalIsInteger = isIntegerInternal(internalFmt);
+        // Same table as the glReadPixels admission check — share the one
+        // predicate. The inline copy this replaces omitted every
+        // EXT_texture_integer A/L/I format, so glGetTexImage(
+        // GL_RGBA_INTEGER) off an INTENSITY32I texture was rejected with
+        // GL_INVALID_OPERATION.
+        const bool internalIsInteger = Impl::isIntegerInternalFormat(internalFmt);
 
         // format is color but internal isn't
         if (formatIsColor && !internalIsColor) {

@@ -12406,7 +12406,14 @@ struct GLContext::Impl {
             case GL_BLUE_INTEGER:
                 rgba[2] = raw[0];
                 break;
+            // EXT_texture_integer new Table 3.6: ALPHA_INTEGER_EXT,
+            // LUMINANCE_INTEGER_EXT and LUMINANCE_ALPHA_INTEGER_EXT carry
+            // exactly the component assignment of their fixed-point
+            // namesakes, so they belong on these arms rather than in the
+            // positional `default:` fallback, which put an alpha payload in
+            // the RED lane.
             case GL_ALPHA:
+            case GL_ALPHA_INTEGER_EXT:
                 rgba[3] = raw[0];
                 break;
             case GL_RG:
@@ -12453,12 +12460,14 @@ struct GLContext::Impl {
                 rgba[3] = raw[0];
                 break;
             case GL_LUMINANCE_ALPHA:
+            case GL_LUMINANCE_ALPHA_INTEGER_EXT:
                 rgba[3] = raw[1];
                 rgba[0] = raw[0];
                 rgba[1] = raw[0];
                 rgba[2] = raw[0];
                 break;
             case GL_LUMINANCE:
+            case GL_LUMINANCE_INTEGER_EXT:
                 rgba[0] = raw[0];
                 rgba[1] = raw[0];
                 rgba[2] = raw[0];
@@ -12506,6 +12515,68 @@ struct GLContext::Impl {
                 rgba[2] = rgba[0];
                 rgba[3] = rgba[0];
                 break;
+        }
+    }
+
+    // EXT_texture_integer A / L / LA / I storage-lane packing.
+    //
+    // readCompatUploadSourceRGBA + applyCompatUploadInternalBase leave the
+    // texel in *GL RGBA lane order* (Table 8.14): alpha in rgba[3], luminance
+    // in rgba[0]. The native packer then writes the LEADING `info.channels`
+    // lanes into the Metal texture. That is lossless while the storage is
+    // 4-channel, but metalRenderbufferFormat backs these formats with
+    // R8Sint / RG16Uint / R32Sint / ... , so an ALPHA texture would store
+    // rgba[0] (a constant 0) and a LUMINANCE_ALPHA texture would store
+    // (L, L) — the uploaded alpha never reached the surface at all.
+    //
+    // Move the components that actually have storage down into the leading
+    // lanes. Callers must invoke this only on the native-format packer path;
+    // the RGBA8 shadow path wants the GL lane order untouched.
+    static bool packLegacyIntegerBaseStorageLanes(GLenum internalFormat,
+                                                  double rgba[4]) {
+        switch (internalFormat) {
+            case GL_ALPHA8I_EXT:
+            case GL_ALPHA8UI_EXT:
+            case GL_ALPHA16I_EXT:
+            case GL_ALPHA16UI_EXT:
+            case GL_ALPHA32I_EXT:
+            case GL_ALPHA32UI_EXT:
+                rgba[0] = rgba[3];
+                rgba[1] = 0.0;
+                rgba[2] = 0.0;
+                rgba[3] = 1.0;
+                return true;
+            case GL_LUMINANCE_ALPHA8I_EXT:
+            case GL_LUMINANCE_ALPHA8UI_EXT:
+            case GL_LUMINANCE_ALPHA16I_EXT:
+            case GL_LUMINANCE_ALPHA16UI_EXT:
+            case GL_LUMINANCE_ALPHA32I_EXT:
+            case GL_LUMINANCE_ALPHA32UI_EXT:
+                rgba[1] = rgba[3];
+                rgba[2] = 0.0;
+                rgba[3] = 1.0;
+                return true;
+            // LUMINANCE and INTENSITY already carry their single stored
+            // component in rgba[0]; only the trailing lanes need clearing so
+            // a wider Metal format cannot pick up expansion artefacts.
+            case GL_LUMINANCE8I_EXT:
+            case GL_LUMINANCE8UI_EXT:
+            case GL_LUMINANCE16I_EXT:
+            case GL_LUMINANCE16UI_EXT:
+            case GL_LUMINANCE32I_EXT:
+            case GL_LUMINANCE32UI_EXT:
+            case GL_INTENSITY8I_EXT:
+            case GL_INTENSITY8UI_EXT:
+            case GL_INTENSITY16I_EXT:
+            case GL_INTENSITY16UI_EXT:
+            case GL_INTENSITY32I_EXT:
+            case GL_INTENSITY32UI_EXT:
+                rgba[1] = 0.0;
+                rgba[2] = 0.0;
+                rgba[3] = 1.0;
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -13528,6 +13599,10 @@ struct GLContext::Impl {
                     if (isRGBFamilyWithoutAlpha(internalFormat)) {
                         comps[3] = 1.0;
                     }
+                    // A / L / LA / I integer textures are backed by R* / RG*
+                    // Metal formats: move the stored components into the
+                    // leading lanes the writer below consumes.
+                    (void)packLegacyIntegerBaseStorageLanes(internalFormat, comps);
 
                     // Write to native format.
                     for (int c = 0; c < info.channels; ++c) {
@@ -16721,6 +16796,59 @@ struct GLContext::Impl {
             case GL_INTENSITY16:
             case GL_INTENSITY16F_ARB:
             case GL_INTENSITY32F_ARB:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_RED};
+                return true;
+            // EXT_texture_integer A/L/I channel fill.
+            //
+            // GL 4.6 §8.5.1 Table 8.14 ("Texture and internal formats ...
+            // conversion to RGBA") assigns the same base-format expansion to
+            // the integer A/L/I formats as to their fixed-point namesakes:
+            //   ALPHA           -> (0, 0, 0, A)
+            //   LUMINANCE       -> (L, L, L, 1)
+            //   LUMINANCE_ALPHA -> (L, L, L, A)
+            //   INTENSITY       -> (I, I, I, I)
+            // and EXT_texture_integer only changes *how* the components are
+            // interpreted (as integers), not which lanes they land in — the
+            // synthesized alpha is the integer 1.
+            //
+            // The fixed-point rows above can spell the expansion with
+            // GL_ALPHA because their Metal storage is RGBA8Unorm (see
+            // metalRenderbufferFormat: GL_ALPHA .. GL_INTENSITY16 ->
+            // MTLPixelFormatRGBA8Unorm), so the value really does live in the
+            // alpha lane. The *integer* rows are single/two-channel Metal
+            // storage instead (R8Sint/R16Uint/RG32Sint/...), so the stored
+            // component lives in RED (and, for LUMINANCE_ALPHA, GREEN) and
+            // the expansion has to be spelled against those lanes.
+            case GL_ALPHA8I_EXT:
+            case GL_ALPHA8UI_EXT:
+            case GL_ALPHA16I_EXT:
+            case GL_ALPHA16UI_EXT:
+            case GL_ALPHA32I_EXT:
+            case GL_ALPHA32UI_EXT:
+                swizzle = {GL_ZERO, GL_ZERO, GL_ZERO, GL_RED};
+                return true;
+            case GL_LUMINANCE8I_EXT:
+            case GL_LUMINANCE8UI_EXT:
+            case GL_LUMINANCE16I_EXT:
+            case GL_LUMINANCE16UI_EXT:
+            case GL_LUMINANCE32I_EXT:
+            case GL_LUMINANCE32UI_EXT:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_ONE};
+                return true;
+            case GL_LUMINANCE_ALPHA8I_EXT:
+            case GL_LUMINANCE_ALPHA8UI_EXT:
+            case GL_LUMINANCE_ALPHA16I_EXT:
+            case GL_LUMINANCE_ALPHA16UI_EXT:
+            case GL_LUMINANCE_ALPHA32I_EXT:
+            case GL_LUMINANCE_ALPHA32UI_EXT:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_GREEN};
+                return true;
+            case GL_INTENSITY8I_EXT:
+            case GL_INTENSITY8UI_EXT:
+            case GL_INTENSITY16I_EXT:
+            case GL_INTENSITY16UI_EXT:
+            case GL_INTENSITY32I_EXT:
+            case GL_INTENSITY32UI_EXT:
                 swizzle = {GL_RED, GL_RED, GL_RED, GL_RED};
                 return true;
             default:
@@ -34117,6 +34245,21 @@ struct GLContext::Impl {
             case GL_LUMINANCE8I_EXT: case GL_LUMINANCE8UI_EXT:
             case GL_INTENSITY8I_EXT: case GL_INTENSITY8UI_EXT:
             case GL_LUMINANCE_ALPHA8I_EXT: case GL_LUMINANCE_ALPHA8UI_EXT:
+            // Only the 8-bit row of the EXT_texture_integer A/L/I table was
+            // listed. The 16- and 32-bit rows are just as integer, and the
+            // omission made every consumer of this predicate (integer
+            // readback admission in GLContextReadback.inc.mm, integer
+            // GetTexImage admission in GLContextTexture.inc.mm, the FBO
+            // clear/query paths) treat GL_ALPHA32I_EXT & friends as
+            // fixed-point.
+            case GL_ALPHA16I_EXT: case GL_ALPHA16UI_EXT:
+            case GL_ALPHA32I_EXT: case GL_ALPHA32UI_EXT:
+            case GL_LUMINANCE16I_EXT: case GL_LUMINANCE16UI_EXT:
+            case GL_LUMINANCE32I_EXT: case GL_LUMINANCE32UI_EXT:
+            case GL_INTENSITY16I_EXT: case GL_INTENSITY16UI_EXT:
+            case GL_INTENSITY32I_EXT: case GL_INTENSITY32UI_EXT:
+            case GL_LUMINANCE_ALPHA16I_EXT: case GL_LUMINANCE_ALPHA16UI_EXT:
+            case GL_LUMINANCE_ALPHA32I_EXT: case GL_LUMINANCE_ALPHA32UI_EXT:
                 return true;
             default:
                 return false;
@@ -43563,6 +43706,104 @@ bool validateLinkedShaderStorageBlockLimits(
         error = "too many combined shader output resources from shader storage blocks: " +
                 std::to_string(combinedBlocks) + " > " +
                 std::to_string(combinedOutputLimit);
+        return false;
+    }
+
+    return true;
+}
+
+// --- ARB_uniform_buffer_object link-time validation -------------------------
+// Mirrors validateLinkedShaderStorageBlocks / ...BlockLimits above for named
+// *uniform* blocks. Both rules were entirely absent: linkProgram accepted
+// programs whose stages declared the same block name with different bodies
+// (piglit arb_uniform_buffer_object-link-mismatch-blocks) and programs that
+// declared more blocks in a stage than GL_MAX_{VERTEX,FRAGMENT,...}_UNIFORM_
+// BLOCKS allows (piglit arb_uniform_buffer_object-maxblocks).
+
+GLenum uniformBlockLimitPnameForStage(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER: return GL_MAX_VERTEX_UNIFORM_BLOCKS;
+        case GL_FRAGMENT_SHADER: return GL_MAX_FRAGMENT_UNIFORM_BLOCKS;
+        case GL_GEOMETRY_SHADER: return GL_MAX_GEOMETRY_UNIFORM_BLOCKS;
+        case GL_TESS_CONTROL_SHADER: return GL_MAX_TESS_CONTROL_UNIFORM_BLOCKS;
+        case GL_TESS_EVALUATION_SHADER: return GL_MAX_TESS_EVALUATION_UNIFORM_BLOCKS;
+        case GL_COMPUTE_SHADER: return GL_MAX_COMPUTE_UNIFORM_BLOCKS;
+        default: return 0;
+    }
+}
+
+bool validateLinkedUniformBlocks(const std::vector<GLShaderObject*>& shaders,
+                                 std::string& error) {
+    // GLSL 4.60 section 4.3.9: "Matching block names within an interface must
+    // match in terms of having the same number of declarations with the same
+    // sequence of types and the same sequence of member names, as well as
+    // having the same member-wise layout qualification." Only the body is
+    // compared -- instance names are deliberately *not* required to match,
+    // which is why this is narrower than the shader-storage version above.
+    std::unordered_map<std::string, std::string> firstBodyByName;
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) continue;
+        for (const auto& block : parseUniformBlocksForValidation(shader->source)) {
+            auto it = firstBodyByName.find(block.name);
+            if (it == firstBodyByName.end()) {
+                firstBodyByName.emplace(block.name, block.bodyCanonical);
+                continue;
+            }
+            if (it->second != block.bodyCanonical) {
+                error = "uniform block '" + block.name +
+                        "' declarations differ between attached shaders";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool validateLinkedUniformBlockLimits(
+    const std::vector<GLShaderObject*>& shaders,
+    const GLCapabilities* caps,
+    std::string& error) {
+    if (caps == nullptr) {
+        return true;
+    }
+
+    std::unordered_map<GLenum, int> blocksByStage;
+    int combinedBlocks = 0;
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) {
+            continue;
+        }
+        int blockCount = 0;
+        for (const auto& block : parseUniformBlocksForValidation(shader->source)) {
+            blockCount += block.instanceIsArray
+                ? std::max(1, block.instanceArraySize)
+                : 1;
+        }
+        blocksByStage[shader->stage] += blockCount;
+        combinedBlocks += blockCount;
+    }
+
+    for (const auto& [stage, count] : blocksByStage) {
+        const GLenum limitPname = uniformBlockLimitPnameForStage(stage);
+        if (limitPname == 0) {
+            continue;
+        }
+        GLint limit = 0;
+        caps->queryInteger(limitPname, &limit);
+        if (limit > 0 && count > limit) {
+            error = std::string("too many active uniform blocks in ") +
+                    shaderStageNameForLinkLimit(stage) + " shader: " +
+                    std::to_string(count) + " > " + std::to_string(limit);
+            return false;
+        }
+    }
+
+    GLint combinedLimit = 0;
+    caps->queryInteger(GL_MAX_COMBINED_UNIFORM_BLOCKS, &combinedLimit);
+    if (combinedLimit > 0 && combinedBlocks > combinedLimit) {
+        error = "too many combined active uniform blocks: " +
+                std::to_string(combinedBlocks) + " > " +
+                std::to_string(combinedLimit);
         return false;
     }
 
