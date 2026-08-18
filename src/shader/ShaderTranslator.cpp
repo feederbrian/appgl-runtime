@@ -1397,6 +1397,121 @@ bool rewriteFragmentInterpolateAtOffsetYForGL(std::string& msl) {
     return rewritten;
 }
 
+// Metal's `dfdy` differentiates with respect to the render target's ROW
+// index, which grows downward. GL's `dFdy` differentiates with respect to
+// the window y coordinate, which grows upward whenever the clip origin is
+// LOWER_LEFT and the vertex stage did not already mirror gl_Position.y
+// (MetalFrameGraph's `clipControlShaderYFixup`). In that regime the two
+// differ by exactly a sign.
+//
+// This is the derivative rider on the Y-flip that
+// `injectFragmentCoordYFixup`, `rewriteFragmentSamplePositionYForGL` and
+// `rewriteFragmentInterpolateAtOffsetYForGL` already compensate: the
+// coordinate was flipped, the thing that travels alongside it -- its own
+// derivative -- was not. `fwidth` is unaffected because it takes |dFdy|,
+// which is why glsl-fwidth passed while glsl-derivs returned green=0
+// (0.5*dFdy came back negative and clamped on the UNORM write).
+//
+// The per-draw sign already exists: `_appgl_FragCoordParams.w`, which the
+// four MetalFrameGraph payload sites now carry (it was a hard 0.0f pad).
+// Reusing that buffer means no new slot, no new plan/cache plumbing --
+// `fragmentNeedsFragCoordParams` is derived by searching the emitted MSL
+// for `_appgl_FragCoordParams`, so injecting the parameter here is enough
+// to make the runtime bind slot 15.
+//
+// Only occurrences inside main0's body are rewritten: the params buffer is
+// a main0 parameter, so a `dfdy` inside a SPIRV-Cross-emitted helper
+// function could not see it. Those keep the pre-existing behaviour rather
+// than failing to compile.
+bool rewriteFragmentDerivativeYForGL(std::string& msl) {
+    static constexpr const char* kSignExpr = "_appgl_FragCoordParams.w";
+    static constexpr const char* kParamsName = "_appgl_FragCoordParams";
+    static constexpr const char* kCall = "dfdy(";
+    if (msl.find(kSignExpr) != std::string::npos) {
+        return false;
+    }
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) {
+        return false;
+    }
+    std::size_t depth = 1;
+    std::size_t bodyClose = bodyOpen + 1;
+    while (bodyClose < msl.size() && depth > 0) {
+        const char c = msl[bodyClose];
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0) break;
+        }
+        ++bodyClose;
+    }
+    if (depth != 0 || bodyClose >= msl.size()) {
+        return false;
+    }
+
+    struct Wrap {
+        std::size_t begin;
+        std::size_t end;   // one past the closing paren
+        std::string text;
+    };
+    std::vector<Wrap> wraps;
+    std::size_t pos = bodyOpen;
+    while ((pos = msl.find(kCall, pos)) != std::string::npos &&
+           pos < bodyClose) {
+        if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+            pos += std::strlen(kCall);
+            continue;
+        }
+        const std::size_t open = pos + std::strlen(kCall) - 1u;
+        std::size_t close = std::string::npos;
+        if (!findMatchingParen(msl, open, close) || close >= bodyClose) {
+            pos += std::strlen(kCall);
+            continue;
+        }
+        wraps.push_back({
+            pos,
+            close + 1u,
+            "(" + std::string(kSignExpr) + " * " +
+                msl.substr(pos, close + 1u - pos) + ")"
+        });
+        pos = close + 1u;
+    }
+    if (wraps.empty()) {
+        return false;
+    }
+
+    for (auto it = wraps.rbegin(); it != wraps.rend(); ++it) {
+        msl.replace(it->begin, it->end - it->begin, it->text);
+    }
+
+    if (msl.find(kParamsName) == std::string::npos ||
+        msl.rfind(kParamsName, paramEnd) == std::string::npos ||
+        msl.find(std::string(kParamsName) + " [[buffer(") == std::string::npos) {
+        const std::size_t paramStart = msl.rfind('(', paramEnd);
+        bool hasExistingParams = false;
+        if (paramStart != std::string::npos) {
+            for (std::size_t i = paramStart + 1; i < paramEnd; ++i) {
+                if (!std::isspace(static_cast<unsigned char>(msl[i]))) {
+                    hasExistingParams = true;
+                    break;
+                }
+            }
+        }
+        const std::string param =
+            std::string(hasExistingParams ? ", " : "") +
+            "constant float4& " + std::string(kParamsName) +
+            " [[buffer(" + std::to_string(kFragCoordParamsBufferSlot) + ")]]";
+        msl.insert(paramEnd, param);
+    }
+    return true;
+}
+
 bool eraseNoOpFragDepthWrite(std::string& msl) {
     static constexpr const char* kDepthField =
         "float gl_FragDepth [[depth(any)]];";
@@ -9515,6 +9630,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             (void)injectDepthCompareControl(msl);
             (void)rewriteFragmentSamplePositionYForGL(msl);
             (void)rewriteFragmentInterpolateAtOffsetYForGL(msl);
+            // Y-flip rider: the derivative of a flipped coordinate.
+            (void)rewriteFragmentDerivativeYForGL(msl);
         }
 
         // SSBO block arrays are lowered through argument buffers when

@@ -11306,11 +11306,25 @@ struct MetalFrameGraph::Impl {
                     (fragmentUsesStorageImage || clipControlShaderYFixup)
                         ? viewportLowerLeftBase
                         : renderTargetHeight;
+                // [3] is the fragment DERIVATIVE Y sign, consumed by the
+                // translator's rewriteFragmentDerivativeYForGL as
+                // `_appgl_FragCoordParams.w`. It is deliberately NOT [1]:
+                // [1] additionally suppresses the flip when the fragment
+                // shader samples the color attachment (a texture_barrier
+                // aliasing concern that has nothing to do with which way
+                // the rasterizer's rows run), and it ignores the vertex
+                // stage's clipControlShaderYFixup, which mirrors
+                // gl_Position.y and therefore makes Metal's row index run
+                // the SAME way as GL's window y. dFdy needs the raw
+                // raster-orientation sign and nothing else.
+                const float derivativeYSign =
+                    (info.clipOrigin != GL_UPPER_LEFT &&
+                     !clipControlShaderYFixup) ? -1.0f : 1.0f;
                 const float fragCoordParams[4] = {
                     flipToLowerLeft ? lowerLeftBase : 0.0f,
                     flipToLowerLeft ? -1.0f : 1.0f,
                     flipToLowerLeft ? 1.0f : 0.0f,
-                    0.0f,
+                    derivativeYSign,
                 };
                 // Sprint 18 Bank D-3 (`textures_bind_unit`): fragment
                 // shader-side gl_FragCoord Y synthesis. This payload is
@@ -14599,11 +14613,16 @@ struct MetalFrameGraph::Impl {
             const float lowerLeftBase = descriptor.clipControlShaderYFixup
                 ? viewportLowerLeftBase
                 : renderTargetHeight;
+            // [3]: fragment derivative Y sign -- see the note at the
+            // encodeSubtime payload site.
+            const float derivativeYSign =
+                (descriptor.clipOrigin != GL_UPPER_LEFT &&
+                 !descriptor.clipControlShaderYFixup) ? -1.0f : 1.0f;
             const float fragCoordParams[4] = {
                 flipToLowerLeft ? lowerLeftBase : 0.0f,
                 flipToLowerLeft ? -1.0f : 1.0f,
                 flipToLowerLeft ? 1.0f : 0.0f,
-                0.0f,
+                derivativeYSign,
             };
             [encoder setFragmentBytes:fragCoordParams
                                 length:sizeof(fragCoordParams)
@@ -15183,11 +15202,16 @@ struct MetalFrameGraph::Impl {
             const float lowerLeftBase = clipControlShaderYFixup
                 ? viewportLowerLeftBase
                 : renderTargetHeight;
+            // [3]: fragment derivative Y sign -- see the note at the
+            // encodeSubtime payload site.
+            const float derivativeYSign =
+                (info.clipOrigin != GL_UPPER_LEFT &&
+                 !clipControlShaderYFixup) ? -1.0f : 1.0f;
             const float fragCoordParams[4] = {
                 flipToLowerLeft ? lowerLeftBase : 0.0f,
                 flipToLowerLeft ? -1.0f : 1.0f,
                 flipToLowerLeft ? 1.0f : 0.0f,
-                0.0f,
+                derivativeYSign,
             };
             [encoder setFragmentBytes:fragCoordParams
                                 length:sizeof(fragCoordParams)
@@ -25664,11 +25688,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             const bool flipToLowerLeft =
                 (info.clipOrigin != GL_UPPER_LEFT) &&
                 !fragmentAliasesColorAttachment;
+            // [3]: fragment derivative Y sign. The emulated mesh pipeline
+            // replaces the vertex stage, so the clipControlShaderYFixup
+            // gl_Position.y mirror never applies on this path.
+            const float derivativeYSign =
+                (info.clipOrigin != GL_UPPER_LEFT) ? -1.0f : 1.0f;
             const float fragCoordParams[4] = {
                 flipToLowerLeft ? renderTargetHeight : 0.0f,
                 flipToLowerLeft ? -1.0f : 1.0f,
                 flipToLowerLeft ? 1.0f : 0.0f,
-                0.0f,
+                derivativeYSign,
             };
             [renc setFragmentBytes:fragCoordParams
                             length:sizeof(fragCoordParams)
