@@ -6381,11 +6381,18 @@ static inline float appgl_texred_center(int i, uint size) {
 }
 
 static inline uint appgl_texred_mode(uint packedMode) {
-    return packedMode & 0x7fffffffu;
+    return packedMode & 0x3fffffffu;
 }
 
 static inline float2 appgl_texred_sample_coord_2d(float2 coord, uint packedMode) {
     return (packedMode & 0x80000000u) != 0u ? float2(coord.x, 1.0f - coord.y) : coord;
+}
+
+// Rectangle textures sample in absolute texel space, so their reflection is
+// `H - y`, not `1 - y`. `h` is the sampled texture's height in texels.
+static inline float2 appgl_texred_sample_coord_2d_h(float2 coord, uint packedMode, float h) {
+    if ((packedMode & 0x40000000u) != 0u) { return float2(coord.x, h - coord.y); }
+    return appgl_texred_sample_coord_2d(coord, packedMode);
 }
 
 static inline float3 appgl_texred_sample_coord_3d(float3 coord, uint packedMode) {
@@ -6393,7 +6400,7 @@ static inline float3 appgl_texred_sample_coord_3d(float3 coord, uint packedMode)
 }
 
 static inline int2 appgl_texred_sample_offset_2d(int2 offset, uint packedMode) {
-    return (packedMode & 0x80000000u) != 0u ? int2(offset.x, -offset.y) : offset;
+    return (packedMode & 0xc0000000u) != 0u ? int2(offset.x, -offset.y) : offset;
 }
 
 static inline int3 appgl_texred_sample_offset_3d(int3 offset, uint packedMode) {
@@ -6425,7 +6432,7 @@ static inline float4 appgl_texture_minmax_1d_array(texture1d_array<float> tex, s
 static inline float4 appgl_texture_minmax_2d(texture2d<float> tex, sampler smp, float2 coord, constant uint* modes, uint slot) {
     uint packedMode = modes[slot];
     uint mode = appgl_texred_mode(packedMode);
-    coord = appgl_texred_sample_coord_2d(coord, packedMode);
+    coord = appgl_texred_sample_coord_2d_h(coord, packedMode, float(tex.get_height()));
     if (mode == 0x9367u) return tex.sample(smp, coord);
     uint w = tex.get_width();
     uint h = tex.get_height();
@@ -6698,9 +6705,20 @@ bool injectTextureReductionMinmax(std::string& msl,
                     offsetHelper = "appgl_texred_sample_offset_3d";
                 }
                 if (coordHelper != nullptr) {
-                    rewrittenArgs[1] = std::string(coordHelper) + "(" +
+                    // Texture2D routes through the height-aware helper so a
+                    // GL_TEXTURE_RECTANGLE source (unnormalized coords) can
+                    // reflect as `H - y` instead of `1 - y`.
+                    const bool heightAware =
+                        param.kind == TextureReductionTextureKind::Texture2D;
+                    rewrittenArgs[1] = std::string(
+                            heightAware ? "appgl_texred_sample_coord_2d_h"
+                                        : coordHelper) + "(" +
                         trimCopy(rewrittenArgs[1]) + ", " + kParamName + "[" +
-                        slot + "])";
+                        slot + "]" +
+                        (heightAware
+                             ? (", float(" + param.name + ".get_height())")
+                             : std::string()) +
+                        ")";
                     for (std::size_t i = firstExtraArg;
                          i < rewrittenArgs.size();
                          ++i) {

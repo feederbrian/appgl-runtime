@@ -52218,11 +52218,23 @@ static bool translatedDrawUsesFragCoordParams(
         liveValue);
 }
 
+static GLenum sampleYFlipEffectiveTarget(const GLTextureObject& texture) {
+    return texture.desc.target != 0 ? texture.desc.target : texture.target;
+}
+
 static bool textureTargetUsesNormalizedSampleY(const GLTextureObject& texture) {
-    const GLenum target = texture.desc.target != 0 ? texture.desc.target : texture.target;
+    const GLenum target = sampleYFlipEffectiveTarget(texture);
     return target == GL_TEXTURE_2D ||
            target == GL_TEXTURE_2D_ARRAY ||
            target == GL_TEXTURE_3D;
+}
+
+// GL_TEXTURE_RECTANGLE is sampled with UNNORMALIZED texel coordinates
+// (see the normalizedCoordinates = NO branch in rebuildSamplerState), so it
+// carries the same storage flip as the normalized targets but needs the
+// `H - y` reflection instead of `1 - y`.
+static bool textureTargetUsesUnnormalizedSampleY(const GLTextureObject& texture) {
+    return sampleYFlipEffectiveTarget(texture) == GL_TEXTURE_RECTANGLE;
 }
 
 static bool textureNeedsDefaultFramebufferSampleYFlip(
@@ -52231,7 +52243,8 @@ static bool textureNeedsDefaultFramebufferSampleYFlip(
     GLint sampledMipFirst,
     GLint sampledMipLast)
 {
-    return textureTargetUsesNormalizedSampleY(sampled) &&
+    return (textureTargetUsesNormalizedSampleY(sampled) ||
+            textureTargetUsesUnnormalizedSampleY(sampled)) &&
            isColorFormat(sampled.desc.internalFormat) &&
            textureSampleMipRangeFramebufferYFlipped(
                sampled, storage, sampledMipFirst, sampledMipLast);
@@ -52242,7 +52255,7 @@ static void markDefaultFramebufferFboColorSampleYFlip(
     GLObjectStore* objects,
     GLuint drawFboName)
 {
-    if (drawFboName != 0 || objects == nullptr) {
+    if (objects == nullptr) {
         return;
     }
     for (auto& binding : tdi.fragmentTextures) {
@@ -52269,13 +52282,29 @@ static void markDefaultFramebufferFboColorSampleYFlip(
             }
             sourceName = storage->viewSourceTexture;
         }
+        // Whether a sampled colour texture is stored Y-flipped is a property
+        // of THAT TEXTURE (was it FBO-rendered?), not of the framebuffer
+        // currently bound for drawing. The destination gate below is kept for
+        // the normalized targets only because their FB0-side consumer on the
+        // FIXED-FUNCTION draw path never reaches this function, so
+        // compensating the FBO->FBO link alone would leave the chain with one
+        // unpaired flip (measured: spec@arb_draw_buffers@fbo-mrt-new-bind).
+        // Rectangle sources have never been compensated on any path, so
+        // enabling them cannot unbalance an existing chain.
+        if (drawFboName != 0 &&
+            !textureTargetUsesUnnormalizedSampleY(*sampled)) {
+            continue;
+        }
         if (storage != nullptr &&
             textureNeedsDefaultFramebufferSampleYFlip(
                 *sampled,
                 *storage,
                 binding.sampledMipFirst,
                 binding.sampledMipLast)) {
-            binding.reductionMode |= kTextureReductionModeSampleYFlipBit;
+            binding.reductionMode |=
+                textureTargetUsesUnnormalizedSampleY(*sampled)
+                    ? kTextureReductionModeSampleYFlipRectBit
+                    : kTextureReductionModeSampleYFlipBit;
         }
     }
 }

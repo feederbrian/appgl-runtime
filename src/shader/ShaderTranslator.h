@@ -12,7 +12,13 @@
 namespace appgl {
 
 inline constexpr std::uint32_t kTextureReductionModeSampleYFlipBit = 0x80000000u;
-inline constexpr std::uint32_t kTextureReductionModeMask = 0x7fffffffu;
+// GL_TEXTURE_RECTANGLE colour attachments are sampled with UNNORMALIZED
+// texel coordinates (GLContext.mm sets normalizedCoordinates = NO), so the
+// normalized `1.0 - y` reflection cannot express their flip. They need a
+// reflection in absolute texel space, `H - y`, which is what this second
+// bit selects. See kMsFetchFlipYHelper for the multisample analogue.
+inline constexpr std::uint32_t kTextureReductionModeSampleYFlipRectBit = 0x40000000u;
+inline constexpr std::uint32_t kTextureReductionModeMask = 0x3fffffffu;
 
 // Metal exposes 31 buffer slots per shader stage (indices 0..30). Vertex
 // buffers must live in the low half so they fit MTLVertexDescriptor's
