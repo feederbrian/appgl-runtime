@@ -69,6 +69,12 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
             return false;
         }
+        // MSAA-TAIL-1: GL 4.6 §18.3.1 — ReadPixels generates
+        // INVALID_OPERATION when the read framebuffer is multisampled.
+        if (impl_->boundReadFramebufferIsMultisample()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         // Widen FBO readback acceptance to match GL 4.6 §18.3.2. The
         // single-component formats (GL_GREEN / GL_BLUE / GL_ALPHA) and
         // their _INTEGER variants were missing, which made

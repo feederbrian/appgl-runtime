@@ -1217,6 +1217,10 @@ bool GLContext::accumCompat(GLenum op, GLfloat value) {
     return true;
 }
 
+bool GLContext::immediateModeActiveCompat() const {
+    return impl_->immediate.active;
+}
+
 void GLContext::setPixelZoomCompat(GLfloat xfactor, GLfloat yfactor) {
     if (impl_->immediate.active) {
         pushError(GL_INVALID_OPERATION, "glPixelZoom",
@@ -3121,6 +3125,22 @@ void GLContext::pushAttribCompat(GLbitfield mask) {
                     impl_->immediate.currentColor,
                     sizeof(snapshot.currentColor));
     }
+    // MSAA-TAIL-4: multisample enable group.
+    if ((mask & (GL_MULTISAMPLE_BIT | GL_ENABLE_BIT)) != 0) {
+        snapshot.hasMultisampleEnables = true;
+        snapshot.multisample = impl_->state->isEnabled(GL_MULTISAMPLE);
+        snapshot.sampleAlphaToCoverage =
+            impl_->state->isEnabled(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        snapshot.sampleAlphaToOne =
+            impl_->state->isEnabled(GL_SAMPLE_ALPHA_TO_ONE);
+        snapshot.sampleCoverageEnabled =
+            impl_->state->isEnabled(GL_SAMPLE_COVERAGE);
+    }
+    if ((mask & GL_MULTISAMPLE_BIT) != 0) {
+        snapshot.hasSampleCoverageValues = true;
+        snapshot.sampleCoverageValue = impl_->state->sampleCoverageValue();
+        snapshot.sampleCoverageInvert = impl_->state->sampleCoverageInvert();
+    }
     impl_->compatAttribStack.push_back(snapshot);
 }
 
@@ -3136,6 +3156,17 @@ void GLContext::popAttribCompat() {
                        snapshot.currentColor[1],
                        snapshot.currentColor[2],
                        snapshot.currentColor[3]);
+    }
+    // MSAA-TAIL-4: restore the multisample enable group.
+    if (snapshot.hasMultisampleEnables) {
+        setEnabled(GL_MULTISAMPLE, snapshot.multisample);
+        setEnabled(GL_SAMPLE_ALPHA_TO_COVERAGE, snapshot.sampleAlphaToCoverage);
+        setEnabled(GL_SAMPLE_ALPHA_TO_ONE, snapshot.sampleAlphaToOne);
+        setEnabled(GL_SAMPLE_COVERAGE, snapshot.sampleCoverageEnabled);
+    }
+    if (snapshot.hasSampleCoverageValues) {
+        impl_->state->setSampleCoverage(snapshot.sampleCoverageValue,
+                                        snapshot.sampleCoverageInvert);
     }
 }
 
@@ -3470,6 +3501,13 @@ bool GLContext::copyPixelsCompat(GLint x,
         type != GL_STENCIL && type != GL_DEPTH_STENCIL) {
         pushError(GL_INVALID_ENUM, "glCopyPixels",
                   "type is not GL_COLOR, GL_DEPTH, GL_STENCIL, or GL_DEPTH_STENCIL");
+        return false;
+    }
+    // MSAA-TAIL-1: GL 4.6 §18.3 — CopyPixels generates INVALID_OPERATION
+    // when the read framebuffer is multisampled.
+    if (impl_->boundReadFramebufferIsMultisample()) {
+        pushError(GL_INVALID_OPERATION, "glCopyPixels",
+                  "read framebuffer is multisampled");
         return false;
     }
     if (width == 0 || height == 0 ||

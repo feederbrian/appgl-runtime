@@ -438,16 +438,22 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
     // GL 4.6 §22.3 — sample state follows the current read framebuffer.
     // Phase-3 default-FB MSAA is default-off; when opted in, only FB0
     // reports samples here. User FBO MSAA remains outside this slice.
+    // MSAA-TAIL-1: user FBOs previously reported SAMPLES/SAMPLE_BUFFERS as
+    // a hard 0. EXT_framebuffer_multisample requires both to be derived
+    // from the bound framebuffer's attachments (piglit
+    // ext_framebuffer_multisample-samples).
     if (pname == GL_SAMPLE_BUFFERS) {
-        *data = impl_->state->boundReadFramebuffer() == 0
+        const GLuint readName = impl_->state->boundReadFramebuffer();
+        *data = readName == 0
             ? impl_->defaultFramebufferSampleBuffers()
-            : 0;
+            : (impl_->framebufferObjectSampleCount(readName) > 0 ? 1 : 0);
         return true;
     }
     if (pname == GL_SAMPLES) {
-        *data = impl_->state->boundReadFramebuffer() == 0
+        const GLuint readName = impl_->state->boundReadFramebuffer();
+        *data = readName == 0
             ? impl_->defaultFramebufferSampleCount()
-            : 0;
+            : static_cast<GLint>(impl_->framebufferObjectSampleCount(readName));
         return true;
     }
     if (pname == GL_DOUBLEBUFFER) {

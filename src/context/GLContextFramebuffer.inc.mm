@@ -103,10 +103,15 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
     // could actually deliver. Correct both the primary check's error code
     // and the preempting behaviour now that MAX_SAMPLES matches Metal.
     //
-    // Also normalise samples <= 1 to 0: a single sample is logically
-    // non-multisample and avoids Metal rejecting sampleCount == 1 for
-    // MTLTextureType2DMultisample on some GPU families.
-    if (samples <= 1) {
+    // Only samples == 0 means single-sample. EXT_framebuffer_multisample
+    // issue (2) resolves samples == 1 as "minimum number of samples
+    // supported by the implementation", and requires
+    // RENDERBUFFER_SAMPLES >= <samples>; reporting 0 for a request of 1
+    // failed piglit ext_framebuffer_multisample-renderbuffer-samples.
+    // Metal rejects sampleCount == 1 for MTLTextureType2DMultisample, so
+    // a request of 1 is promoted into the supported-count search below
+    // (which lands on the smallest count Metal actually supports).
+    if (samples < 1) {
         samples = 0;
     } else {
         GLint maxSamples = 0;
@@ -116,6 +121,9 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
         if (maxSamples > 0 && samples > maxSamples) {
             pushError(GL_INVALID_OPERATION);
             return false;
+        }
+        if (samples == 1 && (maxSamples <= 0 || maxSamples >= 2)) {
+            samples = 2;
         }
         // Metal only supports a sparse set of sample counts (typically
         // powers of two), while GL callers are allowed to request any
@@ -1712,8 +1720,13 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
             return true;
         case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;         return true;
         case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
-        case GL_SAMPLES:                          *params = 0;               return true;
-        case GL_SAMPLE_BUFFERS:                   *params = 0;               return true;
+        // MSAA-TAIL-1: derive from the attachments, matching glGetIntegerv.
+        case GL_SAMPLES:
+            *params = static_cast<GLint>(impl_->framebufferObjectSampleCount(fbName));
+            return true;
+        case GL_SAMPLE_BUFFERS:
+            *params = impl_->framebufferObjectSampleCount(fbName) > 0 ? 1 : 0;
+            return true;
         case GL_DOUBLEBUFFER:                    *params = GL_TRUE;         return true;
         case GL_STEREO:                          *params = GL_FALSE;        return true;
         default:

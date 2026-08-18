@@ -916,6 +916,13 @@ static void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffs
 static void APIENTRY glSampleCoverage(GLfloat value, GLboolean invert) {
     auto* ctx = appgl::Runtime::shared().currentContext();
     if (ctx == nullptr) return;
+    // MSAA-TAIL-5: GL 4.6 §10.7.4 — glSampleCoverage is not one of the
+    // commands allowed between glBegin and glEnd (piglit
+    // arb_multisample-beginend).
+    if (ctx->immediateModeActiveCompat()) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return;
+    }
     ctx->state().setSampleCoverage(value, invert);
 }
 

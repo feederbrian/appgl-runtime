@@ -164,6 +164,12 @@
 #ifndef GL_CURRENT_BIT
 #define GL_CURRENT_BIT 0x00000001
 #endif
+#ifndef GL_ENABLE_BIT
+#define GL_ENABLE_BIT 0x00002000
+#endif
+#ifndef GL_MULTISAMPLE_BIT
+#define GL_MULTISAMPLE_BIT 0x20000000
+#endif
 #ifndef GL_ACCUM_BUFFER_BIT
 #define GL_ACCUM_BUFFER_BIT 0x00000200
 #endif
@@ -25074,6 +25080,45 @@ struct GLContext::Impl {
             : 1;
     }
 
+    // MSAA-TAIL-1: sample count of a framebuffer object, derived from its
+    // attachments (EXT_framebuffer_multisample: "SAMPLES is equal to the
+    // value of RENDERBUFFER_SAMPLES for the attached images"). Returns 0
+    // for the default framebuffer, an unknown name, or a framebuffer whose
+    // attachments are all single-sample. framebufferStatus() already
+    // rejects mixed sample counts with INCOMPLETE_MULTISAMPLE, so the first
+    // present+complete attachment is representative.
+    GLsizei framebufferObjectSampleCount(GLuint framebufferName) const {
+        if (state == nullptr || objects == nullptr || framebufferName == 0) {
+            return 0;
+        }
+        const GLFramebufferObject* framebuffer =
+            objects->framebuffers().get(framebufferName);
+        if (framebuffer == nullptr) {
+            return 0;
+        }
+        for (const auto& [attachmentPoint, attachment] :
+             framebuffer->attachments) {
+            (void)attachmentPoint;
+            const AttachmentInfo info = framebufferAttachmentInfo(attachment);
+            if (info.present && info.complete && info.samples > 0) {
+                return info.samples;
+            }
+        }
+        return 0;
+    }
+
+    // MSAA-TAIL-1: true when the bound READ framebuffer is multisampled.
+    // GL 4.6 §18.2.1/§18.2.7/§18.3.1 make ReadPixels, CopyPixels,
+    // CopyTexImage* and CopyTexSubImage* generate INVALID_OPERATION in
+    // that case (piglit ext_framebuffer_multisample-negative-{readpixels,
+    // copypixels,copyteximage}).
+    bool boundReadFramebufferIsMultisample() const {
+        if (state == nullptr) {
+            return false;
+        }
+        return framebufferObjectSampleCount(state->boundReadFramebuffer()) > 0;
+    }
+
     bool boundReadFramebufferHasMultipleViews() const {
         if (state == nullptr || objects == nullptr) {
             return false;
@@ -35019,6 +35064,21 @@ struct GLContext::Impl {
     struct CompatAttribSnapshot {
         bool hasCurrentColor = false;
         float currentColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        // MSAA-TAIL-4: GL_MULTISAMPLE_BIT / GL_ENABLE_BIT multisample
+        // group (GL 4.6 Table 23.36 + ARB_multisample). GL_ENABLE_BIT
+        // saves the four enables; GL_MULTISAMPLE_BIT additionally saves
+        // SAMPLE_COVERAGE_VALUE / SAMPLE_COVERAGE_INVERT. Note
+        // GL_ALL_ATTRIB_BITS (0x000FFFFF) does NOT contain
+        // GL_MULTISAMPLE_BIT (0x20000000) — piglit arb_multisample-pushpop
+        // asserts exactly that split.
+        bool hasMultisampleEnables = false;
+        bool multisample = false;
+        bool sampleAlphaToCoverage = false;
+        bool sampleAlphaToOne = false;
+        bool sampleCoverageEnabled = false;
+        bool hasSampleCoverageValues = false;
+        GLfloat sampleCoverageValue = 1.0f;
+        GLboolean sampleCoverageInvert = GL_FALSE;
     };
     std::vector<CompatAttribSnapshot> compatAttribStack;
 

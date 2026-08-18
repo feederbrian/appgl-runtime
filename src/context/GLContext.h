@@ -111,6 +111,10 @@ public:
                                    GLsizei texelHeight);
     void setEnabled(GLenum cap, bool enabled);
     bool isEnabled(GLenum cap) const;
+    // MSAA-TAIL-5: true between glBegin and glEnd. GL 4.6 §10.7.4 makes
+    // most commands INVALID_OPERATION there; entry points outside
+    // GLContext (AppGLGroup8) need this to enforce it.
+    bool immediateModeActiveCompat() const;
 
     void setDebugCallback(GLDEBUGPROC callback, const void* userParam);
     void emitDebugMessage(GLenum source, GLenum type, GLuint id, GLenum severity, std::string_view message);

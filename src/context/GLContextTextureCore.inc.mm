@@ -1090,6 +1090,12 @@ bool GLContext::copyTexImage2DImpl(
         pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
         return false;
     }
+    // MSAA-TAIL-1: GL 4.6 §18.2.7 — CopyTexImage* generates
+    // INVALID_OPERATION when the read framebuffer is multisampled.
+    if (impl_->boundReadFramebufferIsMultisample()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     if (isRGB10A2Copy) {
         uploadFormat = isRGB10A2UintCopy ? GL_RGBA_INTEGER : GL_RGBA;
@@ -1501,6 +1507,12 @@ bool GLContext::copyTexSubImage2D(
     }
     if (impl_->boundReadFramebufferHasMultipleViews()) {
         pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return false;
+    }
+    // MSAA-TAIL-1: GL 4.6 §18.2.7 — CopyTexSubImage* generates
+    // INVALID_OPERATION when the read framebuffer is multisampled.
+    if (impl_->boundReadFramebufferIsMultisample()) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
 
