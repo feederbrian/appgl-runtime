@@ -1332,6 +1332,52 @@ bool injectFragmentCoordYFixup(std::string& msl,
     return true;
 }
 
+// `layout(pixel_center_integer)` asks for gl_FragCoord.xy to name the INTEGER
+// pixel index. Metal's `[[position]]` is always centre-sampled (index + 0.5) in
+// BOTH components, and that is true whichever way the rows run — the pixel
+// centre offset is not a property of the origin convention.
+// injectFragmentCoordYFixup() folds the Y half of this bias into the buffer(15)
+// payload, but nothing ever removed the half-texel from X. Under
+// `pixel_center_integer` a shader therefore read gl_FragCoord.x = x + 0.5.
+// Fix it shader-side with a constant, so it is independent of the Y flip and
+// applies under origin_upper_left too.
+bool injectFragmentPixelCenterIntegerXFixup(std::string& msl) {
+    static constexpr const char* kFragCoordParam =
+        "float4 gl_FragCoord [[position]]";
+    static constexpr const char* kMarker =
+        "gl_FragCoord.x = gl_FragCoord.x - 0.5f;";
+    if (msl.find(kFragCoordParam) == std::string::npos ||
+        msl.find(kMarker) != std::string::npos) {
+        return false;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) return false;
+    std::size_t depth = 1;
+    std::size_t paramEnd = mainPos + 6;
+    while (paramEnd < msl.size() && depth > 0) {
+        const char c = msl[paramEnd];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth == 0) break;
+        }
+        ++paramEnd;
+    }
+    if (depth != 0 || paramEnd >= msl.size()) return false;
+
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) return false;
+
+    const std::string injection =
+        std::string("\n    // pixel_center_integer: Metal [[position]].x is the\n"
+                    "    // pixel CENTRE; GL asks for the integer pixel index.\n"
+                    "    ") + kMarker;
+    msl.insert(bodyOpen + 1, injection);
+    return true;
+}
+
 bool rewriteFragmentSamplePositionYForGL(std::string& msl) {
     static constexpr const char* kSamplePositionDecl =
         "float2 gl_SamplePosition = get_sample_position(gl_SampleID);";
@@ -9641,6 +9687,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 execModes.get(spv::ExecutionModePixelCenterInteger);
             if (!originUpperLeft) {
                 (void)injectFragmentCoordYFixup(msl, pixelCenterInteger);
+            }
+            // Y-flip rider: the pixel-centre bias that rides on the
+            // coordinate. Deliberately OUTSIDE the originUpperLeft gate --
+            // pixel_center_integer is orthogonal to which way the rows run.
+            if (pixelCenterInteger) {
+                (void)injectFragmentPixelCenterIntegerXFixup(msl);
             }
             // Compare coordinate control also owns nonseamless cube
             // clamping, so it must be present for UPPER_LEFT shaders even
