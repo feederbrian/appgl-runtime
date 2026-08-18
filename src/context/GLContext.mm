@@ -55143,10 +55143,156 @@ static void fillLevelWithClearValue_T(ImplT* impl, GLTextureObject& tex,
         }
     }
 
+    // R1 — legacy compat ALPHA / LUMINANCE / LUMINANCE_ALPHA / INTENSITY
+    // exact-readback lane.
+    //
+    // `metalRenderbufferFormat` backs these base formats with
+    // MTLPixelFormatRGBA8Unorm, so `buildNativeUpload` deliberately bails at
+    // GLContext.mm:13521 ("RGBA8Unorm is already handled perfectly by the
+    // rgba8 path"). The upload path instead records the *source* bytes in
+    // `exactReadbackData` (GLContextTextureCore.inc.mm:866-874) and mirrors
+    // them into `nativeData` at 1 byte per texel, and
+    // `copySimpleTextureLevelShadow` (GLContext.mm:54676-54691) prefers those
+    // two buffers whenever glGetTexImage is called back with the same
+    // format/type. Neither buffer was ever written by the clear, so
+    // glClearTexImage on a GL_ALPHA / GL_ALPHA8 / GL_ALPHA16 texture read back
+    // as the pre-clear upload.
+    //
+    // GL 4.6 §8.19: "the texture image is cleared to the value given by data,
+    // interpreted as described for TexImage" — the value is converted to the
+    // internal format, which for ALPHA means the implicit (0,0,0,A) expansion
+    // that `applyCompatUploadInternalBase` already performed above.
+    const std::size_t exactBpp = static_cast<std::size_t>(img.exactReadbackBpp);
+    const bool hasExactLane = (exactBpp > 0 && !img.exactReadbackData.empty());
+    const bool nativeMirrorsExactLane =
+        hasExactLane && img.nativeBpp == exactBpp && !img.nativeData.empty();
+    std::vector<std::uint8_t> exactPixel;
+    bool exactPixelBuilt = false;
+    if (hasExactLane) {
+        // Which GL RGBA lanes actually have storage in the source format, in
+        // source-component order (GL 4.6 Table 8.5).
+        int lanes[4] = {0, 0, 0, 0};
+        int laneCount = 0;
+        switch (img.desc.sourceFormat) {
+            case GL_ALPHA:            lanes[0] = 3; laneCount = 1; break;
+            case GL_LUMINANCE:        lanes[0] = 0; laneCount = 1; break;
+            case GL_INTENSITY:        lanes[0] = 0; laneCount = 1; break;
+            case GL_RED:              lanes[0] = 0; laneCount = 1; break;
+            case GL_LUMINANCE_ALPHA:  lanes[0] = 0; lanes[1] = 3; laneCount = 2; break;
+            default:                  laneCount = 0; break;
+        }
+        const GLenum srcType = img.desc.sourceType;
+        std::size_t bpc = 0;
+        switch (srcType) {
+            case GL_UNSIGNED_BYTE:  case GL_BYTE:            bpc = 1; break;
+            case GL_UNSIGNED_SHORT: case GL_SHORT:
+            case GL_HALF_FLOAT:                              bpc = 2; break;
+            case GL_UNSIGNED_INT:   case GL_INT:
+            case GL_FLOAT:                                   bpc = 4; break;
+            default:                                         bpc = 0; break;
+        }
+        if (laneCount > 0 && bpc > 0 &&
+            static_cast<std::size_t>(laneCount) * bpc == exactBpp) {
+            exactPixel.assign(exactBpp, 0);
+            if (data == nullptr) {
+                // GL 4.6 §8.19: a NULL `data` clears the image to zero.
+                exactPixelBuilt = true;
+            } else {
+                double rgba[4] = {0.0, 0.0, 0.0, 1.0};
+                ImplT::readCompatUploadSourceRGBA(
+                    static_cast<const std::uint8_t*>(data),
+                    format, type, false, false, rgba);
+                ImplT::applyCompatUploadInternalBase(img.desc.internalFormat, rgba);
+                exactPixelBuilt = true;
+                for (int c = 0; c < laneCount; ++c) {
+                    std::uint8_t* dst = exactPixel.data() +
+                                        static_cast<std::size_t>(c) * bpc;
+                    const double v = rgba[lanes[c]];
+                    switch (srcType) {
+                        case GL_UNSIGNED_BYTE: {
+                            const auto q = static_cast<std::uint8_t>(
+                                std::clamp(v, 0.0, 1.0) * 255.0 + 0.5);
+                            std::memcpy(dst, &q, 1);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT: {
+                            const auto q = static_cast<std::uint16_t>(
+                                std::clamp(v, 0.0, 1.0) * 65535.0 + 0.5);
+                            std::memcpy(dst, &q, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT: {
+                            const auto q = static_cast<std::uint32_t>(
+                                std::clamp(v, 0.0, 1.0) * 4294967295.0 + 0.5);
+                            std::memcpy(dst, &q, 4);
+                            break;
+                        }
+                        case GL_BYTE: {
+                            const auto q = static_cast<std::int8_t>(
+                                std::clamp(v, -1.0, 1.0) * 127.0 +
+                                (v >= 0.0 ? 0.5 : -0.5));
+                            std::memcpy(dst, &q, 1);
+                            break;
+                        }
+                        case GL_SHORT: {
+                            const auto q = static_cast<std::int16_t>(
+                                std::clamp(v, -1.0, 1.0) * 32767.0 +
+                                (v >= 0.0 ? 0.5 : -0.5));
+                            std::memcpy(dst, &q, 2);
+                            break;
+                        }
+                        case GL_INT: {
+                            const auto q = static_cast<std::int32_t>(
+                                std::clamp(v, -1.0, 1.0) * 2147483647.0 +
+                                (v >= 0.0 ? 0.5 : -0.5));
+                            std::memcpy(dst, &q, 4);
+                            break;
+                        }
+                        case GL_FLOAT: {
+                            const float q = static_cast<float>(v);
+                            std::memcpy(dst, &q, 4);
+                            break;
+                        }
+                        default:
+                            exactPixelBuilt = false;
+                            break;
+                    }
+                }
+            }
+        }
+    }
+    if (exactPixelBuilt) {
+        auto fillLane = [&](std::vector<std::uint8_t>& buf, std::size_t bpp) {
+            if (wholeLevel) {
+                for (std::size_t j = 0; j + bpp <= buf.size(); j += bpp) {
+                    std::memcpy(buf.data() + j, exactPixel.data(), bpp);
+                }
+                return;
+            }
+            for (std::size_t z = z0; z < z1; ++z) {
+                for (std::size_t y = y0; y < y1; ++y) {
+                    for (std::size_t x = x0; x < x1; ++x) {
+                        const std::size_t idx = ((z * levelH) + y) * levelW + x;
+                        const std::size_t byteIdx = idx * bpp;
+                        if (byteIdx + bpp <= buf.size()) {
+                            std::memcpy(buf.data() + byteIdx,
+                                        exactPixel.data(), bpp);
+                        }
+                    }
+                }
+            }
+        };
+        fillLane(img.exactReadbackData, exactBpp);
+        if (nativeMirrorsExactLane) {
+            fillLane(img.nativeData, exactBpp);
+        }
+    }
+
     // Native-format fill — build a 1×1×1 native pixel via buildNativeUpload,
     // then replicate across the native buffer. This is required for
     // non-RGBA8 formats where glGetTexImage reads from nativeData.
-    if (img.nativeBpp > 0 && !img.nativeData.empty()) {
+    if (img.nativeBpp > 0 && !img.nativeData.empty() &&
+        !(exactPixelBuilt && nativeMirrorsExactLane)) {
         std::vector<std::uint8_t> singlePixel;
         std::size_t pixelBpp = 0;
         bool built = false;
@@ -55182,6 +55328,107 @@ static void fillLevelWithClearValue_T(ImplT* impl, GLTextureObject& tex,
     }
 
     (void)tex;
+}
+
+// R4 — resolve a GL_ARB_texture_view name to the storage it aliases, for the
+// glClearTexImage / glClearTexSubImage family.
+//
+// A view object carries no `levels` map of its own (measured: `nLevels=0
+// viewSrc=N` at every clear in arb_clear_texture-texview and at error.c:190),
+// so the clear path's `tex->levels.find(level)` missed unconditionally and
+// pushed GL_INVALID_OPERATION for every clear through a view. GL 4.6 §8.18:
+// a view's level `l` and layer `k` denote level `minlevel + l` and layer
+// `minlayer + k` of the original texture's storage, which the view shares.
+//
+// Returns the object that actually owns the storage, rewriting `nameInOut`,
+// `levelInOut` and (when non-null) `*zoffsetInOut` into its coordinate space.
+// `outOfRange` is set when the request falls outside the view's declared
+// level/layer window, which the caller must report as GL_INVALID_OPERATION.
+template <typename GetterT>
+static GLTextureObject* resolveTextureViewClearTarget_T(
+    GetterT&& getTexture,
+    GLuint& nameInOut,
+    GLTextureObject* tex,
+    GLint& levelInOut,
+    GLint* zoffsetInOut,
+    bool& outOfRange,
+    GLint* outLayerBase = nullptr,
+    GLint* outLayerCount = nullptr)
+{
+    outOfRange = false;
+    if (outLayerBase != nullptr) *outLayerBase = 0;
+    if (outLayerCount != nullptr) *outLayerCount = 0;
+    std::unordered_set<GLuint> visited;
+    while (tex != nullptr && tex->viewSourceTexture != 0) {
+        if (!visited.insert(nameInOut).second) {
+            break;  // cyclic view chain — leave the caller on the last object
+        }
+        if (tex->viewNumLevels > 0 && levelInOut >= tex->viewNumLevels) {
+            outOfRange = true;
+            return nullptr;
+        }
+        levelInOut += tex->viewMinLevel;
+        if (zoffsetInOut != nullptr) {
+            if (tex->viewNumLayers > 0 && *zoffsetInOut >= tex->viewNumLayers) {
+                outOfRange = true;
+                return nullptr;
+            }
+            *zoffsetInOut += tex->viewMinLayer;
+        }
+        // A whole-level clear through a view must stay inside the view's layer
+        // window: glClearTexImage(view) clears every layer *of the view*, and
+        // a single-layer view of a two-layer array owns exactly one of them.
+        if (outLayerBase != nullptr) *outLayerBase += tex->viewMinLayer;
+        if (outLayerCount != nullptr) *outLayerCount = tex->viewNumLayers;
+        nameInOut = tex->viewSourceTexture;
+        tex = getTexture(nameInOut);
+    }
+    return tex;
+}
+
+// R3 — the addressable depth of one mip level, in the units glClearTexSubImage
+// uses for `zoffset` / `depth`. GL 4.6 §8.20 addresses cube faces and array
+// layers through the z axis, but `desc.depth` only tracks true 3D depth
+// (measured: a cube level reports dims=1x1x1 while carrying six faces).
+static GLsizei clearTexEffectiveLevelDepth(GLenum target,
+                                           const GLTextureImageLevel& img) {
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP:
+            return 6;
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            return std::max<GLsizei>(
+                std::max<GLsizei>(img.desc.depth, img.desc.layers), 1);
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return std::max<GLsizei>(
+                std::max<GLsizei>(img.desc.depth, img.desc.layers), 1);
+        case GL_TEXTURE_3D:
+            return std::max<GLsizei>(img.desc.depth, 1);
+        default:
+            return std::max<GLsizei>(img.desc.depth, 1);
+    }
+}
+
+// R3 — GL 4.6 §8.20 (Clearing Texture Image Data) / ARB_clear_texture "Errors":
+// INVALID_OPERATION is generated if xoffset, yoffset or zoffset is negative,
+// or if xoffset+width, yoffset+height or zoffset+depth is greater than the
+// corresponding dimension of the addressed mip level. The clear path applied
+// no region check at all: `fillLevelWithClearValue_T` clamps defensively, so
+// every out-of-range request became a silent no-op that reported GL_NO_ERROR
+// (measured: 7 of the 8 subtest failures in arb_clear_texture-error).
+static bool clearTexSubRegionInRange(GLenum target,
+                                     const GLTextureImageLevel& img,
+                                     GLint xoffset, GLint yoffset, GLint zoffset,
+                                     GLsizei width, GLsizei height, GLsizei depth) {
+    if (xoffset < 0 || yoffset < 0 || zoffset < 0) return false;
+    const GLsizei levelW = std::max<GLsizei>(img.desc.width, 1);
+    const GLsizei levelH = std::max<GLsizei>(img.desc.height, 1);
+    const GLsizei levelD = clearTexEffectiveLevelDepth(target, img);
+    if (static_cast<std::int64_t>(xoffset) + width  > levelW) return false;
+    if (static_cast<std::int64_t>(yoffset) + height > levelH) return false;
+    if (static_cast<std::int64_t>(zoffset) + depth  > levelD) return false;
+    return true;
 }
 
 #define APPGL_GLCONTEXT_TEXTURE_CLEAR

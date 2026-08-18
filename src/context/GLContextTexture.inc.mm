@@ -18,6 +18,21 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // R4 — retarget a texture-view name onto the storage it aliases.
+    GLint viewLayerBase = 0;
+    GLint viewLayerCount = 0;
+    if (tex->viewSourceTexture != 0 && level >= 0) {
+        bool viewOutOfRange = false;
+        auto* resolved = resolveTextureViewClearTarget_T(
+            [&](GLuint n) { return impl_->objects->textures().get(n); },
+            texture, tex, level, nullptr, viewOutOfRange,
+            &viewLayerBase, &viewLayerCount);
+        if (viewOutOfRange || resolved == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        tex = resolved;
+    }
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
         const bool materialized =
@@ -52,6 +67,17 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
             }
             if (nativeBpp == 0u) {
                 return true;
+            }
+            // R6: metalRenderbufferFormat() picks the actual Metal layout for
+            // this internal format, and on Apple silicon GL_DEPTH24_STENCIL8
+            // is backed by MTLPixelFormatDepth32Float_Stencil8 -> 8 bytes per
+            // texel (GLContext.mm:13096 sets outBpp accordingly). The static
+            // table above assumes 4. Trusting the table clobbered an already
+            // populated 8-bpp native buffer and zero-filled the whole level,
+            // destroying data glClearTexSubImage was never asked to touch.
+            // An existing non-zero nativeBpp is the authority.
+            if (img.nativeBpp != 0u) {
+                nativeBpp = img.nativeBpp;
             }
             const std::size_t texelCount =
                 static_cast<std::size_t>(std::max<GLsizei>(img.desc.width, 1)) *
@@ -168,12 +194,20 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         return false;
     }
     it->second.generatedMipLevel = false;
-    fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
-                            0, 0, 0,
-                            it->second.desc.width,
-                            it->second.desc.height,
-                            it->second.desc.depth,
-                            format, type, data);
+    {
+        const GLsizei fullDepth = it->second.desc.depth;
+        const GLint zBase = viewLayerCount > 0 ? viewLayerBase : 0;
+        const GLsizei zCount = viewLayerCount > 0
+            ? std::min<GLsizei>(viewLayerCount,
+                                std::max<GLsizei>(fullDepth - zBase, 0))
+            : fullDepth;
+        fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
+                                0, 0, zBase,
+                                it->second.desc.width,
+                                it->second.desc.height,
+                                zCount,
+                                format, type, data);
+    }
     tex->colorShadowAuthoritative = true;
     if (!isColorFormat(internalFormat)) {
         tex->depthStencilShadowAuthoritative = true;
@@ -205,6 +239,19 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // R4 — retarget a texture-view name onto the storage it aliases.
+    const GLenum requestTarget = tex->target;
+    if (tex->viewSourceTexture != 0 && level >= 0) {
+        bool viewOutOfRange = false;
+        auto* resolved = resolveTextureViewClearTarget_T(
+            [&](GLuint n) { return impl_->objects->textures().get(n); },
+            texture, tex, level, &zoffset, viewOutOfRange);
+        if (viewOutOfRange || resolved == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        tex = resolved;
+    }
     auto it = tex->levels.find(level);
     if (it == tex->levels.end() || !it->second.defined) {
         pushError(GL_INVALID_OPERATION);
@@ -213,6 +260,14 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
     const GLenum internalFormat = it->second.desc.internalFormat;
     if (isCompressedInternalFormat(internalFormat) ||
         !clearTexFormatCompatible(internalFormat, format)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // R3 — GL 4.6 §8.20: out-of-range region -> GL_INVALID_OPERATION.
+    if (!clearTexSubRegionInRange(requestTarget != 0 ? requestTarget : tex->target,
+                                  it->second,
+                                  xoffset, yoffset, zoffset,
+                                  width, height, depth)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -252,6 +307,17 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
             }
             if (nativeBpp == 0u) {
                 return true;
+            }
+            // R6: metalRenderbufferFormat() picks the actual Metal layout for
+            // this internal format, and on Apple silicon GL_DEPTH24_STENCIL8
+            // is backed by MTLPixelFormatDepth32Float_Stencil8 -> 8 bytes per
+            // texel (GLContext.mm:13096 sets outBpp accordingly). The static
+            // table above assumes 4. Trusting the table clobbered an already
+            // populated 8-bpp native buffer and zero-filled the whole level,
+            // destroying data glClearTexSubImage was never asked to touch.
+            // An existing non-zero nativeBpp is the authority.
+            if (img.nativeBpp != 0u) {
+                nativeBpp = img.nativeBpp;
             }
             const std::size_t texelCount =
                 static_cast<std::size_t>(std::max<GLsizei>(img.desc.width, 1)) *
@@ -312,15 +378,45 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (!ensureClearShadowBacking(it->second, level)) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+    // R5 — a cube map keeps one CPU shadow per face in `cubeFaceLevels`, and
+    // that is what replaceMetalTexture uploads (GLContext.mm:14820-14828) and
+    // what the copy paths read (GLContextTextureCopyViewInvalidate.inc.mm:459).
+    // `levels[level]` is only a mirror of the *last* face uploaded, and its
+    // desc.depth is 1. Clearing through it wrote the six faces on top of each
+    // other into a one-slice buffer and never reached the sampled storage
+    // (measured: all six probes read 0,0,0 while six clears reported success).
+    // GL 4.6 §8.20 addresses cube faces through zoffset in the order
+    // +X, -X, +Y, -Y, +Z, -Z.
+    std::vector<std::pair<GLTextureImageLevel*, GLint>> targets;
+    if (tex->target == GL_TEXTURE_CUBE_MAP) {
+        for (GLint f = zoffset; f < zoffset + depth; ++f) {
+            if (f < 0 || f >= 6) continue;
+            auto& faceLevels = tex->cubeFaceLevels[static_cast<std::size_t>(f)];
+            auto faceIt = faceLevels.find(level);
+            if (faceIt != faceLevels.end() && faceIt->second.defined) {
+                targets.emplace_back(&faceIt->second, 0);
+            }
+        }
     }
-    it->second.generatedMipLevel = false;
-    fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
-                            xoffset, yoffset, zoffset,
-                            width, height, depth,
-                            format, type, data);
+    const bool cubeFaceRouted = !targets.empty();
+    if (!cubeFaceRouted) {
+        targets.emplace_back(&it->second, zoffset);
+    }
+    for (auto& [img, zOrigin] : targets) {
+        if (!ensureClearShadowBacking(*img, level)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        img->generatedMipLevel = false;
+        fillLevelWithClearValue_T(impl_.get(), *tex, *img,
+                                xoffset, yoffset, zOrigin,
+                                width, height,
+                                cubeFaceRouted ? 1 : depth,
+                                format, type, data);
+    }
+    if (cubeFaceRouted) {
+        tex->cubeFaceShadowsAuthoritative = true;
+    }
     tex->colorShadowAuthoritative = true;
     if (!isColorFormat(internalFormat)) {
         tex->depthStencilShadowAuthoritative = true;
@@ -628,6 +724,18 @@ bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint x
     if (uploadBlock.width != block.width ||
         uploadBlock.height != block.height ||
         uploadBlock.bytes != block.bytes) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.6 §8.7: "INVALID_OPERATION is generated if format does not match
+    // the internal format of the texture image being modified." The block
+    // geometry comparison above is necessary but not sufficient — two
+    // distinct S3TC enums can share a 4x4x8 block, so
+    // GL_COMPRESSED_RGB_S3TC_DXT1_EXT slipped into a
+    // GL_COMPRESSED_RGBA_S3TC_DXT1_EXT texture without an error.
+    // `texturing@s3tc-errors` line 372 asserts exactly that case (it is the
+    // one of the test's four format iterations the geometry check missed).
+    if (format != obj->desc.internalFormat) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }

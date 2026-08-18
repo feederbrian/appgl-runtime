@@ -1805,6 +1805,36 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §8.6 / EXT_texture_compression_s3tc: an uncompressed
+    // TexSubImage into a block-compressed texture may only replace whole
+    // blocks. INVALID_OPERATION when xoffset/yoffset are not multiples of
+    // the block dimensions, or when width/height are not multiples and the
+    // sub-rectangle does not run to the right/top edge of the level.
+    // `texturing@s3tc-errors` line 267 asserts this for all four S3TC
+    // formats; the partial-block edge cases in that test's
+    // test_non_power_of_two()/test_small_mipmap_level() must stay
+    // GL_NO_ERROR, which is what the edge-clamp clauses below preserve.
+    if (isCompressedInternalFormat(image.desc.internalFormat)) {
+        const CompressedBlockInfo subBlock =
+            compressedBlockInfoForInternalFormat(image.desc.internalFormat);
+        if (subBlock.width > 1 || subBlock.height > 1) {
+            const NSUInteger bw = subBlock.width > 0 ? subBlock.width : 1;
+            const NSUInteger bh = subBlock.height > 0 ? subBlock.height : 1;
+            const bool originAligned =
+                (static_cast<NSUInteger>(xoffset) % bw) == 0 &&
+                (static_cast<NSUInteger>(yoffset) % bh) == 0;
+            const bool widthAligned =
+                (static_cast<NSUInteger>(width) % bw) == 0 ||
+                (xoffset + width) == image.desc.width;
+            const bool heightAligned =
+                (static_cast<NSUInteger>(height) % bh) == 0 ||
+                (yoffset + height) == image.desc.height;
+            if (!originAligned || !widthAligned || !heightAligned) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
+    }
     if (storageObject->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
         !storageObject->depthStencilShadowAuthoritative) {
         (void)impl_->syncDepth32FTextureLevelNativeFromMetal(

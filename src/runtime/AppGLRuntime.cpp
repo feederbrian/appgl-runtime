@@ -1172,8 +1172,16 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_RGB10_A2:
         case GL_RGB10_A2UI:
         case GL_RGB565:
-        // sRGB
+        // sRGB. GL 2.1 / EXT_texture_sRGB Table 3.16 lists the *unsized*
+        // base enums SRGB, SRGB_ALPHA, SLUMINANCE and SLUMINANCE_ALPHA
+        // alongside their sized siblings; omitting them made glTexImage2D
+        // push GL_INVALID_ENUM and drop the payload for a legal internal
+        // format (measured: the two GL_SRGB / GL_SRGB_ALPHA subtests of
+        // arb_clear_texture-srgb failed at common.c:275, before any clear
+        // ran, while the SRGB8 / SRGB8_ALPHA8 subtests passed).
+        case GL_SRGB:
         case GL_SRGB8:
+        case GL_SRGB_ALPHA:
         case GL_SRGB8_ALPHA8:
         // Depth / stencil — sized and unsized base variants. GL 4.6 §8.5
         // Table 8.11 lists the sized depth/stencil internal formats; the

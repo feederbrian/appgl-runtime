@@ -584,6 +584,13 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     // ------------------------------------------------------------------
     add(GL_SRGB8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, false, true, false);
     add(GL_SRGB8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, true, true, false);
+    // R2 — the *unsized* base enums are equally legal internal formats
+    // (GL 2.1 / EXT_texture_sRGB Table 3.16), exactly as GL_RGB / GL_RGBA are
+    // beside GL_RGB8 / GL_RGBA8. Their absence from this table made
+    // isSupportedInternalTextureFormat() false, so glTexImage2D rejected them
+    // with GL_INVALID_ENUM before any storage was allocated.
+    add(GL_SRGB, MTLPixelFormatRGBA8Unorm_sRGB, true, true, false, true, false);
+    add(GL_SRGB_ALPHA, MTLPixelFormatRGBA8Unorm_sRGB, true, true, true, true, false);
 
     // ------------------------------------------------------------------
     // Legacy / low-precision sized formats. Metal has no native equivalents
