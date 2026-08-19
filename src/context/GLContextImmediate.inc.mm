@@ -6819,6 +6819,11 @@ void GLContext::endImmediate() {
             &fboDSLevel);
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        // Companion to the line above: when the FBO carries depth and
+        // stencil in two different images, the single fboDepthStencilTexture
+        // slot holds only the depth image and the stencil one is dropped.
+        info.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+            &info.fboStencilSlice, &info.fboStencilLevel);
         info.fboExtraColorTextures = extraColTex;
         info.fboColorSlices = colSlices;
         info.fboColorLevels = colLevels;
@@ -9213,6 +9218,11 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             &fboDSLevel);
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        // Companion to the line above: when the FBO carries depth and
+        // stencil in two different images, the single fboDepthStencilTexture
+        // slot holds only the depth image and the stencil one is dropped.
+        info.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+            &info.fboStencilSlice, &info.fboStencilLevel);
         info.fboExtraColorTextures = extraColTex;
         info.fboColorSlices = colSlices;
         info.fboColorLevels = colLevels;

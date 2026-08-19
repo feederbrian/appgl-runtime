@@ -4539,6 +4539,9 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
         phase2PlanHashPointer(hash, texture);
     }
     phase2PlanHashPointer(hash, tdi.fboDepthStencilTexture);
+    phase2PlanHashPointer(hash, tdi.fboStencilTexture);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fboStencilSlice));
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fboStencilLevel));
     phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fboWidth));
     phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fboHeight));
     phase2PlanHashBool(hash, tdi.fboAttachmentless);
@@ -4844,6 +4847,9 @@ struct Phase2PlanKeyMemoSignature {
     const void* fboColorTexture = nullptr;
     std::array<const void*, 7> fboAdditionalColorTextures{};
     const void* fboDepthStencilTexture = nullptr;
+    const void* fboStencilTexture = nullptr;
+    std::uint32_t fboStencilSlice = 0;
+    std::uint32_t fboStencilLevel = 0;
     GLsizei fboWidth = 0;
     GLsizei fboHeight = 0;
     bool fboAttachmentless = false;
@@ -4984,6 +4990,9 @@ struct Phase2PlanKeyMemoSignature {
                fboAdditionalColorTextures ==
                    other.fboAdditionalColorTextures &&
                fboDepthStencilTexture == other.fboDepthStencilTexture &&
+               fboStencilTexture == other.fboStencilTexture &&
+               fboStencilSlice == other.fboStencilSlice &&
+               fboStencilLevel == other.fboStencilLevel &&
                fboWidth == other.fboWidth &&
                fboHeight == other.fboHeight &&
                fboAttachmentless == other.fboAttachmentless &&
@@ -5288,6 +5297,9 @@ static bool phase2PlanBuildKeyMemoSignature(const TranslatedDrawInfo& tdi,
             tdi.fboAdditionalColorTextures[i];
     }
     out.fboDepthStencilTexture = tdi.fboDepthStencilTexture;
+    out.fboStencilTexture = tdi.fboStencilTexture;
+    out.fboStencilSlice = tdi.fboStencilSlice;
+    out.fboStencilLevel = tdi.fboStencilLevel;
     out.fboWidth = tdi.fboWidth;
     out.fboHeight = tdi.fboHeight;
     out.fboAttachmentless = tdi.fboAttachmentless;
@@ -9171,6 +9183,7 @@ static std::uint64_t serialDeferredCountBackendHandleRefs(
     count(info.metalFragmentFunction);
     count(info.fboColorTexture);
     count(info.fboDepthStencilTexture);
+    count(info.fboStencilTexture);
     for (void* texture : info.fboAdditionalColorTextures) {
         count(texture);
     }
@@ -25481,6 +25494,80 @@ struct GLContext::Impl {
     // Metal-slice index for FramebufferTextureLayer-style attachments.
     // Slot 0 feeds index 0, slots 1..7 feed indices 1..7. Every entry
     // defaults to 0 (whole-texture attachment or non-layered).
+    // Separate GL_STENCIL_ATTACHMENT companion to resolveFBOColorTarget.
+    //
+    // Desktop GL lets GL_DEPTH_ATTACHMENT and GL_STENCIL_ATTACHMENT name
+    // two different images; 44aef50 stopped answering
+    // GL_FRAMEBUFFER_UNSUPPORTED for that shape. But resolveFBOColorTarget
+    // has a single `outDepthStencil` out-parameter and fills it from a
+    // first-match chain (DEPTH, then DEPTH_STENCIL, then STENCIL), so the
+    // moment a depth attachment exists the stencil image is never looked
+    // at and the framebuffer renders with no stencil at all.
+    //
+    // This returns that dropped image, and returns nullptr in exactly the
+    // cases where `outDepthStencil` already carries the stencil:
+    //   * no GL_STENCIL_ATTACHMENT at all;
+    //   * no GL_DEPTH_ATTACHMENT, so the chain's third link already
+    //     selected the stencil image (measured: hiz-stencil-test-fbo-d0-s8
+    //     passes today while hiz-stencil-test-fbo-d24-s8 fails);
+    //   * both points naming the same image, including the combined
+    //     GL_DEPTH_STENCIL_ATTACHMENT spelling.
+    // The "different image" test is deliberately the same four-field
+    // comparison (kind/object/level/layer) that the removed completeness
+    // rule used, so this covers precisely the shape 44aef50 admitted.
+    void* resolveFBOSeparateStencilTarget(
+            std::uint32_t* outStencilSlice = nullptr,
+            std::uint32_t* outStencilLevel = nullptr) {
+        if (outStencilSlice != nullptr) *outStencilSlice = 0;
+        if (outStencilLevel != nullptr) *outStencilLevel = 0;
+        const GLuint fboName = state->boundDrawFramebuffer();
+        if (fboName == 0) return nullptr;
+        const GLFramebufferObject* fbo = objects->framebuffers().get(fboName);
+        if (fbo == nullptr) return nullptr;
+
+        const GLFramebufferAttachment* stencilAtt =
+            framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT);
+        if (stencilAtt == nullptr) return nullptr;
+        const GLFramebufferAttachment* depthAtt =
+            framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT);
+        if (depthAtt == nullptr) return nullptr;
+        if (depthAtt->kind == stencilAtt->kind &&
+            depthAtt->object == stencilAtt->object &&
+            depthAtt->level == stencilAtt->level &&
+            depthAtt->layer == stencilAtt->layer) {
+            return nullptr;
+        }
+
+        if (stencilAtt->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* rb =
+                objects->renderbuffers().get(stencilAtt->object);
+            if (rb == nullptr || rb->metalTexture == nullptr) return nullptr;
+            return rb->metalTexture;
+        }
+        if (stencilAtt->kind == GLFramebufferAttachment::Kind::Texture) {
+            GLTextureObject* tex = objects->textures().get(stencilAtt->object);
+            if (tex != nullptr && tex->viewSourceTexture != 0) {
+                (void)materializeTextureView(*tex);
+            }
+            if (tex != nullptr && tex->viewSourceTexture == 0) {
+                (void)restoreR5PrimaryTextureIfNeeded(*tex, stencilAtt->object);
+            }
+            if (tex == nullptr || tex->metalTexture == nullptr) return nullptr;
+            if (outStencilSlice != nullptr) {
+                *outStencilSlice = !stencilAtt->layered
+                    ? static_cast<std::uint32_t>(
+                          std::max<GLint>(stencilAtt->layer, 0))
+                    : 0u;
+            }
+            if (outStencilLevel != nullptr) {
+                *outStencilLevel = static_cast<std::uint32_t>(
+                    std::max<GLint>(stencilAtt->level, 0));
+            }
+            return tex->metalTexture;
+        }
+        return nullptr;
+    }
+
     void* resolveFBOColorTarget(GLsizei& outWidth, GLsizei& outHeight,
                                 void*& outDepthStencil,
                                 std::uint32_t* outColorArrayLength = nullptr,
@@ -49850,6 +49937,11 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (fboColTex != nullptr || fboDSTex != nullptr) {
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        // Companion to the line above: when the FBO carries depth and
+        // stencil in two different images, the single fboDepthStencilTexture
+        // slot holds only the depth image and the stencil one is dropped.
+        info.fboStencilTexture = resolveFBOSeparateStencilTarget(
+            &info.fboStencilSlice, &info.fboStencilLevel);
         if (mslWritesRenderTargetArrayIndex(info.tessEvalMSL) &&
             fboColTex != nullptr) {
             info.fboColorArrayLength = fboArrayLen > 0 ? fboArrayLen : 1u;
@@ -50236,6 +50328,11 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.vsOutputStrideBytes = 256;
     info.fboColorTexture = fboColTex;
     info.fboDepthStencilTexture = fboDSTex;
+    // Companion to the line above: when the FBO carries depth and
+    // stencil in two different images, the single fboDepthStencilTexture
+    // slot holds only the depth image and the stencil one is dropped.
+    info.fboStencilTexture = resolveFBOSeparateStencilTarget(
+        &info.fboStencilSlice, &info.fboStencilLevel);
     info.fboWidth = static_cast<std::uint32_t>(fboW);
     info.fboHeight = static_cast<std::uint32_t>(fboH);
     info.fboColorArrayLength = fboArrayLen;
@@ -51006,6 +51103,11 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
             tdi.fboColorAlphaModes = colAlphaModes;
             tdi.fboColorArrayLength = fboArrayLen;
             tdi.fboDepthStencilTexture = fboDSTex;
+            // Companion to the line above: when the FBO carries depth and
+            // stencil in two different images, the single fboDepthStencilTexture
+            // slot holds only the depth image and the stencil one is dropped.
+            tdi.fboStencilTexture = resolveFBOSeparateStencilTarget(
+                &tdi.fboStencilSlice, &tdi.fboStencilLevel);
             tdi.fboDepthStencilSlice = fboDSSlice;
             tdi.fboDepthStencilLevel = fboDSLevel;
             tdi.fboWidth = fboW;
@@ -51278,6 +51380,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // renderTargetArrayLength=0 and drops every fragment.
     GLsizei preFboW = 0, preFboH = 0;
     void* preFboDSTex = nullptr;
+    void* preFboSepStencilTex = nullptr;
+    std::uint32_t preFboSepStencilSlice = 0;
+    std::uint32_t preFboSepStencilLevel = 0;
     std::uint32_t preFboArrayLen = 0;
     std::uint32_t preFboDSSlice = 0;
     std::uint32_t preFboDSLevel = 0;
@@ -51290,6 +51395,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         &preExtraColTex, &preColorSlices, &preColorLevels,
         &preColorAlphaModes,
         &preFboDSSlice, &preFboDSLevel);
+    // Resolve the separate-stencil companion at the same point as the
+    // depth/stencil resolve above: the bound draw framebuffer is read here
+    // and the assignment into `tdi` happens ~800 lines later.
+    preFboSepStencilTex = resolveFBOSeparateStencilTarget(
+        &preFboSepStencilSlice, &preFboSepStencilLevel);
     const GLuint preDrawFboName = state->boundDrawFramebuffer();
     const GLFramebufferObject* preDrawFbo =
         preDrawFboName != 0 ? objects->framebuffers().get(preDrawFboName) : nullptr;
@@ -52129,6 +52239,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         tdi.fboColorLevels = preColorLevels;
         tdi.fboColorAlphaModes = preColorAlphaModes;
         tdi.fboDepthStencilTexture = preFboDSTex;
+        // Companion to the line above: when the FBO carries depth and
+        // stencil in two different images, the single fboDepthStencilTexture
+        // slot holds only the depth image and the stencil one is dropped.
+        tdi.fboStencilTexture = preFboSepStencilTex;
+        tdi.fboStencilSlice = preFboSepStencilSlice;
+        tdi.fboStencilLevel = preFboSepStencilLevel;
         tdi.fboDepthStencilSlice = preFboDSSlice;
         tdi.fboDepthStencilLevel = preFboDSLevel;
         tdi.fboWidth = preAttachmentlessFbo ? preDrawFbo->defaultWidth : preFboW;
@@ -52293,6 +52409,11 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
             tdi.fboColorAlphaModes = colAlphaModes;
             tdi.fboColorArrayLength = fboArrayLen;
             tdi.fboDepthStencilTexture = fboDSTex;
+            // Companion to the line above: when the FBO carries depth and
+            // stencil in two different images, the single fboDepthStencilTexture
+            // slot holds only the depth image and the stencil one is dropped.
+            tdi.fboStencilTexture = resolveFBOSeparateStencilTarget(
+                &tdi.fboStencilSlice, &tdi.fboStencilLevel);
             tdi.fboDepthStencilSlice = fboDSSlice;
             tdi.fboDepthStencilLevel = fboDSLevel;
             tdi.fboWidth = fboW;
@@ -52841,6 +52962,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     tdi.fboColorLevels = colLevels;
                     tdi.fboColorAlphaModes = colAlphaModes;
                     tdi.fboDepthStencilTexture = fboDSTex;
+                    // Companion to the line above: when the FBO carries depth and
+                    // stencil in two different images, the single fboDepthStencilTexture
+                    // slot holds only the depth image and the stencil one is dropped.
+                    tdi.fboStencilTexture = resolveFBOSeparateStencilTarget(
+                        &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                     tdi.fboDepthStencilSlice = fboDSSlice;
                     tdi.fboDepthStencilLevel = fboDSLevel;
                     tdi.fboWidth = fboW;

@@ -793,6 +793,12 @@ struct TranslatedDrawInfo {
     // slot-0 entry already carried by `fboColorTexture`.
     std::array<void*, 7> fboAdditionalColorTextures = {};
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nil
+    // Separate GL_STENCIL_ATTACHMENT image, when the FBO names depth
+    // and stencil in two different images (legal in desktop GL). nil
+    // whenever fboDepthStencilTexture already carries the stencil.
+    void* fboStencilTexture = nullptr;      // id<MTLTexture> or nil
+    std::uint32_t fboStencilSlice = 0;
+    std::uint32_t fboStencilLevel = 0;
     GLsizei fboWidth = 0;
     GLsizei fboHeight = 0;
     // Attachment-less user FBO (ARB_framebuffer_no_attachments). GL
@@ -897,6 +903,9 @@ struct ImmediateDrawInfo {
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
+    void* fboStencilTexture = nullptr;      // separate stencil image
+    std::uint32_t fboStencilSlice = 0;
+    std::uint32_t fboStencilLevel = 0;
     std::array<void*, 7> fboExtraColorTextures = {};
     std::array<std::uint32_t, 8> fboColorSlices = {};
     std::array<std::uint32_t, 8> fboColorLevels = {};
@@ -1213,6 +1222,9 @@ struct MetalTessDrawInfo {
     // Pixel formats are read from the MTLTextures inside the encoder.
     void* fboColorTexture = nullptr;          // id<MTLTexture>
     void* fboDepthStencilTexture = nullptr;   // id<MTLTexture>
+    void* fboStencilTexture = nullptr;        // separate stencil image
+    std::uint32_t fboStencilSlice = 0;
+    std::uint32_t fboStencilLevel = 0;
     std::uint32_t fboColorArrayLength = 0;
 
     // Clear-state propagation: when true, the render pass begins with
@@ -1721,6 +1733,9 @@ public:
         // fboDepthStencilTexture / etc.).
         void* fboColorTexture = nullptr;
         void* fboDepthStencilTexture = nullptr;
+        void* fboStencilTexture = nullptr;
+        std::uint32_t fboStencilSlice = 0;
+        std::uint32_t fboStencilLevel = 0;
         std::uint32_t fboWidth = 0;
         std::uint32_t fboHeight = 0;
         // Phase 2.5 — layered FBO support. When non-zero, the mesh

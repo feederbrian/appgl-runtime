@@ -2074,6 +2074,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         tdi.fboColorAlphaModes = colAlphaModes;
                         tdi.fboColorArrayLength = fboArrayLen;
                         tdi.fboDepthStencilTexture = fboDSTex;
+                        // Companion to the line above: when the FBO carries depth and
+                        // stencil in two different images, the single fboDepthStencilTexture
+                        // slot holds only the depth image and the stencil one is dropped.
+                        tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                            &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                         tdi.fboDepthStencilSlice = fboDSSlice;
                         tdi.fboDepthStencilLevel = fboDSLevel;
                         tdi.fboWidth = fboW;
@@ -2446,6 +2451,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         tdi.fboColorAlphaModes = colAlphaModes;
                         tdi.fboColorArrayLength = fboArrayLen;
                         tdi.fboDepthStencilTexture = fboDSTex;
+                        // Companion to the line above: when the FBO carries depth and
+                        // stencil in two different images, the single fboDepthStencilTexture
+                        // slot holds only the depth image and the stencil one is dropped.
+                        tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                            &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                         tdi.fboDepthStencilSlice = fboDSSlice;
                         tdi.fboDepthStencilLevel = fboDSLevel;
                         tdi.fboWidth = fboW;
@@ -2548,6 +2558,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     tdi.fboColorAlphaModes = colAlphaModes;
                     tdi.fboColorArrayLength = fboArrayLen;
                     tdi.fboDepthStencilTexture = fboDSTex;
+                    // Companion to the line above: when the FBO carries depth and
+                    // stencil in two different images, the single fboDepthStencilTexture
+                    // slot holds only the depth image and the stencil one is dropped.
+                    tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                        &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                     tdi.fboDepthStencilSlice = fboDSSlice;
                     tdi.fboDepthStencilLevel = fboDSLevel;
                     tdi.fboWidth = fboW;
@@ -2665,6 +2680,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         tdi.fboColorAlphaModes = colAlphaModes;
                         tdi.fboColorArrayLength = fboArrayLen;
                         tdi.fboDepthStencilTexture = fboDSTex;
+                        // Companion to the line above: when the FBO carries depth and
+                        // stencil in two different images, the single fboDepthStencilTexture
+                        // slot holds only the depth image and the stencil one is dropped.
+                        tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                            &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                         tdi.fboDepthStencilSlice = fboDSSlice;
                         tdi.fboDepthStencilLevel = fboDSLevel;
                         tdi.fboWidth = fboW;
@@ -2838,6 +2858,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                             tdi.fboColorAlphaModes = colAlphaModes;
                             tdi.fboColorArrayLength = fboArrayLen;
                             tdi.fboDepthStencilTexture = fboDSTex;
+                            // Companion to the line above: when the FBO carries depth and
+                            // stencil in two different images, the single fboDepthStencilTexture
+                            // slot holds only the depth image and the stencil one is dropped.
+                            tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                                &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                             tdi.fboDepthStencilSlice = fboDSSlice;
                             tdi.fboDepthStencilLevel = fboDSLevel;
                             tdi.fboWidth = fboW;
@@ -3426,6 +3451,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.fboColorAlphaModes = colAlphaModes;
                     tdi.fboColorArrayLength = fboArrayLen;
                     tdi.fboDepthStencilTexture = fboDSTex;
+                    // Companion to the line above: when the FBO carries depth and
+                    // stencil in two different images, the single fboDepthStencilTexture
+                    // slot holds only the depth image and the stencil one is dropped.
+                    tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                        &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                     tdi.fboDepthStencilSlice = fboDSSlice;
                     tdi.fboDepthStencilLevel = fboDSLevel;
                     tdi.fboWidth = fboW;
@@ -3616,6 +3646,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                             tdi.fboColorAlphaModes = colAlphaModes;
                             tdi.fboColorArrayLength = fboArrayLen;
                             tdi.fboDepthStencilTexture = fboDSTex;
+                            // Companion to the line above: when the FBO carries depth and
+                            // stencil in two different images, the single fboDepthStencilTexture
+                            // slot holds only the depth image and the stencil one is dropped.
+                            tdi.fboStencilTexture = impl_->resolveFBOSeparateStencilTarget(
+                                &tdi.fboStencilSlice, &tdi.fboStencilLevel);
                             tdi.fboDepthStencilSlice = fboDSSlice;
                             tdi.fboDepthStencilLevel = fboDSLevel;
                             tdi.fboWidth = fboW;

@@ -7606,6 +7606,7 @@ struct MetalFrameGraph::Impl {
         }
         noteCbResource(info.fboColorTexture);
         noteCbResource(info.fboDepthStencilTexture);
+        noteCbResource(info.fboStencilTexture);
         for (void* texture : info.fboAdditionalColorTextures) {
             noteCbResource(texture);
         }
@@ -9126,6 +9127,15 @@ struct MetalFrameGraph::Impl {
             {
                 MTLPixelFormat depthFmt = MTLPixelFormatInvalid;
                 MTLPixelFormat stencilFmt = MTLPixelFormatInvalid;
+                // Separate depth+stencil images: the stencil format must come
+                // from the stencil texture, not from the depth one. A
+                // depth-only dsTex leaves stencilFmt Invalid below, and a
+                // pipeline whose stencilAttachmentPixelFormat is Invalid makes
+                // Metal discard every stencil write for the pass.
+                if (info.fboStencilTexture != nullptr) {
+                    stencilFmt = ((__bridge id<MTLTexture>)
+                                      info.fboStencilTexture).pixelFormat;
+                }
                 if (info.fboDepthStencilTexture != nullptr) {
                     id<MTLTexture> dsTex = (__bridge id<MTLTexture>)info.fboDepthStencilTexture;
                     const MTLPixelFormat pf = dsTex.pixelFormat;
@@ -9136,12 +9146,14 @@ struct MetalFrameGraph::Impl {
                         pf == MTLPixelFormatDepth24Unorm_Stencil8) {
                         depthFmt = pf;
                     }
-                    // Formats carrying stencil.
-                    if (pf == MTLPixelFormatStencil8 ||
-                        pf == MTLPixelFormatDepth32Float_Stencil8 ||
-                        pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                        pf == MTLPixelFormatX32_Stencil8 ||
-                        pf == MTLPixelFormatX24_Stencil8) {
+                    // Formats carrying stencil. Skipped when a separate
+                    // stencil image already supplied the format above.
+                    if (info.fboStencilTexture == nullptr &&
+                        (pf == MTLPixelFormatStencil8 ||
+                         pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                         pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                         pf == MTLPixelFormatX32_Stencil8 ||
+                         pf == MTLPixelFormatX24_Stencil8)) {
                         stencilFmt = pf;
                     }
                 } else if (info.fboColorTexture == nullptr &&
@@ -10223,11 +10235,23 @@ struct MetalFrameGraph::Impl {
                     dsFormat == MTLPixelFormatDepth32Float ||
                     dsFormat == MTLPixelFormatDepth32Float_Stencil8 ||
                     dsFormat == MTLPixelFormatDepth16Unorm;
+                // A separate GL_STENCIL_ATTACHMENT supplies its own image.
+                // Without this the stencil slot is derived from the DEPTH
+                // texture's format, a depth-only format reports no stencil,
+                // and the pass runs with stencilAttachment unset -- which is
+                // why the framebuffer 44aef50 admitted renders with the
+                // stencil silently dropped rather than crashing.
+                id<MTLTexture> passStencil =
+                    (isFBODraw && info.fboStencilTexture != nullptr)
+                        ? (__bridge id<MTLTexture>)info.fboStencilTexture
+                        : nil;
+                const MTLPixelFormat stencilFormat =
+                    passStencil != nil ? passStencil.pixelFormat : dsFormat;
                 const bool fmtHasStencil =
-                    dsFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                    dsFormat == MTLPixelFormatStencil8 ||
-                    dsFormat == MTLPixelFormatX32_Stencil8 ||
-                    dsFormat == MTLPixelFormatX24_Stencil8;
+                    stencilFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                    stencilFormat == MTLPixelFormatStencil8 ||
+                    stencilFormat == MTLPixelFormatX32_Stencil8 ||
+                    stencilFormat == MTLPixelFormatX24_Stencil8;
                 if (fmtHasDepth) {
                     pass.depthAttachment.texture = passDepthStencil;
                     if (isFBODraw) {
@@ -10249,12 +10273,17 @@ struct MetalFrameGraph::Impl {
                     }
                 }
                 if (fmtHasStencil) {
-                    pass.stencilAttachment.texture = passDepthStencil;
+                    pass.stencilAttachment.texture =
+                        passStencil != nil ? passStencil : passDepthStencil;
                     if (isFBODraw) {
                         pass.stencilAttachment.level =
-                            static_cast<NSUInteger>(info.fboDepthStencilLevel);
+                            static_cast<NSUInteger>(passStencil != nil
+                                ? info.fboStencilLevel
+                                : info.fboDepthStencilLevel);
                         pass.stencilAttachment.slice =
-                            static_cast<NSUInteger>(info.fboDepthStencilSlice);
+                            static_cast<NSUInteger>(passStencil != nil
+                                ? info.fboStencilSlice
+                                : info.fboDepthStencilSlice);
                     }
                     pass.stencilAttachment.storeAction = MTLStoreActionStore;
                     if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
@@ -19545,6 +19574,12 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         void* dsTex = nullptr;
         std::uint32_t dsSlice = 0;
         std::uint32_t dsLevel = 0;
+        // Separate GL_STENCIL_ATTACHMENT image. Part of the signature so a
+        // draw that changes only the stencil image forces a new pass instead
+        // of silently reusing one built around the previous stencil target.
+        void* stencilTex = nullptr;
+        std::uint32_t stencilSlice = 0;
+        std::uint32_t stencilLevel = 0;
         std::uint32_t rtalSource = 0;
         std::uint32_t fragmentShadingRate = 0;
     };
@@ -19624,7 +19659,10 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
 
     bool fboPassSignatureMatches(const TranslatedDrawInfo& info) const {
         if (activeFboPassSignature.colorTex != info.fboColorTexture ||
-            activeFboPassSignature.dsTex != info.fboDepthStencilTexture) {
+            activeFboPassSignature.dsTex != info.fboDepthStencilTexture ||
+            activeFboPassSignature.stencilTex != info.fboStencilTexture ||
+            activeFboPassSignature.stencilSlice != info.fboStencilSlice ||
+            activeFboPassSignature.stencilLevel != info.fboStencilLevel) {
             return false;
         }
         if (activeFboPassSignature.dsSlice !=
@@ -19659,7 +19697,10 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         if (activeFboPassSignature.colorTex != info.fboColorTexture) {
             ++fboSignatureMissColorTex;
         }
-        if (activeFboPassSignature.dsTex != info.fboDepthStencilTexture) {
+        if (activeFboPassSignature.dsTex != info.fboDepthStencilTexture ||
+            activeFboPassSignature.stencilTex != info.fboStencilTexture ||
+            activeFboPassSignature.stencilSlice != info.fboStencilSlice ||
+            activeFboPassSignature.stencilLevel != info.fboStencilLevel) {
             ++fboSignatureMissDsTex;
         }
         if (activeFboPassSignature.dsSlice !=
@@ -19700,7 +19741,8 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         auto isTarget = [&](void* tex) -> bool {
             if (tex == nullptr) return false;
             if (tex == activeFboPassSignature.colorTex ||
-                tex == activeFboPassSignature.dsTex) {
+                tex == activeFboPassSignature.dsTex ||
+                tex == activeFboPassSignature.stencilTex) {
                 return true;
             }
             for (void* extra : activeFboPassSignature.extraColor) {
@@ -19737,6 +19779,9 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         activeFboPassSignature.colorSlices = info.fboColorSlices;
         activeFboPassSignature.colorLevels = info.fboColorLevels;
         activeFboPassSignature.dsTex = info.fboDepthStencilTexture;
+        activeFboPassSignature.stencilTex = info.fboStencilTexture;
+        activeFboPassSignature.stencilSlice = info.fboStencilSlice;
+        activeFboPassSignature.stencilLevel = info.fboStencilLevel;
         activeFboPassSignature.dsSlice =
             static_cast<std::uint32_t>(info.fboDepthStencilSlice);
         activeFboPassSignature.dsLevel =
@@ -19748,12 +19793,17 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
 
     bool activeFboPassTargetsTexture(void* texVoid) const {
         if (!fboPassActive || texVoid == nullptr) return false;
-        if (texVoid == activeFboPassSignature.colorTex ||
-            texVoid == activeFboPassSignature.dsTex) {
+        // CONVERGE MERGE: ROOT-2 alias-awareness (srgb arm) applied over the
+        // separate-stencil signature field (stage-2 arm). A clear recorded on
+        // the sRGB storage must still end an open pass bound to the linear view
+        // over it, and vice versa; stencilTex participates on the same rule.
+        if (pendingFboClearTexAliases(texVoid, activeFboPassSignature.colorTex) ||
+            pendingFboClearTexAliases(texVoid, activeFboPassSignature.dsTex) ||
+            pendingFboClearTexAliases(texVoid, activeFboPassSignature.stencilTex)) {
             return true;
         }
         for (void* extra : activeFboPassSignature.extraColor) {
-            if (extra != nullptr && texVoid == extra) return true;
+            if (pendingFboClearTexAliases(texVoid, extra)) return true;
         }
         return false;
     }
@@ -19851,6 +19901,45 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
             : 0;
     }
 
+    // ROOT-2 (sRGB clear-loss). A colour attachment whose storage is an
+    // *_sRGB Metal format is bound to the render pass through a
+    // LINEAR-format MTLTexture *view* while GL_FRAMEBUFFER_SRGB is
+    // disabled (GLContext.mm linearRenderTargetViewForSRGBAttachment).
+    // glClear, however, still records its deferred entry against the
+    // storage's own texture. The two are the same memory but different
+    // `id<MTLTexture>` pointers, so every pointer-equality lookup in the
+    // C48 registry missed: the entry could not fold into the pass, and
+    // materializeNonFoldablePendingClearsForPassTargets did not consider
+    // the pass to touch it either. The clear was left in the registry and
+    // the pass opened with MTLLoadActionLoad, so each tile inherited its
+    // predecessor's contents — the monotonic accumulation seen across the
+    // 16 reference tiles of ext_framebuffer_multisample-accuracy srgb.
+    //
+    // Treat a view and its parent as the same storage, in BOTH
+    // directions: `materializePendingFboClearsForTexture` already looked
+    // through tex->parentTexture (view sampled, clear on parent) but not
+    // the reverse (clear on view, parent sampled).
+    static bool pendingFboClearTexAliases(void* entryTex, void* other) {
+        if (entryTex == nullptr || other == nullptr) return false;
+        if (entryTex == other) return true;
+        id<MTLTexture> a = (__bridge id<MTLTexture>)entryTex;
+        id<MTLTexture> b = (__bridge id<MTLTexture>)other;
+        if (a.parentTexture != nil &&
+            (__bridge void*)a.parentTexture == other) {
+            return true;
+        }
+        if (b.parentTexture != nil &&
+            (__bridge void*)b.parentTexture == entryTex) {
+            return true;
+        }
+        // Two sibling views over one parent are the same storage too.
+        if (a.parentTexture != nil && b.parentTexture != nil &&
+            a.parentTexture == b.parentTexture) {
+            return true;
+        }
+        return false;
+    }
+
     bool materializeAllPendingFboClears() {
         if (pendingFboClears.empty()) {
             return false;
@@ -19869,13 +19958,9 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         if (pendingFboClears.empty() || texVoid == nullptr) {
             return false;
         }
-        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
-        void* parent = tex.parentTexture != nil
-            ? (__bridge void*)tex.parentTexture : nullptr;
         std::vector<PendingFboClear> matched;
         for (std::size_t i = 0; i < pendingFboClears.size();) {
-            if (pendingFboClears[i].tex == texVoid ||
-                (parent != nullptr && pendingFboClears[i].tex == parent)) {
+            if (pendingFboClearTexAliases(pendingFboClears[i].tex, texVoid)) {
                 matched.push_back(pendingFboClears[i]);
                 pendingFboClears.erase(pendingFboClears.begin() +
                                        static_cast<std::ptrdiff_t>(i));
@@ -19893,13 +19978,9 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         if (pendingFboClears.empty() || texVoid == nullptr) {
             return false;
         }
-        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
-        void* parent = tex.parentTexture != nil
-            ? (__bridge void*)tex.parentTexture : nullptr;
         bool discarded = false;
         for (std::size_t i = 0; i < pendingFboClears.size();) {
-            if (pendingFboClears[i].tex == texVoid ||
-                (parent != nullptr && pendingFboClears[i].tex == parent)) {
+            if (pendingFboClearTexAliases(pendingFboClears[i].tex, texVoid)) {
                 CFRelease((CFTypeRef)pendingFboClears[i].tex);
                 pendingFboClears.erase(pendingFboClears.begin() +
                                        static_cast<std::ptrdiff_t>(i));
@@ -19993,12 +20074,17 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
             return;
         }
         auto touchesPass = [&](void* entryTex) -> bool {
-            if (entryTex == colorTex || entryTex == depthStencilTex) {
+            // ROOT-2: alias-aware. Without this a clear recorded on the
+            // sRGB storage is invisible to a pass bound to the linear
+            // view over that storage, so it neither folds nor
+            // materializes and the pass opens with MTLLoadActionLoad.
+            if (pendingFboClearTexAliases(entryTex, colorTex) ||
+                pendingFboClearTexAliases(entryTex, depthStencilTex)) {
                 return true;
             }
             if (additionalColor != nullptr) {
                 for (void* extra : *additionalColor) {
-                    if (extra != nullptr && entryTex == extra) return true;
+                    if (pendingFboClearTexAliases(entryTex, extra)) return true;
                 }
             }
             return false;
@@ -20765,6 +20851,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             useMRT2 ? colorTexture1.pixelFormat : MTLPixelFormatInvalid;
         MTLPixelFormat depthFormat = MTLPixelFormatInvalid;
         MTLPixelFormat stencilFormat = MTLPixelFormatInvalid;
+        // Separate GL_STENCIL_ATTACHMENT image, when present.
+        id<MTLTexture> passStencilSeparate =
+            (isFBODraw && info.fboStencilTexture != nullptr)
+                ? (__bridge id<MTLTexture>)info.fboStencilTexture
+                : nil;
         if (passDepthStencil != nil) {
             const MTLPixelFormat pf = passDepthStencil.pixelFormat;
             if (pf == MTLPixelFormatDepth16Unorm ||
@@ -20773,13 +20864,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pf == MTLPixelFormatDepth24Unorm_Stencil8) {
                 depthFormat = pf;
             }
-            if (pf == MTLPixelFormatStencil8 ||
-                pf == MTLPixelFormatDepth32Float_Stencil8 ||
-                pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                pf == MTLPixelFormatX32_Stencil8 ||
-                pf == MTLPixelFormatX24_Stencil8) {
+            if (passStencilSeparate == nil &&
+                (pf == MTLPixelFormatStencil8 ||
+                 pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                 pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                 pf == MTLPixelFormatX32_Stencil8 ||
+                 pf == MTLPixelFormatX24_Stencil8)) {
                 stencilFormat = pf;
             }
+        }
+        if (passStencilSeparate != nil) {
+            stencilFormat = passStencilSeparate.pixelFormat;
         }
         const NSUInteger attachmentSampleCount =
             colorTexture != nil ? std::max<NSUInteger>(colorTexture.sampleCount, 1u) : 1u;
@@ -20849,7 +20944,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         pass.depthAttachment.texture =
             depthFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
         pass.stencilAttachment.texture =
-            stencilFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
+            stencilFormat == MTLPixelFormatInvalid
+                ? nil
+                : (passStencilSeparate != nil ? passStencilSeparate
+                                              : passDepthStencil);
         pass.depthAttachment.level = isFBODraw
             ? static_cast<NSUInteger>(info.fboDepthStencilLevel)
             : 0;
@@ -20857,10 +20955,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             ? static_cast<NSUInteger>(info.fboDepthStencilSlice)
             : 0;
         pass.stencilAttachment.level = isFBODraw
-            ? static_cast<NSUInteger>(info.fboDepthStencilLevel)
+            ? static_cast<NSUInteger>(passStencilSeparate != nil
+                  ? info.fboStencilLevel : info.fboDepthStencilLevel)
             : 0;
         pass.stencilAttachment.slice = isFBODraw
-            ? static_cast<NSUInteger>(info.fboDepthStencilSlice)
+            ? static_cast<NSUInteger>(passStencilSeparate != nil
+                  ? info.fboStencilSlice : info.fboDepthStencilSlice)
             : 0;
         if (depthFormat != MTLPixelFormatInvalid) {
             pass.depthAttachment.storeAction = MTLStoreActionStore;
@@ -24913,17 +25013,22 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             depthFormat == MTLPixelFormatDepth32Float ||
             depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
             depthFormat == MTLPixelFormatDepth32Float_Stencil8;
+        // A separate GL_STENCIL_ATTACHMENT carries its own format.
+        const MTLPixelFormat tessStencilFormat =
+            info.fboStencilTexture != nullptr
+                ? ((__bridge id<MTLTexture>)info.fboStencilTexture).pixelFormat
+                : depthFormat;
         const bool fmtHasStencil =
-            depthFormat == MTLPixelFormatStencil8 ||
-            depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
-            depthFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-            depthFormat == MTLPixelFormatX24_Stencil8 ||
-            depthFormat == MTLPixelFormatX32_Stencil8;
+            tessStencilFormat == MTLPixelFormatStencil8 ||
+            tessStencilFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            tessStencilFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+            tessStencilFormat == MTLPixelFormatX24_Stencil8 ||
+            tessStencilFormat == MTLPixelFormatX32_Stencil8;
         if (fmtHasDepth) {
             pipeDesc.depthAttachmentPixelFormat = depthFormat;
         }
         if (fmtHasStencil) {
-            pipeDesc.stencilAttachmentPixelFormat = depthFormat;
+            pipeDesc.stencilAttachmentPixelFormat = tessStencilFormat;
         }
 
         // Tess pipeline settings. Partition-mode mapping mirrors the
@@ -25063,8 +25168,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
             pass.depthAttachment.storeAction = MTLStoreActionStore;
         }
-        if (depthTex != nil && fmtHasStencil) {
-            pass.stencilAttachment.texture = depthTex;
+        id<MTLTexture> tessStencilTex =
+            info.fboStencilTexture != nullptr
+                ? (__bridge id<MTLTexture>)info.fboStencilTexture
+                : nil;
+        if ((tessStencilTex != nil || depthTex != nil) && fmtHasStencil) {
+            pass.stencilAttachment.texture =
+                tessStencilTex != nil ? tessStencilTex : depthTex;
             if (info.pendingClearStencil ||
                 (consumeDefaultClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT))) {
                 pass.stencilAttachment.loadAction = MTLLoadActionClear;
@@ -25501,12 +25611,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     pf == MTLPixelFormatDepth24Unorm_Stencil8) {
                     meshDesc.depthAttachmentPixelFormat = pf;
                 }
-                if (pf == MTLPixelFormatStencil8 ||
-                    pf == MTLPixelFormatDepth32Float_Stencil8 ||
-                    pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                    pf == MTLPixelFormatX32_Stencil8 ||
-                    pf == MTLPixelFormatX24_Stencil8) {
-                    meshDesc.stencilAttachmentPixelFormat = pf;
+                const MTLPixelFormat spf =
+                    info.fboStencilTexture != nullptr
+                        ? ((__bridge id<MTLTexture>)info.fboStencilTexture)
+                              .pixelFormat
+                        : pf;
+                if (spf == MTLPixelFormatStencil8 ||
+                    spf == MTLPixelFormatDepth32Float_Stencil8 ||
+                    spf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                    spf == MTLPixelFormatX32_Stencil8 ||
+                    spf == MTLPixelFormatX24_Stencil8) {
+                    meshDesc.stencilAttachmentPixelFormat = spf;
                 }
             }
             // One mesh threadgroup per input primitive. Object stage
@@ -25634,12 +25749,22 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 }
                 rpd.depthAttachment.storeAction = MTLStoreActionStore;
             }
-            if (pf == MTLPixelFormatStencil8 ||
-                pf == MTLPixelFormatDepth32Float_Stencil8 ||
-                pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                pf == MTLPixelFormatX32_Stencil8 ||
-                pf == MTLPixelFormatX24_Stencil8) {
-                rpd.stencilAttachment.texture = dsTex;
+            // Separate GL_STENCIL_ATTACHMENT image wins over the depth
+            // texture's own format, which for a depth-only attachment
+            // carries no stencil at all.
+            id<MTLTexture> sepStencilTex =
+                info.fboStencilTexture != nullptr
+                    ? (__bridge id<MTLTexture>)info.fboStencilTexture
+                    : nil;
+            const MTLPixelFormat spf =
+                sepStencilTex != nil ? sepStencilTex.pixelFormat : pf;
+            if (spf == MTLPixelFormatStencil8 ||
+                spf == MTLPixelFormatDepth32Float_Stencil8 ||
+                spf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                spf == MTLPixelFormatX32_Stencil8 ||
+                spf == MTLPixelFormatX24_Stencil8) {
+                rpd.stencilAttachment.texture =
+                    sepStencilTex != nil ? sepStencilTex : dsTex;
                 rpd.stencilAttachment.loadAction =
                     consumeStencilClear ? MTLLoadActionClear : MTLLoadActionLoad;
                 if (consumeStencilClear) {
