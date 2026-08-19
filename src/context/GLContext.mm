@@ -25236,26 +25236,18 @@ struct GLContext::Impl {
             }
         }
 
-        // Spec: if separate depth and stencil attachments are present, they must
-        // refer to the same image. Mismatched separate attachments are reported as
-        // GL_FRAMEBUFFER_UNSUPPORTED on a Metal-backed implementation. (A combined
-        // GL_DEPTH_STENCIL_ATTACHMENT does not trip this — it occupies both points
-        // through a single entry.)
-        {
-            const auto depthIt = framebuffer.attachments.find(GL_DEPTH_ATTACHMENT);
-            const auto stencilIt = framebuffer.attachments.find(GL_STENCIL_ATTACHMENT);
-            const bool depthPresent = depthIt != framebuffer.attachments.end()
-                && framebufferAttachmentInfo(depthIt->second).present;
-            const bool stencilPresent = stencilIt != framebuffer.attachments.end()
-                && framebufferAttachmentInfo(stencilIt->second).present;
-            if (depthPresent && stencilPresent) {
-                const auto& d = depthIt->second;
-                const auto& s = stencilIt->second;
-                if (d.kind != s.kind || d.object != s.object || d.level != s.level || d.layer != s.layer) {
-                    return GL_FRAMEBUFFER_UNSUPPORTED;
-                }
-            }
-        }
+        // Separate GL_DEPTH_ATTACHMENT + GL_STENCIL_ATTACHMENT naming different
+        // images is LEGAL in desktop GL and must be accepted. The rule that they
+        // must be the same image belongs to OpenGL ES (ES 3.x §9.4.2), not to GL
+        // 4.6 — which lists no such completeness condition. Returning
+        // GL_FRAMEBUFFER_UNSUPPORTED here made every FBO built by piglit's
+        // Fbo::setup() with combine_depth_stencil=false incomplete, which hid 54
+        // rows behind a SKIP.
+        //
+        // It is not a Metal limitation either: MTLRenderPassDescriptor's
+        // depthAttachment and stencilAttachment accept two different textures at
+        // sample counts 1, 2 and 4 on this hardware (measured), and Apple's own
+        // desktop GL on the same device reports COMPLETE for the same FBO.
 
         // GL 4.6 §9.4.2 — whole-framebuffer layered completeness.
         // `GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS` fires when
