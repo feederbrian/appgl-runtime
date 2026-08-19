@@ -1,8 +1,37 @@
 # Third-Party Patches
 
-Local modifications applied to vendored third-party checkouts. Keep this
-directory in sync with the actual state of `third_party/<name>/` on disk
-so a clean rebuild can re-apply.
+Local modifications applied to vendored third-party checkouts.
+
+> ⛔ **These patches are a DOCUMENTATION TRAIL, not a rebuild mechanism — audited
+> 2026-08-19.** An earlier version of this file promised the directory was kept "in
+> sync ... so a clean rebuild can re-apply". **That is false for SPIRV-Cross and was
+> tested.** The patches *contain each other* — `tes-as-compute` is wholly inside three
+> others, `tcs-output-classification` is 99.6% inside `geometry-shader-as-mesh` — so
+> **no total apply order exists**; any order must double-apply. Applying all 28
+> alphabetically at the fork point: **16 fail**. A curated, dependency-ordered best
+> attempt: **10 fail**, and the surviving tree still differs from the live fork by
+> **1,135 lines** in `spirv_msl.cpp`.
+>
+> **The fork's own git history is the source of truth.** `third_party/SPIRV-Cross`
+> is a real git repo (`origin` = the AppGL fork, branch `appgl-main`); **all 28
+> patches here now duplicate content already committed there.** 27 did at audit time; the
+> twenty-eighth, `spirv-cross-msl-arrays-of-arrays-varyings.patch`, was the only genuinely
+> live delta and was committed the same day as `20025ff6` — it turned out to be repairing
+> a live miscompile, not merely adding a feature.
+> **Re-fetch by cloning the fork, never by replaying this directory.**
+>
+> **glslang is the opposite case and the claim holds there.** It keeps its changes as
+> working-tree modifications rather than commits, and applying its patches to a pristine
+> checkout reproduces the live tree byte-for-byte (reversing them yields pristine
+> exactly). There is no undocumented glslang drift.
+>
+> ⚠ **Two patches are actively unsafe to re-apply:**
+> - `spirv-cross-msl-shading-rate-builtins.patch` still asserts the pre-`34622f7d`
+>   throw text; re-applying it would **revert a deliberate behaviour change** that
+>   widened primitive shading rate from mesh-only to mesh-or-vertex.
+> - `glslang-gl-numsamples-spv.patch` is a **strict duplicate** of
+>   `glslang-cull-distance-builtin-constants.patch` (identical hunk headers). Applying
+>   all four glslang patches in order makes the fourth fail.
 
 ## Fork Policy (2026-04-23)
 
@@ -444,8 +473,13 @@ Sprint 1 snapshot — already includes earlier `tes-as-compute`,
 `tess-isolines-compute-bypass`, and `msl-interface-introspection`
 content) plus `spirv-cross-cli-tese-as-compute-flags.patch`. Forward
 re-apply on a clean SPIRV-Cross HEAD checkout: TCS classification →
-CLI tese flags → this patch. Verified `git apply --check` and `git apply
---reverse --check` rc=0.
+CLI tese flags → this patch.
+
+⛔ **That order was re-tested on 2026-08-19 and it FAILS at step 3.** This patch
+applies at the fork point only *alone* — it fails after `tcs-output-classification`,
+and after `cli-tese-as-compute-flags` alone, because the three overlap. The previous
+"Verified `git apply --check` and `git apply --reverse --check` rc=0" claim here was
+wrong as written. Take this content from the fork's git history instead.
 
 **Summary:** Translates a SPIR-V geometry shader (ExecutionModelGeometry)
 into a Metal `[[mesh]] void main0(...)` function instead of the
