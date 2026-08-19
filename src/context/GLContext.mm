@@ -31320,6 +31320,37 @@ struct GLContext::Impl {
                     return false;
             }
         };
+        // Resolve-path companion to metalFormatCoversAspects. The
+        // `wantsDepth && wantsStencil` rule there exists because Metal's
+        // texture->texture copy of a combined depth/stencil format moves
+        // BOTH aspects, so a depth-only copy would clobber stencil. An MSAA
+        // *resolve* has a per-aspect attachment, so it only needs the format
+        // to actually contain each requested aspect.
+        auto metalFormatHasAspects =
+            [](MTLPixelFormat format, GLbitfield aspects) {
+            const bool wantsDepth =
+                (aspects & GL_DEPTH_BUFFER_BIT) != 0;
+            const bool wantsStencil =
+                (aspects & GL_STENCIL_BUFFER_BIT) != 0;
+            if (!wantsDepth && !wantsStencil) {
+                return false;
+            }
+            bool hasDepth = false;
+            bool hasStencil = false;
+            switch (format) {
+                case MTLPixelFormatDepth16Unorm:
+                case MTLPixelFormatDepth32Float:
+                    hasDepth = true; break;
+                case MTLPixelFormatStencil8:
+                    hasStencil = true; break;
+                case MTLPixelFormatDepth24Unorm_Stencil8:
+                case MTLPixelFormatDepth32Float_Stencil8:
+                    hasDepth = true; hasStencil = true; break;
+                default:
+                    return false;
+            }
+            return (!wantsDepth || hasDepth) && (!wantsStencil || hasStencil);
+        };
         auto sameFramebufferImage =
             [](const GLFramebufferAttachment& a,
                const GLFramebufferAttachment& b) {
@@ -31595,9 +31626,98 @@ struct GLContext::Impl {
             const MetalAttachmentBlitView dstView =
                 resolveMetalAttachmentBlitView(dstAttachment);
             if (srcView.texture == nil || dstView.texture == nil ||
-                srcView.texture.pixelFormat != dstView.texture.pixelFormat ||
-                srcView.texture.sampleCount != dstView.texture.sampleCount ||
-                !metalFormatCoversAspects(srcView.texture.pixelFormat, aspects)) {
+                srcView.texture.pixelFormat != dstView.texture.pixelFormat) {
+                return false;
+            }
+            // ROOT-3: glBlitFramebuffer from a multisample depth/stencil
+            // attachment to a single-sample one is an MSAA *resolve*, not a
+            // copy. The byte-copy path below cannot express it, and the CPU
+            // fallback (readDepthFromMetalTexture / readStencilFromMetal-
+            // Texture, GLContext.mm ~28943 / ~29497) has NO sampleCount
+            // guard: it issues a texture->buffer blit whose source is
+            // multisample, which Metal does not define. Resolve natively
+            // instead, mirroring tryMetalFullColorResolveBlit.
+            const bool dsIsResolve =
+                srcView.texture.sampleCount > 1 &&
+                dstView.texture.sampleCount == 1;
+            if (dsIsResolve) {
+                if (!metalFormatHasAspects(srcView.texture.pixelFormat,
+                                           aspects) ||
+                    srcView.yFlip != dstView.yFlip ||
+                    srcView.texture == dstView.texture ||
+                    !isExactFullColorResolveRect(srcView,
+                                                 dstView.width,
+                                                 dstView.height)) {
+                    return false;
+                }
+                drainFramebufferAttachmentProducer(
+                    srcAttachment,
+                    kProducerFboDepthStencilWrite | kProducerCopyWrite);
+                if (frameGraph != nullptr) {
+                    frameGraph->materializePendingFboClearsForTexture(
+                        (__bridge void*)dstView.texture);
+                    frameGraph->endRenderPass();
+                }
+                auto resolveLease =
+                    makeCommandBuffer(AppGLCommandReason::CopyImageBlit);
+                id<MTLCommandBuffer> resolveCmd = resolveLease.get();
+                if (resolveCmd == nil) {
+                    return false;
+                }
+                MTLRenderPassDescriptor* resolvePass =
+                    [MTLRenderPassDescriptor renderPassDescriptor];
+                resolvePass.renderTargetWidth = srcView.texture.width;
+                resolvePass.renderTargetHeight = srcView.texture.height;
+                if ((aspects & GL_DEPTH_BUFFER_BIT) != 0) {
+                    resolvePass.depthAttachment.texture = srcView.texture;
+                    resolvePass.depthAttachment.level = srcView.level;
+                    resolvePass.depthAttachment.slice = srcView.slice;
+                    resolvePass.depthAttachment.loadAction = MTLLoadActionLoad;
+                    resolvePass.depthAttachment.storeAction =
+                        MTLStoreActionMultisampleResolve;
+                    resolvePass.depthAttachment.resolveTexture =
+                        dstView.texture;
+                    resolvePass.depthAttachment.resolveLevel = dstView.level;
+                    resolvePass.depthAttachment.resolveSlice = dstView.slice;
+                    resolvePass.depthAttachment.depthResolveFilter =
+                        MTLMultisampleDepthResolveFilterSample0;
+                }
+                if ((aspects & GL_STENCIL_BUFFER_BIT) != 0) {
+                    resolvePass.stencilAttachment.texture = srcView.texture;
+                    resolvePass.stencilAttachment.level = srcView.level;
+                    resolvePass.stencilAttachment.slice = srcView.slice;
+                    resolvePass.stencilAttachment.loadAction =
+                        MTLLoadActionLoad;
+                    resolvePass.stencilAttachment.storeAction =
+                        MTLStoreActionMultisampleResolve;
+                    resolvePass.stencilAttachment.resolveTexture =
+                        dstView.texture;
+                    resolvePass.stencilAttachment.resolveLevel = dstView.level;
+                    resolvePass.stencilAttachment.resolveSlice = dstView.slice;
+                    resolvePass.stencilAttachment.stencilResolveFilter =
+                        MTLMultisampleStencilResolveFilterSample0;
+                }
+                id<MTLRenderCommandEncoder> resolveEnc =
+                    [resolveCmd renderCommandEncoderWithDescriptor:resolvePass];
+                if (resolveEnc == nil) {
+                    return false;
+                }
+                [resolveEnc endEncoding];
+                if (!resolveLease.commitAndWait(
+                        AppGLCommandReason::CopyImageBlit)) {
+                    return false;
+                }
+                if (dstView.renderbufferObject != nullptr) {
+                    dstView.renderbufferObject->framebufferReadbackYFlip =
+                        srcView.yFlip;
+                }
+                markMetalAttachmentBlitDestination(dstAttachment, aspects,
+                                                   dstView);
+                return true;
+            }
+            if (srcView.texture.sampleCount != dstView.texture.sampleCount ||
+                !metalFormatCoversAspects(srcView.texture.pixelFormat,
+                                          aspects)) {
                 return false;
             }
             if (srcView.texture == dstView.texture &&
