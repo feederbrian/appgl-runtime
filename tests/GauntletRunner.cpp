@@ -2445,12 +2445,123 @@ public:
         gl.glGetActiveUniformBlockName(program, 0, sizeof(blockNameBuffer), &blockNameLength, blockNameBuffer);
         gl.glUniformBlockBinding(program, blockIndex == GL_INVALID_INDEX ? 0u : blockIndex, 0);
 
-        // Fragment-data location stubs. The fragment shader only declares a
-        // single output, but the dispatch entries still accept the query/bind.
+        // Fragment-output binding validation. Mirror the focused Piglit
+        // invalid-parameter matrices and retain a sentinel binding to prove
+        // that every rejected call leaves both halves of the binding intact.
+        // The preceding reflection smoke intentionally probes missing dummy
+        // resources, so drain those unrelated errors before this matrix.
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        GLint maxDrawBuffers = 0;
+        GLint maxDualSourceDrawBuffers = 0;
+        gl.glGetIntegerv(GL_MAX_DRAW_BUFFERS, &maxDrawBuffers);
+        gl.glGetIntegerv(
+            GL_MAX_DUAL_SOURCE_DRAW_BUFFERS,
+            &maxDualSourceDrawBuffers);
+        expectGLError(gl, GL_NO_ERROR, "fragment-output binding limit queries");
+        expectCondition(
+            maxDrawBuffers > 0 && maxDualSourceDrawBuffers > 0,
+            "fragment-output binding limits are positive");
+
+        const GLuint bindingProgram = gl.glCreateProgram();
+        expectCondition(bindingProgram != 0, "fragment-output validation program created");
+        auto* bindingObject = context.objects().programs().get(bindingProgram);
+        expectCondition(bindingObject != nullptr, "fragment-output validation program is live");
+
+        constexpr const char* kBindingSentinel = "bindingSentinel";
+        gl.glBindFragDataLocationIndexed(
+            bindingProgram,
+            static_cast<GLuint>(maxDualSourceDrawBuffers - 1),
+            1,
+            kBindingSentinel);
+        expectGLError(gl, GL_NO_ERROR, "valid indexed fragment-output binding");
+        expectCondition(
+            bindingObject->requestedFragDataLocations.at(kBindingSentinel) ==
+                static_cast<GLuint>(maxDualSourceDrawBuffers - 1) &&
+            bindingObject->requestedFragDataLocationIndices.at(kBindingSentinel) == 1,
+            "indexed fragment-output binding records location and index");
+
+        const auto sentinelLocations = bindingObject->requestedFragDataLocations;
+        const auto sentinelIndices = bindingObject->requestedFragDataLocationIndices;
+        const auto expectRejectedBinding = [&](GLenum error, std::string_view label) {
+            expectGLError(gl, error, label);
+            expectCondition(
+                bindingObject->requestedFragDataLocations == sentinelLocations &&
+                bindingObject->requestedFragDataLocationIndices == sentinelIndices,
+                std::string(label) + " preserves fragment-output binding state");
+        };
+
+        gl.glBindFragDataLocation(0, 0, kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_VALUE, "plain binding rejects an unknown program name");
+        gl.glBindFragDataLocation(vertex, 0, kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_OPERATION, "plain binding rejects a shader-object name");
+        gl.glBindFragDataLocation(
+            bindingProgram, static_cast<GLuint>(-1), kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_VALUE, "plain binding rejects location -1");
+        gl.glBindFragDataLocation(
+            bindingProgram, static_cast<GLuint>(maxDrawBuffers), kBindingSentinel);
+        expectRejectedBinding(
+            GL_INVALID_VALUE, "plain binding rejects GL_MAX_DRAW_BUFFERS");
+        gl.glBindFragDataLocation(bindingProgram, 0, "gl_FragColor");
+        expectRejectedBinding(GL_INVALID_OPERATION, "plain binding rejects gl_FragColor");
+        gl.glBindFragDataLocation(bindingProgram, 0, "gl_FragDepth");
+        expectRejectedBinding(GL_INVALID_OPERATION, "plain binding rejects gl_FragDepth");
+        gl.glBindFragDataLocation(bindingProgram, 0, "gl_");
+        expectRejectedBinding(GL_INVALID_OPERATION, "plain binding rejects the gl_ prefix");
+
+        gl.glBindFragDataLocationIndexed(0, 0, 0, kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_VALUE, "indexed binding rejects an unknown program name");
+        gl.glBindFragDataLocationIndexed(vertex, 0, 0, kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_OPERATION, "indexed binding rejects a shader-object name");
+        gl.glBindFragDataLocationIndexed(
+            bindingProgram, static_cast<GLuint>(-1), 0, kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_VALUE, "indexed binding rejects location -1");
+        gl.glBindFragDataLocationIndexed(
+            bindingProgram,
+            static_cast<GLuint>(maxDrawBuffers),
+            0,
+            kBindingSentinel);
+        expectRejectedBinding(
+            GL_INVALID_VALUE,
+            "indexed binding rejects GL_MAX_DRAW_BUFFERS at index zero");
+        gl.glBindFragDataLocationIndexed(bindingProgram, 0, 2, kBindingSentinel);
+        expectRejectedBinding(GL_INVALID_VALUE, "indexed binding rejects index greater than one");
+        gl.glBindFragDataLocationIndexed(
+            bindingProgram,
+            static_cast<GLuint>(maxDualSourceDrawBuffers),
+            1,
+            kBindingSentinel);
+        expectRejectedBinding(
+            GL_INVALID_VALUE,
+            "indexed binding rejects GL_MAX_DUAL_SOURCE_DRAW_BUFFERS at index one");
+        gl.glBindFragDataLocationIndexed(bindingProgram, 0, 0, "gl_FragColor");
+        expectRejectedBinding(GL_INVALID_OPERATION, "indexed binding rejects gl_FragColor");
+        gl.glBindFragDataLocationIndexed(bindingProgram, 0, 0, "gl_FragDepth");
+        expectRejectedBinding(GL_INVALID_OPERATION, "indexed binding rejects gl_FragDepth");
+        gl.glBindFragDataLocationIndexed(bindingProgram, 0, 0, "gl_");
+        expectRejectedBinding(GL_INVALID_OPERATION, "indexed binding rejects the gl_ prefix");
+
+        // The plain form is specified as index zero, including when replacing
+        // an earlier index-one binding for the same name.
+        gl.glBindFragDataLocation(
+            bindingProgram,
+            static_cast<GLuint>(maxDrawBuffers - 1),
+            kBindingSentinel);
+        expectGLError(gl, GL_NO_ERROR, "valid plain fragment-output binding");
+        expectCondition(
+            bindingObject->requestedFragDataLocations.at(kBindingSentinel) ==
+                static_cast<GLuint>(maxDrawBuffers - 1) &&
+            bindingObject->requestedFragDataLocationIndices.at(kBindingSentinel) == 0,
+            "plain fragment-output binding replaces location and resets index");
+        gl.glDeleteProgram(bindingProgram);
+        expectGLError(gl, GL_NO_ERROR, "fragment-output validation program cleanup");
+
+        // The linked fragment shader declares a single output; the dispatch
+        // entries accept valid post-link bindings without changing this link.
         gl.glBindFragDataLocation(program, 0, "fragColor");
         gl.glBindFragDataLocationIndexed(program, 0, 0, "fragColor");
         (void)gl.glGetFragDataLocation(program, "fragColor");
         (void)gl.glGetFragDataIndex(program, "fragColor");
+        expectGLError(gl, GL_NO_ERROR, "valid linked fragment-output bindings and queries");
 
         // glGetUniformuiv round-trip for the uint uniform family.
         GLuint uintReadback[4] = {};

@@ -7,6 +7,7 @@
 
 #include "AppGLRuntime.h"
 
+#include "../caps/GLCapabilities.h"
 #include "../context/GLContext.h"
 #include "../extensions/ExtensionRegistry.h"
 #include "../runtime/AppGLProfile.h"
@@ -1795,18 +1796,73 @@ static void APIENTRY glVertexAttribI4usv(GLuint index, const GLushort *v) {
     (void)v;
 }
 
+static GLProgramObject* validateFragDataLocationBinding(
+    GLContext& context,
+    GLuint program,
+    GLuint colorNumber,
+    GLuint index,
+    const GLchar* name,
+    const char* functionName
+) {
+    // Validate the pure arguments before looking up the program object. GL
+    // 4.6 §2.3.1 permits any applicable error when multiple conditions are
+    // invalid; callers and focused tests should therefore isolate one fault.
+    if (index > 1) {
+        context.pushError(
+            GL_INVALID_VALUE, functionName, "index is greater than one");
+        return nullptr;
+    }
+
+    const GLenum limitName = index == 0
+        ? GL_MAX_DRAW_BUFFERS
+        : GL_MAX_DUAL_SOURCE_DRAW_BUFFERS;
+    GLint limit = 0;
+    if (!context.capabilities().queryInteger(limitName, &limit) ||
+        limit <= 0 ||
+        colorNumber >= static_cast<GLuint>(limit)) {
+        context.pushError(
+            GL_INVALID_VALUE,
+            functionName,
+            "color number is outside the live implementation limit");
+        return nullptr;
+    }
+
+    if (std::strncmp(name, "gl_", 3) == 0) {
+        context.pushError(
+            GL_INVALID_OPERATION,
+            functionName,
+            "name starts with the reserved gl_ prefix");
+        return nullptr;
+    }
+
+    // GL 4.6 §7.1 keeps shaders and programs in a shared name space; §15.2
+    // distinguishes their errors here: a name for neither object type is
+    // INVALID_VALUE, while a shader-object name is INVALID_OPERATION.
+    GLProgramObject* object = context.objects().programs().get(program);
+    if (object == nullptr) {
+        const bool isShader = context.objects().shaders().contains(program);
+        context.pushError(
+            isShader ? GL_INVALID_OPERATION : GL_INVALID_VALUE,
+            functionName,
+            isShader
+                ? "program names a shader object"
+                : "program is not a shader or program object");
+        return nullptr;
+    }
+
+    return object;
+}
+
 static void APIENTRY glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name) {
-    // GL 4.6 §15.2: record the requested name→color mapping. Takes
-    // effect on the next glLinkProgram for this program (existing
-    // resource-output entries are rebuilt from this map when link
-    // assembles the output table). INVALID_OPERATION if `program` is
-    // unknown; INVALID_VALUE if the name starts with "gl_" or color
-    // exceeds MAX_DRAW_BUFFERS — we don't enforce those here yet.
+    // GL 4.6 §15.2: the plain form is equivalent to the indexed form with
+    // index zero. The binding takes effect on the program's next link.
     auto* ctx = appgl::Runtime::shared().currentContext();
     if (ctx == nullptr || name == nullptr) return;
-    auto* prog = ctx->objects().programs().get(program);
+    auto* prog = validateFragDataLocationBinding(
+        *ctx, program, color, 0, name, "glBindFragDataLocation");
     if (prog == nullptr) return;
     prog->requestedFragDataLocations[name] = color;
+    prog->requestedFragDataLocationIndices[name] = 0;
 }
 
 static GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name) {
@@ -2723,15 +2779,18 @@ static void APIENTRY glSampleMaski(GLuint maskNumber, GLbitfield mask) {
 }
 
 static void APIENTRY glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name) {
-    // GL 4.6 §15.2 extends glBindFragDataLocation with a
-    // dual-source blend index (0 = primary color, 1 = second
-    // color). Record both the primary location AND the index on
-    // the program so link-time output-table assembly can apply
-    // them. INVALID_VALUE if index > 1 or colorNumber >=
-    // MAX_DRAW_BUFFERS — not enforced here yet.
+    // GL 4.6 §15.2 extends glBindFragDataLocation with a dual-source blend
+    // index (0 = primary color, 1 = second color). Validation must complete
+    // before either half of the requested binding is changed.
     auto* ctx = appgl::Runtime::shared().currentContext();
     if (ctx == nullptr || name == nullptr) return;
-    auto* prog = ctx->objects().programs().get(program);
+    auto* prog = validateFragDataLocationBinding(
+        *ctx,
+        program,
+        colorNumber,
+        index,
+        name,
+        "glBindFragDataLocationIndexed");
     if (prog == nullptr) return;
     prog->requestedFragDataLocations[name] = colorNumber;
     prog->requestedFragDataLocationIndices[name] = index;
@@ -3663,7 +3722,7 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     coverage.markImplemented(FunctionId::glVertexAttribI4sv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glVertexAttribI4ubv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glVertexAttribI4usv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
-    coverage.markImplemented(FunctionId::glBindFragDataLocation, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
+    coverage.markImplemented(FunctionId::glBindFragDataLocation, "Validated pre-link fragment-output binding with live draw-buffer limits.");
     coverage.markImplemented(FunctionId::glGetFragDataLocation, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glClearBufferiv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glClearBufferuiv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
@@ -3698,7 +3757,7 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     coverage.markImplemented(FunctionId::glTexImage3DMultisample, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glGetMultisamplefv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glSampleMaski, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
-    coverage.markImplemented(FunctionId::glBindFragDataLocationIndexed, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
+    coverage.markImplemented(FunctionId::glBindFragDataLocationIndexed, "Validated indexed pre-link fragment-output binding with live dual-source limits.");
     coverage.markImplemented(FunctionId::glGetFragDataIndex, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glVertexAttribP1ui, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glVertexAttribP1uiv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
