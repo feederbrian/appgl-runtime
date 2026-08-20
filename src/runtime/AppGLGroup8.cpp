@@ -1853,6 +1853,43 @@ static GLProgramObject* validateFragDataLocationBinding(
     return object;
 }
 
+static GLProgramObject* validateFragDataQueryProgram(
+    GLContext& context,
+    GLuint program,
+    const GLchar* name,
+    const char* functionName
+) {
+    if (name == nullptr) {
+        context.pushError(GL_INVALID_VALUE, functionName, "name is null");
+        return nullptr;
+    }
+
+    // GL 4.6 §15.2 mirrors the other program-interface location queries:
+    // unknown program names are INVALID_VALUE, shader-object names are
+    // INVALID_OPERATION, and existing but unlinked program objects are
+    // INVALID_OPERATION while returning -1.
+    GLProgramObject* object = context.objects().programs().get(program);
+    if (object == nullptr) {
+        const bool isShader = context.objects().shaders().contains(program);
+        context.pushError(
+            isShader ? GL_INVALID_OPERATION : GL_INVALID_VALUE,
+            functionName,
+            isShader
+                ? "program names a shader object"
+                : "program is not a shader or program object");
+        return nullptr;
+    }
+    if (!object->linked) {
+        context.pushError(
+            GL_INVALID_OPERATION,
+            functionName,
+            "program is not linked");
+        return nullptr;
+    }
+
+    return object;
+}
+
 static void APIENTRY glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name) {
     // GL 4.6 §15.2: the plain form is equivalent to the indexed form with
     // index zero. The binding takes effect on the program's next link.
@@ -1873,9 +1910,10 @@ static GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name) 
     // subscripted queries here so
     // `glGetFragDataLocation(prog, "c")` and `"c[0]"` both hit.
     auto* ctx = appgl::Runtime::shared().currentContext();
-    if (ctx == nullptr || name == nullptr) return -1;
-    auto* prog = ctx->objects().programs().get(program);
-    if (prog == nullptr || !prog->linked) return -1;
+    if (ctx == nullptr) return -1;
+    auto* prog = validateFragDataQueryProgram(
+        *ctx, program, name, "glGetFragDataLocation");
+    if (prog == nullptr) return -1;
     const std::string query = name;
     // Exact name match.
     for (const auto& entry : prog->resourceOutputs) {
@@ -2801,9 +2839,10 @@ static GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
     // (0 for first-source, 1 for second-source in dual-source
     // blending), or -1 if `name` is not an active output.
     auto* ctx = appgl::Runtime::shared().currentContext();
-    if (ctx == nullptr || name == nullptr) return -1;
-    auto* prog = ctx->objects().programs().get(program);
-    if (prog == nullptr || !prog->linked) return -1;
+    if (ctx == nullptr) return -1;
+    auto* prog = validateFragDataQueryProgram(
+        *ctx, program, name, "glGetFragDataIndex");
+    if (prog == nullptr) return -1;
     const std::string query = name;
     for (const auto& entry : prog->resourceOutputs) {
         if (entry.name == query) return entry.locationIndex;
