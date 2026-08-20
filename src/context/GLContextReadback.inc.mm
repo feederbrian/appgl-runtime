@@ -16,6 +16,32 @@ void GLContext::swapBuffers() {
 
 #elif defined(APPGL_GLCONTEXT_READBACK_READ_PIXELS)
 bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
+    const auto integerReadPixelsFormat = [](GLenum value) -> bool {
+        switch (value) {
+            case GL_RED_INTEGER:
+            case GL_GREEN_INTEGER:
+            case GL_BLUE_INTEGER:
+            case GL_RG_INTEGER:
+            case GL_RGB_INTEGER:
+            case GL_BGR_INTEGER:
+            case GL_RGBA_INTEGER:
+            case GL_BGRA_INTEGER:
+            case GL_ALPHA_INTEGER_EXT:
+            case GL_LUMINANCE_INTEGER_EXT:
+            case GL_LUMINANCE_ALPHA_INTEGER_EXT:
+                return true;
+            default:
+                return false;
+        }
+    };
+    const auto formatTypeError = [&](GLenum readFormat, GLenum readType) -> GLenum {
+        if (integerReadPixelsFormat(readFormat) &&
+            (readType == GL_FLOAT || readType == GL_HALF_FLOAT)) {
+            return GL_INVALID_ENUM;
+        }
+        return GL_INVALID_OPERATION;
+    };
+
     // GL 4.6 §18.3.1: when GL_PIXEL_PACK_BUFFER is bound, `pixels` is
     // a BYTE OFFSET into the bound PBO, and offset 0 is perfectly
     // legal (CTS `buffer_storage.map_persistent_read_pixels` passes
@@ -183,7 +209,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         // formats. Was previously silent → CTS flagged "invalid format
         // used but glReadPixels succeeded" on many combos.
         if (isColorReadback && !isFormatTypeCompatible_extern(format, type)) {
-            pushError(GL_INVALID_OPERATION);
+            pushError(formatTypeError(format, type));
             return false;
         }
         if (isColorReadback) {
@@ -1049,6 +1075,10 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     impl_->encodePendingWork();
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushForReadback();
+    }
+    if (integerReadPixelsFormat(format)) {
+        pushError(formatTypeError(format, type));
+        return false;
     }
     if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
         impl_->materializeDefaultFbShadowClear();

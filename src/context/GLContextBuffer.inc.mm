@@ -507,6 +507,10 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
             return nullptr;
         }
     }
+    if (mapBufferRangeAccessHasUndefinedBits(access)) {
+        pushError(GL_INVALID_VALUE);
+        return nullptr;
+    }
     if (!isSupportedMapBufferRangeAccess(access)) {
         pushError(GL_INVALID_OPERATION);
         return nullptr;

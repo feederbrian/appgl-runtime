@@ -130,6 +130,11 @@
 //                                    texcoord-unit arrays even on GL 3.x+
 //                                    code paths. GL 3.2 spec floor is 8.
 //
+//   GL_MAX_TEXTURE_UNITS (0x84E2)  — legacy fixed-function texture
+//                                    environment stage count. GL 1.3/2.x
+//                                    require at least 2; AppGL's compat
+//                                    immediate path implements that floor.
+//
 // Defining them locally keeps initializeLimits self-contained without
 // touching the public glcorearb.h surface.
 #ifndef GL_LIST_INDEX
@@ -137,6 +142,9 @@
 #endif
 #ifndef GL_MAX_TEXTURE_COORDS
 #define GL_MAX_TEXTURE_COORDS 0x8871
+#endif
+#ifndef GL_MAX_TEXTURE_UNITS
+#define GL_MAX_TEXTURE_UNITS 0x84E2
 #endif
 
 namespace appgl {
@@ -969,15 +977,19 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS] = 48;
     integerLimits_[GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS] = 48;
 
-    // Phase 8X Group 4d follow-up⁶ — fixed-function multi-texture limit.
+    // Phase 8X Group 4d follow-up⁶ — fixed-function multi-texture limits.
     // GL_MAX_TEXTURE_COORDS (0x8871) was a GL 1.3 query that reported the
     // number of texture coordinate sets the fixed-function pipeline could
     // interpolate per vertex. Modern engines still probe it during
     // version-flag synthesis even on GL 3.x+ code paths (the enum outlived
     // the fixed-function stage in compat headers until 4.6). The GL 3.2
     // spec floor is 8; we report 8 so probing engines see a sensible
-    // number instead of a named GL_INVALID_ENUM breadcrumb.
+    // number instead of a named GL_INVALID_ENUM breadcrumb. The older
+    // GL_MAX_TEXTURE_UNITS query reports texture-environment stages rather
+    // than coordinate sets; AppGL exposes the spec floor of 2 and supports
+    // that floor in the immediate fixed-function path.
     integerLimits_[GL_MAX_TEXTURE_COORDS] = 8;
+    integerLimits_[GL_MAX_TEXTURE_UNITS] = 2;
 
     // Phase 8X Group 4d follow-up⁶ — fixed-function display list index.
     // GL_LIST_INDEX (0x0B33) is queried every frame by Recoil's steady-

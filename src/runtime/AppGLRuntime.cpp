@@ -1621,6 +1621,33 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
     (void)isBGR; (void)isDepthFormat; (void)isStencilFormat;
 }
 
+bool isIntegerTextureUploadFormat(GLenum format) {
+    switch (format) {
+        case GL_RED_INTEGER:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
+        case GL_RG_INTEGER:
+        case GL_RGB_INTEGER:
+        case GL_BGR_INTEGER:
+        case GL_RGBA_INTEGER:
+        case GL_BGRA_INTEGER:
+        case GL_ALPHA_INTEGER_EXT:
+        case GL_LUMINANCE_INTEGER_EXT:
+        case GL_LUMINANCE_ALPHA_INTEGER_EXT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+GLenum formatTypeCompatibilityError(GLenum format, GLenum type) {
+    if (isIntegerTextureUploadFormat(format) &&
+        (type == GL_FLOAT || type == GL_HALF_FLOAT)) {
+        return GL_INVALID_ENUM;
+    }
+    return GL_INVALID_OPERATION;
+}
+
 }  // end file-local anonymous namespace scope for isFormatTypeCompatible
 
 // Re-expose at namespace appgl {} scope so GLContext.mm's readPixels
@@ -6402,7 +6429,7 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLs
         return;
     }
     if (!isFormatTypeCompatible(format, type)) {
-        recordValidationError(context, "glTexImage1D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        recordValidationError(context, "glTexImage1D", formatTypeCompatibilityError(format, type), "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
@@ -6439,7 +6466,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
         return;
     }
     if (!isFormatTypeCompatible(format, type)) {
-        recordValidationError(context, "glTexImage2D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        recordValidationError(context, "glTexImage2D", formatTypeCompatibilityError(format, type), "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
@@ -6481,7 +6508,7 @@ void APIENTRY glTexImage3D(
         return;
     }
     if (!isFormatTypeCompatible(format, type)) {
-        recordValidationError(context, "glTexImage3D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        recordValidationError(context, "glTexImage3D", formatTypeCompatibilityError(format, type), "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
@@ -6509,7 +6536,7 @@ void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei
         return;
     }
     if (!isFormatTypeCompatible(format, type)) {
-        recordValidationError(context, "glTexSubImage1D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        recordValidationError(context, "glTexSubImage1D", formatTypeCompatibilityError(format, type), "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (context->texSubImage(target, level, xoffset, 0, 0, width, 1, 1, format, type, pixels)) {
@@ -6541,7 +6568,7 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint y
         return;
     }
     if (!isFormatTypeCompatible(format, type)) {
-        recordValidationError(context, "glTexSubImage2D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        recordValidationError(context, "glTexSubImage2D", formatTypeCompatibilityError(format, type), "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (context->texSubImage(target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels)) {
@@ -6579,7 +6606,7 @@ void APIENTRY glTexSubImage3D(
         return;
     }
     if (!isFormatTypeCompatible(format, type)) {
-        recordValidationError(context, "glTexSubImage3D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        recordValidationError(context, "glTexSubImage3D", formatTypeCompatibilityError(format, type), "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (context->texSubImage(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels)) {

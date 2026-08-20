@@ -62,6 +62,10 @@ bool GLContext::isShader(GLuint shader) const {
 bool GLContext::shaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length) {
     GLShaderObject* object = impl_->objects->shaders().get(shader);
     if (object == nullptr) {
+        if (impl_->objects->programs().get(shader) != nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         pushError(GL_INVALID_VALUE);
         return false;
     }

@@ -8511,8 +8511,8 @@ bool mapAccessWrites(GLbitfield access) {
     return (access & GL_MAP_WRITE_BIT) != 0;
 }
 
-bool isSupportedMapBufferRangeAccess(GLbitfield access) {
-    constexpr GLbitfield kSupportedAccessBits = GL_MAP_READ_BIT
+GLbitfield supportedMapBufferRangeAccessBits() {
+    return GL_MAP_READ_BIT
         | GL_MAP_WRITE_BIT
         | GL_MAP_INVALIDATE_RANGE_BIT
         | GL_MAP_INVALIDATE_BUFFER_BIT
@@ -8520,6 +8520,14 @@ bool isSupportedMapBufferRangeAccess(GLbitfield access) {
         | GL_MAP_UNSYNCHRONIZED_BIT
         | GL_MAP_PERSISTENT_BIT
         | GL_MAP_COHERENT_BIT;
+}
+
+bool mapBufferRangeAccessHasUndefinedBits(GLbitfield access) {
+    return (access & ~supportedMapBufferRangeAccessBits()) != 0;
+}
+
+bool isSupportedMapBufferRangeAccess(GLbitfield access) {
+    const GLbitfield kSupportedAccessBits = supportedMapBufferRangeAccessBits();
     if ((access & ~kSupportedAccessBits) != 0) {
         return false;
     }

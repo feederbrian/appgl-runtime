@@ -2964,7 +2964,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (count < 0 || instancecount < 0) {
+    if (first < 0 || count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }

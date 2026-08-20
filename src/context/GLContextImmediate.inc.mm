@@ -1753,6 +1753,23 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                   "depth-stencil format requires a packed depth-stencil type");
         return false;
     }
+    const bool integerDrawPixelsFormat =
+        format == GL_RED_INTEGER ||
+        format == GL_GREEN_INTEGER ||
+        format == GL_BLUE_INTEGER ||
+        format == GL_RG_INTEGER ||
+        format == GL_RGB_INTEGER ||
+        format == GL_BGR_INTEGER ||
+        format == GL_RGBA_INTEGER ||
+        format == GL_BGRA_INTEGER ||
+        format == GL_ALPHA_INTEGER_EXT ||
+        format == GL_LUMINANCE_INTEGER_EXT ||
+        format == GL_LUMINANCE_ALPHA_INTEGER_EXT;
+    if (integerDrawPixelsFormat) {
+        pushError(GL_INVALID_OPERATION, "glDrawPixels",
+                  "integer component formats are invalid for glDrawPixels");
+        return false;
+    }
     const auto componentCount = [&]() -> std::size_t {
         switch (format) {
             case GL_RED:
@@ -4541,10 +4558,13 @@ void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float r, 
     if (unit < Impl::kCompatRasterTextureUnits) {
         impl_->fixedFunctionCurrentTexcoords[unit] = {s, t, r, q};
     }
-    // Only texture unit 0 is captured for the built-in immediate-mode
-    // pipeline (Chobby/Chili UI only uses unit 0). Multi-texturing on
-    // other units is silently ignored — this matches the single-
-    // sampler pipeline we build in MetalFrameGraph.
+    // The immediate-mode vertex tuple still carries one interpolated
+    // texcoord stream. Keep the per-unit current-coordinate mirror for
+    // raster-position and query/state paths, while unit 0 remains the
+    // coordinate stream captured into the Metal immediate vertex. The
+    // frame-graph path may sample a compat unit-1 texture using that same
+    // stream; this is intentionally the GL 1.3 floor, not full arbitrary
+    // multi-texcoord emulation.
     if (unit != 0) {
         return;
     }
@@ -6016,11 +6036,6 @@ void GLContext::endImmediate() {
         const bool texture1D = impl_->state->isEnabled(GL_TEXTURE_1D);
         const bool texture3D = impl_->state->isEnabled(GL_TEXTURE_3D);
         const bool texture2DEnabled = impl_->state->isEnabled(GL_TEXTURE_2D);
-        // This CPU shadow rasteriser knows how to sample 2D and how to decline
-        // 1D/3D. It knows nothing about GL_TEXTURE_RECTANGLE, so a rectangle
-        // draw slipped past the bail-out below, took the untextured path, and
-        // painted the flat vertex colour over a Metal render that was already
-        // correct — and glReadPixels prefers the shadow. Decline instead.
         const bool textureRectEnabled =
             impl_->state->isEnabled(GL_TEXTURE_RECTANGLE);
         const bool projectiveTexcoord =
@@ -6030,10 +6045,10 @@ void GLContext::endImmediate() {
                             return std::fabs(v.texcoord[3] - 1.0f) > 0.00001f;
                         });
         const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
-        auto effectiveSamplerParams = [&](const GLTextureObject& texture)
+        auto effectiveSamplerParams = [&](GLuint unit,
+                                          const GLTextureObject& texture)
             -> const GLTextureParameters& {
-            const GLuint samplerName = impl_->state->boundSampler(
-                impl_->state->activeTextureUnit());
+            const GLuint samplerName = impl_->state->boundSampler(unit);
             if (samplerName != 0) {
                 const GLSamplerObject* sampler =
                     impl_->objects->samplers().get(samplerName);
@@ -6055,7 +6070,7 @@ void GLContext::endImmediate() {
                 return false;
             }
             const auto& textureParams = texture->params;
-            const auto& samplerParams = effectiveSamplerParams(*texture);
+            const auto& samplerParams = effectiveSamplerParams(0, *texture);
             const bool identitySwizzle =
                 textureParams.swizzle[0] == GL_RED &&
                 textureParams.swizzle[1] == GL_GREEN &&
@@ -6075,7 +6090,7 @@ void GLContext::endImmediate() {
         };
         if (texture1D ||
             texture3D ||
-            textureRectEnabled ||
+            (textureRectEnabled && texture2DEnabled) ||
             (texture2DEnabled && !texture2DShadowPaintSafe())) {
             return false;
         }
@@ -6148,7 +6163,8 @@ void GLContext::endImmediate() {
             return false;
         }
         const bool texture2D = impl_->state->isEnabled(GL_TEXTURE_2D);
-        if (texture2D) {
+        const bool textureRect = textureRectEnabled;
+        if (texture2D || textureRect) {
             const std::uint64_t area =
                 static_cast<std::uint64_t>(std::max<GLint>(0, x1 - x0)) *
                 static_cast<std::uint64_t>(std::max<GLint>(0, y1 - y0));
@@ -6165,6 +6181,15 @@ void GLContext::endImmediate() {
         GLint sampledWrapS = GL_CLAMP_TO_EDGE;
         GLint sampledWrapT = GL_CLAMP_TO_EDGE;
         std::uint8_t sampledBorderRGBA[4] = {0u, 0u, 0u, 0u};
+        struct RectSampledTexture {
+            const GLTextureImageLevel* image = nullptr;
+            GLsizei width = 1;
+            GLsizei height = 1;
+            std::uint32_t baseClass = 0u;
+            std::array<GLint, 4> swizzle = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
+        };
+        std::array<RectSampledTexture, 2> rectTextures;
+        std::size_t rectTextureCount = 0;
         float minS = std::numeric_limits<float>::infinity();
         float minT = std::numeric_limits<float>::infinity();
         float maxS = -std::numeric_limits<float>::infinity();
@@ -6189,7 +6214,7 @@ void GLContext::endImmediate() {
                 return false;
             }
             const GLTextureImageLevel& baseImage = baseIt->second;
-            const auto& samplerParams = effectiveSamplerParams(*texture);
+            const auto& samplerParams = effectiveSamplerParams(0, *texture);
             sampledTextureBaseClass =
                 appglImmediateTextureBaseClass(
                     texture->desc.internalFormat, &texture->params);
@@ -6268,6 +6293,56 @@ void GLContext::endImmediate() {
             sampledImage = &image;
             sampledWidth = tw;
             sampledHeight = th;
+        }
+        if (textureRect) {
+            auto loadRectTexture = [&](GLuint unit,
+                                       RectSampledTexture& out) -> bool {
+                const GLuint texName =
+                    impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_RECTANGLE);
+                if (texName == 0) {
+                    return false;
+                }
+                GLTextureObject* texture =
+                    impl_->objects->textures().get(texName);
+                if (texture == nullptr) {
+                    return false;
+                }
+                const GLTextureParameters& samplerParams =
+                    effectiveSamplerParams(unit, *texture);
+                if (samplerParams.minFilter != GL_NEAREST ||
+                    samplerParams.magFilter != GL_NEAREST) {
+                    return false;
+                }
+                const GLint level = std::max<GLint>(texture->params.baseLevel, 0);
+                const auto levelIt = texture->levels.find(level);
+                if (levelIt == texture->levels.end() ||
+                    !levelIt->second.defined) {
+                    return false;
+                }
+                const GLTextureImageLevel& image = levelIt->second;
+                const GLsizei tw = std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei th = std::max<GLsizei>(image.desc.height, 1);
+                const std::size_t required =
+                    static_cast<std::size_t>(tw) *
+                    static_cast<std::size_t>(th) * 4u;
+                if (image.rgba8.size() < required) {
+                    return false;
+                }
+                out.image = &image;
+                out.width = tw;
+                out.height = th;
+                out.baseClass = appglImmediateTextureBaseClass(
+                    texture->desc.internalFormat, &texture->params);
+                out.swizzle = texture->params.swizzle;
+                return out.baseClass != 0u;
+            };
+            if (!loadRectTexture(0, rectTextures[0])) {
+                return false;
+            }
+            rectTextureCount = 1;
+            if (loadRectTexture(1, rectTextures[1])) {
+                rectTextureCount = 2;
+            }
         }
 
         const auto& blend = impl_->state->blendState();
@@ -6359,6 +6434,58 @@ void GLContext::endImmediate() {
                                  const std::uint8_t incoming[4],
                                  std::uint8_t out[4]) {
             std::memcpy(out, incoming, 4u);
+            if (textureRect) {
+                std::uint8_t accum[4] = {
+                    incoming[0], incoming[1], incoming[2], incoming[3]
+                };
+                const std::uint8_t envColor[4] = {
+                    appglImmediateFloatToByte(impl_->texEnv.color[0]),
+                    appglImmediateFloatToByte(impl_->texEnv.color[1]),
+                    appglImmediateFloatToByte(impl_->texEnv.color[2]),
+                    appglImmediateFloatToByte(impl_->texEnv.color[3]),
+                };
+                for (std::size_t unit = 0; unit < rectTextureCount; ++unit) {
+                    const RectSampledTexture& sampled = rectTextures[unit];
+                    if (sampled.image == nullptr) {
+                        continue;
+                    }
+                    const GLsizei tx = std::clamp<GLsizei>(
+                        static_cast<GLsizei>(std::floor(s)),
+                        0,
+                        sampled.width - 1);
+                    const GLsizei ty = std::clamp<GLsizei>(
+                        static_cast<GLsizei>(std::floor(t)),
+                        0,
+                        sampled.height - 1);
+                    const std::size_t texOffset =
+                        (static_cast<std::size_t>(ty) *
+                         static_cast<std::size_t>(sampled.width) +
+                         static_cast<std::size_t>(tx)) * 4u;
+                    const std::uint8_t storageTexel[4] = {
+                        sampled.image->rgba8[texOffset + 0],
+                        sampled.image->rgba8[texOffset + 1],
+                        sampled.image->rgba8[texOffset + 2],
+                        sampled.image->rgba8[texOffset + 3],
+                    };
+                    const std::uint8_t texel[4] = {
+                        appglImmediateSwizzleComponent(storageTexel, sampled.swizzle[0]),
+                        appglImmediateSwizzleComponent(storageTexel, sampled.swizzle[1]),
+                        appglImmediateSwizzleComponent(storageTexel, sampled.swizzle[2]),
+                        appglImmediateSwizzleComponent(storageTexel, sampled.swizzle[3]),
+                    };
+                    std::uint8_t next[4] = {};
+                    appglImmediateApplyTextureEnv(
+                        impl_->texEnv.mode,
+                        sampled.baseClass,
+                        accum,
+                        texel,
+                        envColor,
+                        next);
+                    std::memcpy(accum, next, 4u);
+                }
+                std::memcpy(out, accum, 4u);
+                return;
+            }
             if (!texture2D || sampledImage == nullptr) {
                 return;
             }
@@ -6425,7 +6552,8 @@ void GLContext::endImmediate() {
                 normalizedByte(color[2]),
                 normalizedByte(color[3]),
             };
-            if (!texture2D || sampledImage == nullptr) {
+            if ((!texture2D || sampledImage == nullptr) &&
+                (!textureRect || rectTextureCount == 0)) {
                 std::memcpy(out, incoming, 4u);
                 return;
             }
@@ -6679,12 +6807,25 @@ void GLContext::endImmediate() {
     };
 
     void* fixedFunctionSamplerState = nullptr;
+    void* fixedFunctionSamplerState1 = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
+    GLenum fixedFunctionTextureInternalFormat1 = 0;
     GLenum fixedFunctionTextureTarget = 0;
+    GLenum fixedFunctionTextureTarget1 = 0;
     GLTextureParameters fixedFunctionTextureParams;
+    GLTextureParameters fixedFunctionTextureParams1;
     bool fixedFunctionTextureParamsValid = false;
+    bool fixedFunctionTextureParamsValid1 = false;
     bool fixedFunctionTextureSampleYFlip = false;
-    auto resolveFixedFunctionTexture = [&](const Impl::ImmediateModeVertex* sampleVertices,
+    bool fixedFunctionTextureSampleYFlip1 = false;
+    auto resolveFixedFunctionTexture = [&](GLuint unit,
+                                           void*& samplerState,
+                                           GLenum& internalFormat,
+                                           GLenum& targetOut,
+                                           GLTextureParameters& paramsOut,
+                                           bool& paramsValid,
+                                           bool& sampleYFlip,
+                                           const Impl::ImmediateModeVertex* sampleVertices,
                                            std::size_t sampleVertexCount,
                                            const Matrix4& sampleMvp) -> void* {
         // GL 2.1 section 3.8.15 precedence when several targets are enabled on a
@@ -6698,19 +6839,19 @@ void GLContext::endImmediate() {
             if (!impl_->state->isEnabled(target)) {
                 continue;
             }
-            const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
+            const GLuint texName = impl_->state->boundTextureOnUnit(unit, target);
             GLTextureObject* tex = texName != 0
                 ? impl_->objects->textures().get(texName)
-                : impl_->currentTexture(target);
+                : (unit == 0 ? impl_->currentTexture(target) : nullptr);
             if (tex == nullptr || tex->metalTexture == nullptr) {
                 continue;
             }
             const GLTextureParameters effectiveParams =
-                impl_->effectiveFixedFunctionTextureParams(0, *tex);
+                impl_->effectiveFixedFunctionTextureParams(unit, *tex);
             if (!impl_->sampledTextureCompleteForSampler(*tex, effectiveParams)) {
                 continue;
             }
-            const GLuint samplerName = impl_->state->boundSampler(0);
+            const GLuint samplerName = impl_->state->boundSampler(unit);
             GLSamplerObject* sampler = samplerName != 0
                 ? impl_->objects->samplers().get(samplerName)
                 : nullptr;
@@ -6718,26 +6859,26 @@ void GLContext::endImmediate() {
                 if (sampler->dirty || sampler->metalSampler == nullptr) {
                     (void)impl_->rebuildSamplerState(*sampler);
                 }
-                fixedFunctionSamplerState = sampler->metalSampler;
+                samplerState = sampler->metalSampler;
             }
-            if (fixedFunctionSamplerState == nullptr) {
+            if (samplerState == nullptr) {
                 (void)impl_->rebuildTextureSamplerState(texName, *tex);
-                fixedFunctionSamplerState = tex->metalSampler;
+                samplerState = tex->metalSampler;
             }
-            fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
-            fixedFunctionTextureTarget = target;
-            fixedFunctionTextureParams = effectiveParams;
-            fixedFunctionTextureParamsValid = true;
-            fixedFunctionTextureSampleYFlip =
+            internalFormat = tex->desc.internalFormat;
+            targetOut = target;
+            paramsOut = effectiveParams;
+            paramsValid = true;
+            sampleYFlip =
                 (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
                 isColorFormat(tex->desc.internalFormat) &&
                 impl_->fixedFunctionTextureSampleYFlip(
                     *tex, sampleVertices, sampleVertexCount, sampleMvp);
             return impl_->resolveSwizzledTexture(*tex);
         }
-        fixedFunctionTextureTarget = 0;
-        fixedFunctionTextureParamsValid = false;
-        fixedFunctionTextureSampleYFlip = false;
+        targetOut = 0;
+        paramsValid = false;
+        sampleYFlip = false;
         return nullptr;
     };
 
@@ -6757,10 +6898,21 @@ void GLContext::endImmediate() {
     info.vertexStride = sizeof(Impl::ImmediateModeVertex);
     info.mvp = drawMvp;
     info.metalTexture = resolveFixedFunctionTexture(
+        0, fixedFunctionSamplerState, fixedFunctionTextureInternalFormat,
+        fixedFunctionTextureTarget, fixedFunctionTextureParams,
+        fixedFunctionTextureParamsValid, fixedFunctionTextureSampleYFlip,
+        drawVerts, drawCount, drawMvp);
+    info.metalTexture1 = resolveFixedFunctionTexture(
+        1, fixedFunctionSamplerState1, fixedFunctionTextureInternalFormat1,
+        fixedFunctionTextureTarget1, fixedFunctionTextureParams1,
+        fixedFunctionTextureParamsValid1, fixedFunctionTextureSampleYFlip1,
         drawVerts, drawCount, drawMvp);
     info.metalSamplerState = fixedFunctionSamplerState;
+    info.metalSamplerState1 = fixedFunctionSamplerState1;
     info.textureTarget = fixedFunctionTextureTarget;
+    info.textureTarget1 = fixedFunctionTextureTarget1;
     info.textureSampleYFlip = fixedFunctionTextureSampleYFlip;
+    info.textureSampleYFlip1 = fixedFunctionTextureSampleYFlip1;
     if (fixedFunctionTextureParamsValid) {
         info.textureWrapS = fixedFunctionTextureParams.wrapS;
         info.textureWrapT = fixedFunctionTextureParams.wrapT;
@@ -6792,6 +6944,15 @@ void GLContext::endImmediate() {
             info.textureSourceAlpha = impl_->texEnv.sourceAlpha;
             info.textureOperandRGB = impl_->texEnv.operandRGB;
             info.textureOperandAlpha = impl_->texEnv.operandAlpha;
+        }
+        if (fixedFunctionTextureParamsValid1) {
+            info.textureBaseClass1 =
+                appglImmediateTextureBaseClass(
+                    fixedFunctionTextureInternalFormat1,
+                    &fixedFunctionTextureParams1);
+            info.textureSampleIsDepth1 =
+                appglImmediateTextureFormatIsDepth(
+                    fixedFunctionTextureInternalFormat1);
         }
     }
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
@@ -8209,12 +8370,25 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     }
 
     void* fixedFunctionSamplerState = nullptr;
+    void* fixedFunctionSamplerState1 = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
+    GLenum fixedFunctionTextureInternalFormat1 = 0;
     GLenum fixedFunctionTextureTarget = 0;
+    GLenum fixedFunctionTextureTarget1 = 0;
     GLTextureParameters fixedFunctionTextureParams;
+    GLTextureParameters fixedFunctionTextureParams1;
     bool fixedFunctionTextureParamsValid = false;
+    bool fixedFunctionTextureParamsValid1 = false;
     bool fixedFunctionTextureSampleYFlip = false;
-    auto resolveFixedFunctionTexture = [&](const Impl::ImmediateModeVertex* sampleVertices,
+    bool fixedFunctionTextureSampleYFlip1 = false;
+    auto resolveFixedFunctionTexture = [&](GLuint unit,
+                                           void*& samplerState,
+                                           GLenum& internalFormat,
+                                           GLenum& targetOut,
+                                           GLTextureParameters& paramsOut,
+                                           bool& paramsValid,
+                                           bool& sampleYFlip,
+                                           const Impl::ImmediateModeVertex* sampleVertices,
                                            std::size_t sampleVertexCount,
                                            const Matrix4& sampleMvp) -> void* {
         // GL 2.1 section 3.8.15 precedence when several targets are enabled on a
@@ -8228,19 +8402,19 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             if (!impl_->state->isEnabled(target)) {
                 continue;
             }
-            const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
+            const GLuint texName = impl_->state->boundTextureOnUnit(unit, target);
             GLTextureObject* tex = texName != 0
                 ? impl_->objects->textures().get(texName)
-                : impl_->currentTexture(target);
+                : (unit == 0 ? impl_->currentTexture(target) : nullptr);
             if (tex == nullptr || tex->metalTexture == nullptr) {
                 continue;
             }
             const GLTextureParameters effectiveParams =
-                impl_->effectiveFixedFunctionTextureParams(0, *tex);
+                impl_->effectiveFixedFunctionTextureParams(unit, *tex);
             if (!impl_->sampledTextureCompleteForSampler(*tex, effectiveParams)) {
                 continue;
             }
-            const GLuint samplerName = impl_->state->boundSampler(0);
+            const GLuint samplerName = impl_->state->boundSampler(unit);
             GLSamplerObject* sampler = samplerName != 0
                 ? impl_->objects->samplers().get(samplerName)
                 : nullptr;
@@ -8248,26 +8422,26 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 if (sampler->dirty || sampler->metalSampler == nullptr) {
                     (void)impl_->rebuildSamplerState(*sampler);
                 }
-                fixedFunctionSamplerState = sampler->metalSampler;
+                samplerState = sampler->metalSampler;
             }
-            if (fixedFunctionSamplerState == nullptr) {
+            if (samplerState == nullptr) {
                 (void)impl_->rebuildTextureSamplerState(texName, *tex);
-                fixedFunctionSamplerState = tex->metalSampler;
+                samplerState = tex->metalSampler;
             }
-            fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
-            fixedFunctionTextureTarget = target;
-            fixedFunctionTextureParams = effectiveParams;
-            fixedFunctionTextureParamsValid = true;
-            fixedFunctionTextureSampleYFlip =
+            internalFormat = tex->desc.internalFormat;
+            targetOut = target;
+            paramsOut = effectiveParams;
+            paramsValid = true;
+            sampleYFlip =
                 (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
                 isColorFormat(tex->desc.internalFormat) &&
                 impl_->fixedFunctionTextureSampleYFlip(
                     *tex, sampleVertices, sampleVertexCount, sampleMvp);
             return impl_->resolveSwizzledTexture(*tex);
         }
-        fixedFunctionTextureTarget = 0;
-        fixedFunctionTextureParamsValid = false;
-        fixedFunctionTextureSampleYFlip = false;
+        targetOut = 0;
+        paramsValid = false;
+        sampleYFlip = false;
         return nullptr;
     };
 
@@ -9157,10 +9331,21 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.vertexStride = sizeof(Impl::ImmediateModeVertex);
         info.mvp = encodeMvp;
         info.metalTexture = resolveFixedFunctionTexture(
+            0, fixedFunctionSamplerState, fixedFunctionTextureInternalFormat,
+            fixedFunctionTextureTarget, fixedFunctionTextureParams,
+            fixedFunctionTextureParamsValid, fixedFunctionTextureSampleYFlip,
+            batchVerts, batchCount, encodeMvp);
+        info.metalTexture1 = resolveFixedFunctionTexture(
+            1, fixedFunctionSamplerState1, fixedFunctionTextureInternalFormat1,
+            fixedFunctionTextureTarget1, fixedFunctionTextureParams1,
+            fixedFunctionTextureParamsValid1, fixedFunctionTextureSampleYFlip1,
             batchVerts, batchCount, encodeMvp);
         info.metalSamplerState = fixedFunctionSamplerState;
+        info.metalSamplerState1 = fixedFunctionSamplerState1;
         info.textureTarget = fixedFunctionTextureTarget;
+        info.textureTarget1 = fixedFunctionTextureTarget1;
         info.textureSampleYFlip = fixedFunctionTextureSampleYFlip;
+        info.textureSampleYFlip1 = fixedFunctionTextureSampleYFlip1;
         if (fixedFunctionTextureParamsValid) {
             info.textureWrapS = fixedFunctionTextureParams.wrapS;
             info.textureWrapT = fixedFunctionTextureParams.wrapT;
@@ -9192,6 +9377,15 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 info.textureSourceAlpha = impl_->texEnv.sourceAlpha;
                 info.textureOperandRGB = impl_->texEnv.operandRGB;
                 info.textureOperandAlpha = impl_->texEnv.operandAlpha;
+            }
+            if (fixedFunctionTextureParamsValid1) {
+                info.textureBaseClass1 =
+                    appglImmediateTextureBaseClass(
+                        fixedFunctionTextureInternalFormat1,
+                        &fixedFunctionTextureParams1);
+                info.textureSampleIsDepth1 =
+                    appglImmediateTextureFormatIsDepth(
+                        fixedFunctionTextureInternalFormat1);
             }
         }
         info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
@@ -9307,16 +9501,38 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     };
 
     auto paintSimpleRectToShadow = [&]() -> bool {
+            auto hasFixedFunctionTextureForShadow = [&]() -> bool {
+                void* probeSamplerState = nullptr;
+                GLenum probeInternalFormat = 0;
+                GLenum probeTarget = 0;
+                GLTextureParameters probeParams;
+                bool probeParamsValid = false;
+                bool probeSampleYFlip = false;
+                if (resolveFixedFunctionTexture(
+                        0, probeSamplerState, probeInternalFormat,
+                        probeTarget, probeParams, probeParamsValid,
+                        probeSampleYFlip, source.data(), source.size(),
+                        impl_->matrixState.modelViewProjection()) != nullptr) {
+                    return true;
+                }
+                probeSamplerState = nullptr;
+                probeInternalFormat = 0;
+                probeTarget = 0;
+                probeParamsValid = false;
+                probeSampleYFlip = false;
+                return resolveFixedFunctionTexture(
+                    1, probeSamplerState, probeInternalFormat,
+                    probeTarget, probeParams, probeParamsValid,
+                    probeSampleYFlip, source.data(), source.size(),
+                    impl_->matrixState.modelViewProjection()) != nullptr;
+            };
             if ((mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN) ||
                 source.size() != 4 ||
                 fillVertices.empty() ||
                 !lineVertices.empty() ||
                 !pointVertices.empty() ||
 	            impl_->state->isEnabled(GL_BLEND) ||
-	            resolveFixedFunctionTexture(
-	                source.data(),
-	                source.size(),
-	                impl_->matrixState.modelViewProjection()) != nullptr) {
+	            hasFixedFunctionTextureForShadow()) {
 	            return false;
         }
         const auto& blend = impl_->state->blendState();

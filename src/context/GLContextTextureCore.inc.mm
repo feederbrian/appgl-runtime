@@ -14,7 +14,9 @@ bool GLContext::activeTexture(GLenum texture) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    impl_->state->setActiveTextureUnit(texture - GL_TEXTURE0);
+    const GLuint unit = texture - GL_TEXTURE0;
+    impl_->state->setActiveTextureUnit(unit);
+    matrixState().setActiveTextureUnit(unit);
     return true;
 }
 
@@ -1328,6 +1330,44 @@ bool GLContext::copyTexImage2DImpl(
         return true;
     }
 
+    if (Impl::isIntegerInternalFormat(uploadInternalFormat)) {
+        bool readSourceInteger = false;
+        const GLuint readFboName = impl_->state->boundReadFramebuffer();
+        if (readFboName != 0) {
+            const GLFramebufferObject* readFbo =
+                impl_->objects->framebuffers().get(readFboName);
+            if (readFbo == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const GLFramebufferAttachment* attachment =
+                impl_->framebufferAttachment(*readFbo, readFbo->readBuffer);
+            if (attachment == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            GLenum sourceInternalFormat = 0;
+            if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                if (const GLTextureObject* sourceTexture =
+                        impl_->objects->textures().get(attachment->object)) {
+                    sourceInternalFormat = sourceTexture->desc.internalFormat;
+                }
+            } else if (attachment->kind ==
+                       GLFramebufferAttachment::Kind::Renderbuffer) {
+                if (const GLRenderbufferObject* sourceRenderbuffer =
+                        impl_->objects->renderbuffers().get(attachment->object)) {
+                    sourceInternalFormat = sourceRenderbuffer->internalFormat;
+                }
+            }
+            readSourceInteger =
+                Impl::isIntegerInternalFormat(sourceInternalFormat);
+        }
+        if (!readSourceInteger) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+
     const bool trimCopyBorder =
         border == 1 &&
         target == GL_TEXTURE_2D &&
@@ -1547,6 +1587,43 @@ bool GLContext::copyTexSubImage2D(
         dstInternalFormat == GL_DEPTH_STENCIL ||
         dstInternalFormat == GL_DEPTH24_STENCIL8 ||
         dstInternalFormat == GL_DEPTH32F_STENCIL8;
+    if (Impl::isIntegerInternalFormat(dstInternalFormat)) {
+        bool readSourceInteger = false;
+        const GLuint readFboName = impl_->state->boundReadFramebuffer();
+        if (readFboName != 0) {
+            const GLFramebufferObject* readFbo =
+                impl_->objects->framebuffers().get(readFboName);
+            if (readFbo == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const GLFramebufferAttachment* attachment =
+                impl_->framebufferAttachment(*readFbo, readFbo->readBuffer);
+            if (attachment == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            GLenum sourceInternalFormat = 0;
+            if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                if (const GLTextureObject* sourceTexture =
+                        impl_->objects->textures().get(attachment->object)) {
+                    sourceInternalFormat = sourceTexture->desc.internalFormat;
+                }
+            } else if (attachment->kind ==
+                       GLFramebufferAttachment::Kind::Renderbuffer) {
+                if (const GLRenderbufferObject* sourceRenderbuffer =
+                        impl_->objects->renderbuffers().get(attachment->object)) {
+                    sourceInternalFormat = sourceRenderbuffer->internalFormat;
+                }
+            }
+            readSourceInteger =
+                Impl::isIntegerInternalFormat(sourceInternalFormat);
+        }
+        if (!readSourceInteger) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     if (dstDepthStencil) {
         const bool depth32fStencil =
             dstInternalFormat == GL_DEPTH32F_STENCIL8;
@@ -1816,6 +1893,33 @@ bool GLContext::texSubImage(
             image.desc.internalFormat, format)) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    {
+        const bool formatIsDepthClass =
+            format == GL_DEPTH_COMPONENT ||
+            format == GL_STENCIL_INDEX ||
+            format == GL_DEPTH_STENCIL;
+        const bool internalIsColor =
+            !isDepthFormat(image.desc.internalFormat) &&
+            !isStencilFormat(image.desc.internalFormat);
+        const bool formatIsIntegerColor =
+            format == GL_RED_INTEGER ||
+            format == GL_GREEN_INTEGER ||
+            format == GL_BLUE_INTEGER ||
+            format == GL_RG_INTEGER ||
+            format == GL_RGB_INTEGER ||
+            format == GL_BGR_INTEGER ||
+            format == GL_RGBA_INTEGER ||
+            format == GL_BGRA_INTEGER ||
+            format == GL_ALPHA_INTEGER_EXT ||
+            format == GL_LUMINANCE_INTEGER_EXT ||
+            format == GL_LUMINANCE_ALPHA_INTEGER_EXT;
+        if (internalIsColor && !formatIsDepthClass &&
+            Impl::isIntegerInternalFormat(image.desc.internalFormat) !=
+                formatIsIntegerColor) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     // GL 4.6 §8.6 / EXT_texture_compression_s3tc: an uncompressed
     // TexSubImage into a block-compressed texture may only replace whole

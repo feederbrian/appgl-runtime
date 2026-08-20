@@ -868,11 +868,11 @@ struct TranslatedDrawInfo {
 // `mvp` is the projection * modelview matrix snapshot at glEnd time;
 // it's pushed as a vertex-stage constant because no shader program is
 // active on this path. `metalTexture` is the id<MTLTexture> bound to the
-// fixed-function unit-0 target (GL_TEXTURE_1D or GL_TEXTURE_2D, resolved
-// by the caller), or nullptr if no texture is bound; `metalSamplerState`
-// carries the matching fixed-
-// function texture parameters when available. The frame graph picks
-// the untextured pipeline when `metalTexture` is null.
+// fixed-function unit-0 target (1D/2D/3D/rectangle, resolved by the caller),
+// or nullptr if no texture is bound; `metalTexture1` optionally carries the
+// GL 1.3 floor unit-1 2D/rectangle texture. The sampler fields carry the
+// matching fixed-function texture parameters when available. The frame graph
+// picks the untextured pipeline when `metalTexture` is null.
 struct ImmediateDrawInfo {
     GLenum mode = 0;
     const void* vertices = nullptr;
@@ -881,13 +881,19 @@ struct ImmediateDrawInfo {
     Matrix4 mvp = Matrix4::identity();
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
     void* metalSamplerState = nullptr; // id<MTLSamplerState> or nullptr
+    void* metalTexture1 = nullptr;  // optional compat unit-1 id<MTLTexture>
+    void* metalSamplerState1 = nullptr; // optional compat unit-1 sampler
     GLenum textureTarget = 0;
+    GLenum textureTarget1 = 0;
     GLenum textureEnvMode = 0;
     // 1 = ALPHA, 2 = LUMINANCE, 3 = LUMINANCE_ALPHA, 4 = INTENSITY,
     // 5 = RGB, 6 = RGBA.
     std::uint32_t textureBaseClass = 0;
     bool textureSampleIsDepth = false;
+    bool textureSampleIsDepth1 = false;
     bool textureSampleYFlip = false;
+    bool textureSampleYFlip1 = false;
+    std::uint32_t textureBaseClass1 = 0;
     std::array<GLfloat, 4> textureEnvColor = {0.0f, 0.0f, 0.0f, 0.0f};
     GLenum textureCombineRGB = GL_MODULATE;
     GLenum textureCombineAlpha = GL_MODULATE;

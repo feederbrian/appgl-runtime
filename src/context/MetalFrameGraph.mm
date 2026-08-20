@@ -18820,9 +18820,12 @@ fragment float4 appgl_msaa_color_resolve_copy_fs(
     // index 1 (buffer 0 is the vertex data). The fragment shader picks
     // the path based on which pipeline is bound — untextured just
     // returns the interpolated color, textured multiplies it by a
-    // sample from a single-unit texture bound at fragment slot 0.
-    // Both pipelines share the same vertex descriptor / vertex function
-    // / color format, so the only divergence is the fragment function.
+    // sample from the unit-0 texture bound at fragment slot 0. The 2D
+    // fragment path can also chain a compat unit-1 2D/rectangle sample
+    // through the same fixed-function texture environment, matching the
+    // GL 1.3 minimum advertised by GL_MAX_TEXTURE_UNITS.
+    // Pipelines share the same vertex descriptor / vertex function /
+    // color format, so the main divergence is the fragment function.
     bool ensureImmediateModeLibrary() {
         if (immediateModeLibrary != nil) {
             return true;
@@ -18874,6 +18877,14 @@ struct AppGLImmediateTextureState {
     uint alphaTestFunc;
     float alphaTestRef;
     uint _alphaPad;
+    uint texture1Enabled;
+    uint target1;
+    uint textureSampleYFlip1;
+    uint baseClass1;
+    uint textureSampleIsDepth1;
+    uint _texture1Pad0;
+    uint _texture1Pad1;
+    uint _texture1Pad2;
 };
 
 static bool appgl_immediate_alpha_test_pass(float alpha,
@@ -19192,6 +19203,40 @@ static float4 appgl_immediate_apply_border(float4 sample,
     return mix(sample, textureState.borderColor, borderFactor);
 }
 
+static float4 appgl_immediate_sample_2d_texture(
+    AppGLImmediateOut in,
+    texture2d<float> tex,
+    sampler samp,
+    constant AppGLImmediateTextureState& textureState,
+    uint target,
+    uint sampleYFlip) {
+    constexpr uint kTargetTexture1D = 0x0DE0u;
+    constexpr uint kTargetTextureRectangle = 0x84F5u;
+    const float2 st = appgl_immediate_projected_st(in.texcoord);
+    if (target == kTargetTextureRectangle) {
+        const uint width = tex.get_width();
+        const uint height = tex.get_height();
+        const uint x = min(
+            static_cast<uint>(max(floor(st.x), 0.0f)),
+            width > 0u ? width - 1u : 0u);
+        const uint y = min(
+            static_cast<uint>(max(floor(st.y), 0.0f)),
+            height > 0u ? height - 1u : 0u);
+        return tex.read(uint2(x, y));
+    }
+    float2 coord = target == kTargetTexture1D
+        ? float2(st.x, 0.5f)
+        : st;
+    if (sampleYFlip != 0u && target != kTargetTexture1D) {
+        coord.y = 1.0f - coord.y;
+    }
+    return appgl_immediate_apply_border(
+        tex.sample(samp, coord),
+        coord,
+        target != kTargetTexture1D,
+        textureState);
+}
+
 vertex AppGLImmediateOut appgl_immediate_vs(
     AppGLImmediateIn in [[stage_in]],
     constant float4x4& mvp [[buffer(1)]]
@@ -19235,24 +19280,21 @@ fragment AppGLImmediateMRT2Out appgl_immediate_color_mrt2_fs(
 fragment float4 appgl_immediate_textured_fs(
     AppGLImmediateOut in [[stage_in]],
     texture2d<float> tex [[texture(0)]],
+    texture2d<float> tex1 [[texture(1)]],
     sampler samp [[sampler(0)]],
+    sampler samp1 [[sampler(1)]],
     constant AppGLImmediateTextureState& textureState [[buffer(0)]]
 ) {
-    constexpr uint kTargetTexture1D = 0x0DE0u;
-    const float2 st = appgl_immediate_projected_st(in.texcoord);
-    float2 coord = textureState.target == kTargetTexture1D
-        ? float2(st.x, 0.5f)
-        : st;
-    if (textureState.textureSampleYFlip != 0u &&
-        textureState.target != kTargetTexture1D) {
-        coord.y = 1.0f - coord.y;
+    const float4 sample = appgl_immediate_sample_2d_texture(
+        in, tex, samp, textureState, textureState.target,
+        textureState.textureSampleYFlip);
+    float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    if (textureState.texture1Enabled != 0u) {
+        const float4 sample1 = appgl_immediate_sample_2d_texture(
+            in, tex1, samp1, textureState, textureState.target1,
+            textureState.textureSampleYFlip1);
+        color = appgl_immediate_finish_sample(color, sample1, textureState);
     }
-    const float4 sample = appgl_immediate_apply_border(
-        tex.sample(samp, coord),
-        coord,
-        textureState.target != kTargetTexture1D,
-        textureState);
-    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
     appgl_immediate_alpha_test(color.a, textureState);
     return color;
 }
@@ -19260,24 +19302,21 @@ fragment float4 appgl_immediate_textured_fs(
 fragment AppGLImmediateMRT2Out appgl_immediate_textured_mrt2_fs(
     AppGLImmediateOut in [[stage_in]],
     texture2d<float> tex [[texture(0)]],
+    texture2d<float> tex1 [[texture(1)]],
     sampler samp [[sampler(0)]],
+    sampler samp1 [[sampler(1)]],
     constant AppGLImmediateTextureState& textureState [[buffer(0)]]
 ) {
-    constexpr uint kTargetTexture1D = 0x0DE0u;
-    const float2 st = appgl_immediate_projected_st(in.texcoord);
-    float2 coord = textureState.target == kTargetTexture1D
-        ? float2(st.x, 0.5f)
-        : st;
-    if (textureState.textureSampleYFlip != 0u &&
-        textureState.target != kTargetTexture1D) {
-        coord.y = 1.0f - coord.y;
+    const float4 sample = appgl_immediate_sample_2d_texture(
+        in, tex, samp, textureState, textureState.target,
+        textureState.textureSampleYFlip);
+    float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    if (textureState.texture1Enabled != 0u) {
+        const float4 sample1 = appgl_immediate_sample_2d_texture(
+            in, tex1, samp1, textureState, textureState.target1,
+            textureState.textureSampleYFlip1);
+        color = appgl_immediate_finish_sample(color, sample1, textureState);
     }
-    const float4 sample = appgl_immediate_apply_border(
-        tex.sample(samp, coord),
-        coord,
-        textureState.target != kTargetTexture1D,
-        textureState);
-    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
     appgl_immediate_alpha_test(color.a, textureState);
     return appgl_immediate_mrt2_color(color);
 }
@@ -21006,10 +21045,20 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         id<MTLTexture> immediateTexture = info.metalTexture != nullptr
             ? (__bridge id<MTLTexture>)(info.metalTexture)
             : nil;
+        id<MTLTexture> immediateTexture1 = info.metalTexture1 != nullptr
+            ? (__bridge id<MTLTexture>)(info.metalTexture1)
+            : nil;
         const bool immediateTextureIsNative1D =
             immediateTexture != nil && immediateTexture.textureType == MTLTextureType1D;
         const bool immediateTextureIsNative3D =
             immediateTexture != nil && immediateTexture.textureType == MTLTextureType3D;
+        const bool immediateTexture1Usable =
+            immediateTexture != nil &&
+            immediateTexture1 != nil &&
+            !immediateTextureIsNative1D &&
+            !immediateTextureIsNative3D &&
+            immediateTexture1.textureType != MTLTextureType1D &&
+            immediateTexture1.textureType != MTLTextureType3D;
         id<MTLRenderPipelineState> pipelineState = immediateTexture != nil
             ? (immediateTextureIsNative3D
                 ? immediateModeTextured3DPipelineState
@@ -21177,6 +21226,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             std::uint32_t alphaTestFunc;
             float alphaTestRef;
             std::uint32_t alphaPad;
+            std::uint32_t texture1Enabled;
+            std::uint32_t target1;
+            std::uint32_t textureSampleYFlip1;
+            std::uint32_t baseClass1;
+            std::uint32_t textureSampleIsDepth1;
+            std::uint32_t texture1Pad0;
+            std::uint32_t texture1Pad1;
+            std::uint32_t texture1Pad2;
         };
         const bool compatLegacyTextureState =
             appglCompatProfileEnabled() && info.textureBaseClass != 0u;
@@ -21193,7 +21250,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
                 : (info.textureTarget == GL_TEXTURE_3D
                     ? static_cast<std::uint32_t>(GL_TEXTURE_3D)
-                    : 0u),
+                    : (info.textureTarget == GL_TEXTURE_RECTANGLE
+                        ? static_cast<std::uint32_t>(GL_TEXTURE_RECTANGLE)
+                        : 0u)),
             static_cast<std::uint32_t>(info.textureWrapS),
             static_cast<std::uint32_t>(info.textureWrapT),
             static_cast<std::uint32_t>(info.textureMinFilter),
@@ -21259,6 +21318,20 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             static_cast<std::uint32_t>(info.alphaTestFunc),
             info.alphaTestRef,
             0u,
+            immediateTexture1Usable ? 1u : 0u,
+            info.textureTarget1 == GL_TEXTURE_1D
+                ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
+                : (info.textureTarget1 == GL_TEXTURE_3D
+                    ? static_cast<std::uint32_t>(GL_TEXTURE_3D)
+                    : (info.textureTarget1 == GL_TEXTURE_RECTANGLE
+                        ? static_cast<std::uint32_t>(GL_TEXTURE_RECTANGLE)
+                        : 0u)),
+            info.textureSampleYFlip1 ? 1u : 0u,
+            info.textureBaseClass1,
+            info.textureSampleIsDepth1 ? 1u : 0u,
+            0u,
+            0u,
+            0u,
         };
         [encoder setFragmentBytes:&textureState
                             length:sizeof(textureState)
@@ -21271,6 +21344,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 : immediateModeDefaultSampler();
             if (samp != nil) {
                 [encoder setFragmentSamplerState:samp atIndex:0];
+            }
+        }
+        if (immediateTexture1Usable) {
+            [encoder setFragmentTexture:immediateTexture1 atIndex:1];
+            id<MTLSamplerState> samp1 = info.metalSamplerState1 != nullptr
+                ? (__bridge id<MTLSamplerState>)(info.metalSamplerState1)
+                : immediateModeDefaultSampler();
+            if (samp1 != nil) {
+                [encoder setFragmentSamplerState:samp1 atIndex:1];
             }
         }
 
