@@ -364,40 +364,39 @@ bool GLContext::linkProgram(GLuint program) {
         if (source.find("GL_OVR_multiview") == std::string::npos) {
             return 0;
         }
-        std::size_t searchPos = 0;
-        while (searchPos < source.size()) {
-            const std::size_t pos = source.find("num_views", searchPos);
-            if (pos == std::string::npos) {
-                return 0;
-            }
-            const std::size_t qualifierEnd =
-                source.find_first_of(");,\n\r", pos);
-            const std::size_t equals = source.find('=', pos);
-            if (equals == std::string::npos ||
-                (qualifierEnd != std::string::npos && equals > qualifierEnd)) {
-                searchPos = pos + 9;
+        const std::string clean = stripGlslCommentsForAppglValidation(source);
+        const auto defines = parseGlslIntegerDefines(clean);
+        std::size_t layout = 0;
+        while ((layout = clean.find("layout", layout)) != std::string::npos) {
+            if (!tokenAt(clean, layout, "layout")) {
+                layout += 6;
                 continue;
             }
-            std::size_t i = equals + 1;
-            while (i < source.size() &&
-                   (source[i] == ' ' || source[i] == '\t' ||
-                    source[i] == '\n' || source[i] == '\r')) {
-                ++i;
+            std::size_t open = layout + 6;
+            skipGlslWs(clean, open);
+            if (open >= clean.size() || clean[open] != '(') {
+                layout += 6;
+                continue;
             }
-            GLsizei value = 0;
-            bool haveDigit = false;
-            while (i < source.size() &&
-                   source[i] >= '0' && source[i] <= '9') {
-                haveDigit = true;
-                const GLsizei digit =
-                    static_cast<GLsizei>(source[i] - '0');
-                if (value > (std::numeric_limits<GLsizei>::max() - digit) / 10) {
+            const std::size_t close =
+                findMatchingDelimiter(clean, open, '(', ')');
+            if (close == std::string::npos) {
+                return 0;
+            }
+            const std::string layoutPrefix =
+                clean.substr(layout, close + 1 - layout);
+            int parsed = 0;
+            if (parseLayoutIntegerQualifier(
+                    layoutPrefix, "num_views", defines, parsed)) {
+                if (parsed <= 0) {
+                    return 0;
+                }
+                if (parsed > std::numeric_limits<GLsizei>::max()) {
                     return std::numeric_limits<GLsizei>::max();
                 }
-                value = static_cast<GLsizei>(value * 10 + digit);
-                ++i;
+                return static_cast<GLsizei>(parsed);
             }
-            return haveDigit ? value : 0;
+            layout = close + 1;
         }
         return 0;
     };

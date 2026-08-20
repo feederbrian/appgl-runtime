@@ -9837,12 +9837,16 @@ struct MetalFrameGraph::Impl {
                     (unsigned)info.fboDepthStencilSlice,
                     info.fboColorArrayLength, info.maxEmittedLayer);
             }
-            if (isFBODraw && !pendingFboClears.empty() &&
-                !vertexUsesMultiviewViewMask) {
+            if (isFBODraw && !pendingFboClears.empty()) {
                 const std::uint32_t passRtal = info.fboColorArrayLength;
                 const bool rtalClampPossible = info.maxEmittedLayer > 0;
                 PendingFboClear folded;
-                if (info.fboColorTexture != nullptr && !rtalClampPossible &&
+                // C48 currently materializes rather than folds multiview
+                // clears. Leaving them in the registry across the draw lets a
+                // later readback materialization overwrite the multiview pass
+                // (OVR_multiview triangle_compare depth/base-layer cases).
+                if (!vertexUsesMultiviewViewMask &&
+                    info.fboColorTexture != nullptr && !rtalClampPossible &&
                     !advancedBlendShaderTargetDraw &&
                     consumePendingFboClearForAttachment(
                         info.fboColorTexture, /*isColor=*/true,
@@ -9858,7 +9862,8 @@ struct MetalFrameGraph::Impl {
                      ei < info.fboAdditionalColorTextures.size() && ei < 7;
                      ++ei) {
                     void* rawTex = info.fboAdditionalColorTextures[ei];
-                    if (rawTex == nullptr || rtalClampPossible) continue;
+                    if (vertexUsesMultiviewViewMask ||
+                        rawTex == nullptr || rtalClampPossible) continue;
                     if (consumePendingFboClearForAttachment(
                             rawTex, /*isColor=*/true,
                             /*isDepth=*/false, /*isStencil=*/false,
@@ -9877,7 +9882,8 @@ struct MetalFrameGraph::Impl {
                 const bool depthAttachmentMayDrop =
                     fboColorTex != nil && fboDepthStencilTex != nil &&
                     fboColorTex.sampleCount != fboDepthStencilTex.sampleCount;
-                if (info.fboDepthStencilTexture != nullptr &&
+                if (!vertexUsesMultiviewViewMask &&
+                    info.fboDepthStencilTexture != nullptr &&
                     !rtalClampPossible && !depthAttachmentMayDrop) {
                     if (consumePendingFboClearForAttachment(
                             info.fboDepthStencilTexture, /*isColor=*/false,
