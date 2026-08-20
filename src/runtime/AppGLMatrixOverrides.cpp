@@ -27,8 +27,13 @@
 #include "../../include/AppGL/glcorearb.h"
 
 #include "../context/GLContext.h"
+#include "../state/GLStateTracker.h"
 #include "../state/MatrixStateMirror.h"
 #include "AppGLRuntime.h"
+
+#ifndef GL_MAX_TEXTURE_COORDS
+#define GL_MAX_TEXTURE_COORDS 0x8871
+#endif
 
 namespace {
 
@@ -42,6 +47,27 @@ appgl::GLContext* matrixContext() {
 }
 
 }  // namespace
+
+extern "C" void APIENTRY glClientActiveTexture(GLenum texture) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    GLint maxTextureCoords = 8;
+    ctx->queryInteger(GL_MAX_TEXTURE_COORDS, &maxTextureCoords);
+    if (maxTextureCoords <= 0) {
+        maxTextureCoords = 8;
+    }
+    if (texture < GL_TEXTURE0 ||
+        static_cast<GLint>(texture - GL_TEXTURE0) >= maxTextureCoords) {
+        ctx->pushError(GL_INVALID_ENUM, "glClientActiveTexture",
+                       "texture unit exceeds GL_MAX_TEXTURE_COORDS");
+        return;
+    }
+    const GLuint unit = texture - GL_TEXTURE0;
+    ctx->state().setActiveTextureUnit(unit);
+    ctx->matrixState().setActiveTextureUnit(unit);
+}
 
 extern "C" void APIENTRY glMatrixMode(GLenum mode) {
     auto* ctx = matrixContext();

@@ -485,6 +485,7 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glColorPointer",
     "glSecondaryColorPointer",
     "glTexCoordPointer",
+    "glClientActiveTexture",
     "glEnableClientState",
     "glDisableClientState",
     "glRasterPos2d",

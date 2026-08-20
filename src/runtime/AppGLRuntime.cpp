@@ -341,7 +341,7 @@ void recordValidationError(GLContext* context, std::string_view functionName, GL
     // runtime diagnostics ring buffer. No more double-pushing.
     context->pushError(error, functionName, message);
     context->emitDebugMessage(
-        GL_DEBUG_SOURCE_APPLICATION,
+        GL_DEBUG_SOURCE_API,
         GL_DEBUG_TYPE_ERROR,
         2,
         GL_DEBUG_SEVERITY_HIGH,
@@ -430,6 +430,9 @@ void markStateFunction(FunctionId id, std::string_view note) {
 #ifndef GL_TEXTURE_GEN_Q
 #define GL_TEXTURE_GEN_Q 0x0C63
 #endif
+#ifndef GL_MAX_TEXTURE_COORDS
+#define GL_MAX_TEXTURE_COORDS 0x8871
+#endif
 #ifndef GL_TEXTURE_2D
 #define GL_TEXTURE_2D 0x0DE1
 #endif
@@ -456,6 +459,22 @@ bool isLegacyClientArrayCap(GLenum cap) {
 bool admitsLegacyClientArrayCap(GLenum cap) {
     return isLegacyClientArrayCap(cap) &&
         appglCompatFeatureEnabled(AppGLCompatFeature::ClientArrays);
+}
+
+bool isTextureGenCap(GLenum cap) {
+    return cap == GL_TEXTURE_GEN_S ||
+           cap == GL_TEXTURE_GEN_T ||
+           cap == GL_TEXTURE_GEN_R ||
+           cap == GL_TEXTURE_GEN_Q;
+}
+
+bool activeTextureUnitSupportsTexGen(GLContext& context) {
+    GLint maxTextureCoords = 8;
+    (void)context.capabilities().queryInteger(GL_MAX_TEXTURE_COORDS, &maxTextureCoords);
+    if (maxTextureCoords <= 0) {
+        maxTextureCoords = 8;
+    }
+    return context.state().activeTextureUnit() < static_cast<GLuint>(maxTextureCoords);
 }
 
 bool isValidEnableCap(GLenum cap) {
@@ -7626,6 +7645,11 @@ void APIENTRY glEnable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
+    if (isTextureGenCap(cap) && !activeTextureUnitSupportsTexGen(*context)) {
+        recordValidationError(context, "glEnable", GL_INVALID_OPERATION,
+                              "texture generation requires an active unit below GL_MAX_TEXTURE_COORDS");
+        return;
+    }
     if (admitsLegacyClientArrayCap(cap)) {
         (void)context->setLegacyClientArrayEnabled(cap, true);
         Runtime::shared().recordBootstrapTrace("glEnable(" + std::to_string(cap) + ") -> legacy client array");
@@ -7659,6 +7683,11 @@ void APIENTRY glEnable(GLenum cap) {
 void APIENTRY glDisable(GLenum cap) {
     auto* context = requireCurrentContext("glDisable");
     if (context == nullptr) {
+        return;
+    }
+    if (isTextureGenCap(cap) && !activeTextureUnitSupportsTexGen(*context)) {
+        recordValidationError(context, "glDisable", GL_INVALID_OPERATION,
+                              "texture generation requires an active unit below GL_MAX_TEXTURE_COORDS");
         return;
     }
     if (admitsLegacyClientArrayCap(cap)) {

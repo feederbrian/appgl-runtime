@@ -7,6 +7,11 @@ bool isPublicProgramUniform(const GLProgramUniformInfo& uniform) {
     return !uniform.implementationInternal;
 }
 
+bool isCompatSynthesizedPublicUniform(const GLProgramUniformInfo& uniform) {
+    return isPublicProgramUniform(uniform) &&
+           uniform.name.compare(0, 6, "appgl_") == 0;
+}
+
 std::size_t publicProgramUniformCount(const GLProgramObject& program) {
     return static_cast<std::size_t>(std::count_if(
         program.uniforms.begin(), program.uniforms.end(),
@@ -29,6 +34,310 @@ const GLProgramUniformInfo* publicProgramUniformAt(
         ++index;
     }
     return nullptr;
+}
+
+struct ActiveUniformQueryEntry {
+    std::string name;
+    GLenum type = 0;
+    GLint size = 1;
+};
+
+bool activeUniformIdentChar(unsigned char c) {
+    return std::isalnum(c) || c == '_';
+}
+
+bool activeUniformHasIdentifierAt(
+    const std::string& code,
+    std::size_t pos,
+    const std::string& identifier) {
+    if (identifier.empty() || pos + identifier.size() > code.size() ||
+        code.compare(pos, identifier.size(), identifier) != 0) {
+        return false;
+    }
+    const bool leftOk = pos == 0 ||
+        !activeUniformIdentChar(static_cast<unsigned char>(code[pos - 1]));
+    const std::size_t end = pos + identifier.size();
+    const bool rightOk = end >= code.size() ||
+        !activeUniformIdentChar(static_cast<unsigned char>(code[end]));
+    return leftOk && rightOk;
+}
+
+std::string stripUniformArrayZeroSuffixForActiveQuery(const std::string& name) {
+    if (name.size() >= 3 && name.compare(name.size() - 3, 3, "[0]") == 0) {
+        return name.substr(0, name.size() - 3);
+    }
+    return name;
+}
+
+void activeUniformFillSpacesPreservingNewlines(
+    std::string& code,
+    std::size_t begin,
+    std::size_t end) {
+    end = std::min(end, code.size());
+    for (std::size_t i = begin; i < end; ++i) {
+        if (code[i] != '\n') {
+            code[i] = ' ';
+        }
+    }
+}
+
+std::string activeUniformBodyWithoutDeclarations(const std::string& source) {
+    std::string code = source;
+    for (std::size_t i = 0; i < code.size(); ) {
+        if (i + 1 < code.size() && code[i] == '/' && code[i + 1] == '/') {
+            const std::size_t begin = i;
+            i += 2;
+            while (i < code.size() && code[i] != '\n') {
+                ++i;
+            }
+            activeUniformFillSpacesPreservingNewlines(code, begin, i);
+            continue;
+        }
+        if (i + 1 < code.size() && code[i] == '/' && code[i + 1] == '*') {
+            const std::size_t begin = i;
+            i += 2;
+            while (i + 1 < code.size() &&
+                   !(code[i] == '*' && code[i + 1] == '/')) {
+                ++i;
+            }
+            if (i + 1 < code.size()) {
+                i += 2;
+            }
+            activeUniformFillSpacesPreservingNewlines(code, begin, i);
+            continue;
+        }
+        ++i;
+    }
+
+    std::size_t pos = 0;
+    while ((pos = code.find("uniform", pos)) != std::string::npos) {
+        if (!activeUniformHasIdentifierAt(code, pos, "uniform")) {
+            ++pos;
+            continue;
+        }
+        std::size_t begin = pos;
+        while (begin > 0) {
+            const char c = code[begin - 1];
+            if (c == ';' || c == '{' || c == '}') {
+                break;
+            }
+            --begin;
+        }
+        std::size_t end = pos;
+        while (end < code.size() && code[end] != ';') {
+            ++end;
+        }
+        if (end < code.size()) {
+            ++end;
+        }
+        activeUniformFillSpacesPreservingNewlines(code, begin, end);
+        pos = end;
+    }
+    return code;
+}
+
+struct ActiveUniformUsage {
+    bool used = false;
+    bool fullDeclaredExtent = false;
+    GLint highestNumericIndex = -1;
+};
+
+ActiveUniformUsage activeUniformUsageInCode(
+    const std::string& code,
+    const std::string& name) {
+    ActiveUniformUsage usage;
+    std::size_t pos = 0;
+    while ((pos = code.find(name, pos)) != std::string::npos) {
+        if (!activeUniformHasIdentifierAt(code, pos, name)) {
+            ++pos;
+            continue;
+        }
+        usage.used = true;
+        std::size_t p = pos + name.size();
+        while (p < code.size() &&
+               std::isspace(static_cast<unsigned char>(code[p]))) {
+            ++p;
+        }
+        if (p >= code.size() || code[p] != '[') {
+            usage.fullDeclaredExtent = true;
+            pos = p;
+            continue;
+        }
+        ++p;
+        while (p < code.size() &&
+               std::isspace(static_cast<unsigned char>(code[p]))) {
+            ++p;
+        }
+        GLint value = 0;
+        const std::size_t digitsBegin = p;
+        while (p < code.size() &&
+               std::isdigit(static_cast<unsigned char>(code[p]))) {
+            value = value * 10 + static_cast<GLint>(code[p] - '0');
+            ++p;
+        }
+        while (p < code.size() &&
+               std::isspace(static_cast<unsigned char>(code[p]))) {
+            ++p;
+        }
+        if (digitsBegin != p && p < code.size() && code[p] == ']') {
+            usage.highestNumericIndex =
+                std::max<GLint>(usage.highestNumericIndex, value);
+        } else {
+            usage.fullDeclaredExtent = true;
+        }
+        pos = p;
+    }
+    return usage;
+}
+
+GLint activeUniformExtentForPublicDefaultBlockUniform(
+    const GLProgramObject& program,
+    GLObjectStore& objects,
+    const GLProgramUniformInfo& uniform,
+    bool& active) {
+    active = false;
+    if (!isPublicProgramUniform(uniform)) {
+        return std::max<GLint>(uniform.arraySize, 1);
+    }
+
+    const GLint declaredSize = std::max<GLint>(uniform.arraySize, 1);
+    if (isCompatSynthesizedPublicUniform(uniform)) {
+        active = true;
+        return declaredSize;
+    }
+
+    bool sawUsableSource = false;
+    bool sawFullDeclaredExtent = false;
+    GLint highestNumericIndex = -1;
+    for (GLuint shaderId : program.attachedShaders) {
+        const GLShaderObject* shader = objects.shaders().get(shaderId);
+        if (shader == nullptr || shader->isSpirvBinary || shader->source.empty()) {
+            continue;
+        }
+        sawUsableSource = true;
+        const std::string body =
+            activeUniformBodyWithoutDeclarations(shader->source);
+        const ActiveUniformUsage usage =
+            activeUniformUsageInCode(body, uniform.name);
+        if (!usage.used) {
+            continue;
+        }
+        active = true;
+        sawFullDeclaredExtent = sawFullDeclaredExtent || usage.fullDeclaredExtent;
+        highestNumericIndex =
+            std::max<GLint>(highestNumericIndex, usage.highestNumericIndex);
+    }
+
+    if (!sawUsableSource) {
+        active = true;
+        return declaredSize;
+    }
+    if (!active) {
+        return declaredSize;
+    }
+    if (!uniform.isArray || uniform.arrayDimensions.size() > 1 ||
+        sawFullDeclaredExtent || highestNumericIndex < 0) {
+        return declaredSize;
+    }
+    return std::min<GLint>(declaredSize, highestNumericIndex + 1);
+}
+
+const GLProgramUniformInfo* publicProgramUniformByName(
+    const GLProgramObject& program,
+    const std::string& name) {
+    for (const auto& uniform : program.uniforms) {
+        if (isPublicProgramUniform(uniform) && uniform.name == name) {
+            return &uniform;
+        }
+    }
+    return nullptr;
+}
+
+bool uniformNameIsFlattenedAggregateLeaf(const GLProgramUniformInfo& uniform) {
+    return uniform.name.find_first_of(".[") != std::string::npos;
+}
+
+std::vector<ActiveUniformQueryEntry> activeUniformQueryEntries(
+    const GLProgramObject& program,
+    GLObjectStore& objects) {
+    std::vector<ActiveUniformQueryEntry> entries;
+    if (programUsesNamelessSpirvBinaries(program, objects)) {
+        return entries;
+    }
+
+    if (!program.resourceUniforms.empty()) {
+        entries.reserve(program.resourceUniforms.size());
+        for (const auto& resource : program.resourceUniforms) {
+            const bool defaultBlock =
+                resource.blockIndex < 0 &&
+                resource.offset < 0 &&
+                resource.arrayStride < 0 &&
+                resource.matrixStride < 0;
+            if (!defaultBlock) {
+                if (resource.referencedBy != 0) {
+                    entries.push_back({
+                        resource.name,
+                        resource.type,
+                        std::max<GLint>(resource.arraySize, 1)
+                    });
+                }
+                continue;
+            }
+
+            const std::string baseName =
+                stripUniformArrayZeroSuffixForActiveQuery(resource.name);
+            const GLProgramUniformInfo* uniform =
+                publicProgramUniformByName(program, baseName);
+            if (uniform == nullptr) {
+                if (resource.referencedBy != 0) {
+                    entries.push_back({
+                        resource.name,
+                        resource.type,
+                        std::max<GLint>(resource.arraySize, 1)
+                    });
+                }
+                continue;
+            }
+            if (isCompatSynthesizedPublicUniform(*uniform)) {
+                if (resource.referencedBy != 0) {
+                    entries.push_back({
+                        resource.name,
+                        resource.type,
+                        std::max<GLint>(resource.arraySize, 1)
+                    });
+                }
+                continue;
+            }
+            bool active = false;
+            const GLint activeSize =
+                activeUniformExtentForPublicDefaultBlockUniform(
+                    program, objects, *uniform, active);
+            if (active) {
+                entries.push_back({
+                    resource.name,
+                    resource.type,
+                    activeSize
+                });
+            }
+        }
+        return entries;
+    }
+
+    entries.reserve(publicProgramUniformCount(program));
+    for (const auto& uniform : program.uniforms) {
+        bool active = false;
+        const GLint activeSize =
+            activeUniformExtentForPublicDefaultBlockUniform(
+                program, objects, uniform, active);
+        if (active) {
+            entries.push_back({
+                uniform.name,
+                uniform.type,
+                activeSize
+            });
+        }
+    }
+    return entries;
 }
 
 bool isImplementationInternalUniformLocation(
@@ -158,12 +467,8 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(object->attachedShaders.size());
             return true;
         case GL_ACTIVE_UNIFORMS:
-            // GL spec: includes ALL active uniforms (bare + in-block).
-            // resourceUniforms holds both; uniforms only holds bare ones.
             *params = static_cast<GLint>(
-                object->resourceUniforms.empty()
-                    ? publicProgramUniformCount(*object)
-                    : object->resourceUniforms.size());
+                activeUniformQueryEntries(*object, *impl_->objects).size());
             return true;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
             if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
@@ -171,17 +476,9 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
                 return true;
             }
             std::size_t maxLen = 0;
-            if (!object->resourceUniforms.empty()) {
-                for (const auto& u : object->resourceUniforms) {
-                    maxLen = std::max(maxLen, u.name.size() + 1);
-                }
-            } else {
-                for (const auto& u : object->uniforms) {
-                    if (!isPublicProgramUniform(u)) {
-                        continue;
-                    }
-                    maxLen = std::max(maxLen, u.name.size() + 1);
-                }
+            for (const auto& u :
+                 activeUniformQueryEntries(*object, *impl_->objects)) {
+                maxLen = std::max(maxLen, u.name.size() + 1);
             }
             *params = static_cast<GLint>(maxLen);
             return true;
@@ -549,10 +846,33 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
         flatIndex = flat;
         return true;
     };
+    auto activeLocationExtent =
+        [&](const GLProgramUniformInfo& uniform) -> GLint {
+        if (uniformNameIsFlattenedAggregateLeaf(uniform)) {
+            return std::max<GLint>(uniform.arraySize, 1);
+        }
+        bool active = false;
+        const GLint activeSize =
+            activeUniformExtentForPublicDefaultBlockUniform(
+                *object, *impl_->objects, uniform, active);
+        return active ? std::max<GLint>(activeSize, 1) : 0;
+    };
+    auto uniformLocationForFlatIndex =
+        [&](const GLProgramUniformInfo& uniform, GLint flatIndex) -> GLint {
+        if (!isPublicProgramUniform(uniform) || uniform.location < 0 ||
+            flatIndex < 0) {
+            return -1;
+        }
+        const GLint activeExtent = activeLocationExtent(uniform);
+        if (activeExtent <= 0 || flatIndex >= activeExtent) {
+            return -1;
+        }
+        return uniform.location + flatIndex;
+    };
     auto lookupUniformLocation = [&](const std::string& text) -> GLint {
         for (const auto& uniform : object->uniforms) {
             if (isPublicProgramUniform(uniform) && uniform.name == text) {
-                return uniform.location;
+                return uniformLocationForFlatIndex(uniform, 0);
             }
         }
         std::string baseName;
@@ -563,7 +883,7 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
                 if (isPublicProgramUniform(uniform) &&
                     uniform.name == baseName && uniform.location >= 0 &&
                     flattenUniformArrayIndex(uniform, indices, flatIndex)) {
-                    return uniform.location + flatIndex;
+                    return uniformLocationForFlatIndex(uniform, flatIndex);
                 }
             }
         }
@@ -604,7 +924,8 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
                         uniform.name == baseName && uniform.arraySize >= 1
                         && idx < static_cast<long>(uniform.arraySize)
                         && uniform.location >= 0) {
-                        return uniform.location + static_cast<GLint>(idx);
+                        return uniformLocationForFlatIndex(
+                            uniform, static_cast<GLint>(idx));
                     }
                 }
             }
@@ -658,7 +979,8 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
                                 uniform.name == baseR && uniform.arraySize >= 1
                                 && idxR < static_cast<long>(uniform.arraySize)
                                 && uniform.location >= 0) {
-                                return uniform.location + static_cast<GLint>(idxR);
+                                return uniformLocationForFlatIndex(
+                                    uniform, static_cast<GLint>(idxR));
                             }
                         }
                     }
@@ -679,65 +1001,83 @@ bool GLContext::getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, 
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Prefer resourceUniforms (includes UBO members); fall back to bare
-    // uniforms list for programs that never went through SPIRV-Cross.
-    if (!object->resourceUniforms.empty()) {
-        if (index >= static_cast<GLuint>(object->resourceUniforms.size())) {
-            pushError(GL_INVALID_VALUE);
-            return false;
-        }
-        const auto& u = object->resourceUniforms[index];
-        if (size != nullptr) {
-            *size = std::max<GLint>(u.arraySize, 1);
-        }
-        if (type != nullptr) {
-            *type = u.type;
-        }
-        copyStringToBuffer(u.name, bufSize, length, name);
-        return true;
-    }
-    const GLProgramUniformInfo* uniform =
-        publicProgramUniformAt(*object, static_cast<std::size_t>(index));
-    if (uniform == nullptr) {
+    const auto activeEntries =
+        activeUniformQueryEntries(*object, *impl_->objects);
+    if (index >= static_cast<GLuint>(activeEntries.size())) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const auto& uniform = activeEntries[index];
     if (size != nullptr) {
-        *size = std::max<GLint>(uniform->arraySize, 1);
+        *size = std::max<GLint>(uniform.size, 1);
     }
     if (type != nullptr) {
-        *type = uniform->type;
+        *type = uniform.type;
     }
-    copyStringToBuffer(uniform->name, bufSize, length, name);
+    copyStringToBuffer(uniform.name, bufSize, length, name);
     return true;
 }
 
 namespace {
 
-GLProgramUniformValue* lookupUniformValue(GLProgramObject* program, GLint location) {
+struct ActiveUniformLocationSlots {
+    GLint slots = 0;
+    bool inactiveExplicitNoop = false;
+};
+
+ActiveUniformLocationSlots activeUniformLocationSlots(
+    const GLProgramObject& program,
+    GLObjectStore& objects,
+    const GLProgramUniformInfo& uniform) {
+    if (uniformNameIsFlattenedAggregateLeaf(uniform)) {
+        return { std::max<GLint>(uniform.arraySize, 1), false };
+    }
+    bool active = false;
+    const GLint activeSize =
+        activeUniformExtentForPublicDefaultBlockUniform(
+            program, objects, uniform, active);
+    const GLint declaredSize = std::max<GLint>(uniform.arraySize, 1);
+    if (!active && uniform.explicitLocation >= 0) {
+        return { declaredSize, true };
+    }
+    return { active ? std::max<GLint>(activeSize, 1) : 0, false };
+}
+
+GLProgramUniformValue* lookupUniformValue(
+    GLProgramObject* program,
+    GLObjectStore& objects,
+    GLint location) {
     if (program == nullptr || location < 0) {
         return nullptr;
     }
     if (isImplementationInternalUniformLocation(*program, location)) {
         return nullptr;
     }
-    auto it = program->uniformValues.find(location);
-    if (it != program->uniformValues.end()) {
-        return &it->second;
-    }
-    // Array-element fallback: glUniform1i(loc+k, …) on a uniform declared
-    // with arraySize > 1 hits locations [base+1, base+arraySize). The slot
-    // lives at the base location; find it by walking the uniforms list.
     for (const auto& u : program->uniforms) {
-        if (isPublicProgramUniform(u) &&
-            u.arraySize > 1 && location > u.location
-            && location < u.location + u.arraySize) {
+        if (!isPublicProgramUniform(u) || u.location < 0) {
+            continue;
+        }
+        const GLint declaredSlots = std::max<GLint>(u.arraySize, 1);
+        if (location >= u.location && location < u.location + declaredSlots) {
+            const ActiveUniformLocationSlots activeSlots =
+                activeUniformLocationSlots(*program, objects, u);
+            if (activeSlots.inactiveExplicitNoop) {
+                return nullptr;
+            }
+            if (activeSlots.slots <= 0 ||
+                location >= u.location + activeSlots.slots) {
+                return nullptr;
+            }
             auto base = program->uniformValues.find(u.location);
             if (base != program->uniformValues.end()) {
                 return &base->second;
             }
             return nullptr;
         }
+    }
+    auto it = program->uniformValues.find(location);
+    if (it != program->uniformValues.end()) {
+        return &it->second;
     }
     return nullptr;
 }
@@ -752,9 +1092,13 @@ struct UniformSlotRef {
     GLint arraySize = 1;
     GLenum type = 0;
     bool rejectEsImageUnitUpdate = false;
+    bool inactiveExplicitNoop = false;
 };
 
-UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
+UniformSlotRef resolveUniformSlot(
+    GLProgramObject* program,
+    GLObjectStore& objects,
+    GLint location) {
     UniformSlotRef r;
     if (program == nullptr || location < 0) {
         return r;
@@ -769,11 +1113,25 @@ UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
         const GLint slots = std::max<GLint>(u.arraySize, 1);
         if (u.location >= 0 && location >= u.location &&
             location < u.location + slots) {
+            const ActiveUniformLocationSlots activeSlots =
+                activeUniformLocationSlots(*program, objects, u);
+            if (activeSlots.inactiveExplicitNoop &&
+                location < u.location + activeSlots.slots) {
+                r.elementIndex = location - u.location;
+                r.arraySize = activeSlots.slots;
+                r.type = u.type;
+                r.inactiveExplicitNoop = true;
+                return r;
+            }
+            if (activeSlots.slots <= 0 ||
+                location >= u.location + activeSlots.slots) {
+                return r;
+            }
             auto base = program->uniformValues.find(u.location);
             if (base != program->uniformValues.end()) {
                 r.slot = &base->second;
                 r.elementIndex = location - u.location;
-                r.arraySize = u.arraySize;
+                r.arraySize = activeSlots.slots;
                 r.type = u.type;
                 r.rejectEsImageUnitUpdate =
                     u.declaredInEsProfile && isImageUniformType(u.type);
@@ -793,11 +1151,25 @@ UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
         if (isPublicProgramUniform(u) &&
             u.arraySize > 1 && location > u.location
             && location < u.location + u.arraySize) {
+            const ActiveUniformLocationSlots activeSlots =
+                activeUniformLocationSlots(*program, objects, u);
+            if (activeSlots.inactiveExplicitNoop &&
+                location < u.location + activeSlots.slots) {
+                r.elementIndex = location - u.location;
+                r.arraySize = activeSlots.slots;
+                r.type = u.type;
+                r.inactiveExplicitNoop = true;
+                return r;
+            }
+            if (activeSlots.slots <= 0 ||
+                location >= u.location + activeSlots.slots) {
+                return r;
+            }
             auto base = program->uniformValues.find(u.location);
             if (base != program->uniformValues.end()) {
                 r.slot = &base->second;
                 r.elementIndex = location - u.location;
-                r.arraySize = u.arraySize;
+                r.arraySize = activeSlots.slots;
                 r.type = u.type;
             }
             return r;
@@ -868,7 +1240,7 @@ bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    UniformSlotRef ref = resolveUniformSlot(object, location);
+    UniformSlotRef ref = resolveUniformSlot(object, *impl_->objects, location);
     if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -918,7 +1290,7 @@ bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    UniformSlotRef ref = resolveUniformSlot(object, location);
+    UniformSlotRef ref = resolveUniformSlot(object, *impl_->objects, location);
     if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -968,7 +1340,7 @@ bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    UniformSlotRef ref = resolveUniformSlot(object, location);
+    UniformSlotRef ref = resolveUniformSlot(object, *impl_->objects, location);
     if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;

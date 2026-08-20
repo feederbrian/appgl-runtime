@@ -38,12 +38,6 @@ extern "C" void APIENTRY glClearIndex(GLfloat c) {
     return;
 }
 
-extern "C" void APIENTRY glClientActiveTexture(GLenum texture) {
-    (void)texture;
-    appgl::Runtime::shared().recordFixedFunctionStub("glClientActiveTexture");
-    return;
-}
-
 extern "C" void APIENTRY glColor3b(GLbyte red, GLbyte green, GLbyte blue) {
     (void)red;
     (void)green;

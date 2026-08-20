@@ -33561,11 +33561,6 @@ struct GLContext::Impl {
             return;
         }
         message.message = trimDebugMessage(message.message);
-        debugMessages.push_back(message);
-        while (debugMessages.size() > kMaxDebugMessages) {
-            debugMessages.pop_front();
-        }
-
         if (debugCallback != nullptr) {
             debugCallback(
                 message.source,
@@ -33576,6 +33571,12 @@ struct GLContext::Impl {
                 message.message.c_str(),
                 debugUserParam
             );
+            return;
+        }
+
+        debugMessages.push_back(message);
+        while (debugMessages.size() > kMaxDebugMessages) {
+            debugMessages.pop_front();
         }
     }
 
@@ -36858,10 +36859,12 @@ void GLContext::pushError(GLenum error,
     // leave 6 drain iterations as headroom under CTS's bound. The GL
     // contract only guarantees glGetError returns *an* error when one
     // is pending; there's no FIFO depth guarantee.
-    if (impl_->errors.size() >= 4) {
-        impl_->errors.pop_front();
+    if (std::find(impl_->errors.begin(), impl_->errors.end(), error) == impl_->errors.end()) {
+        if (impl_->errors.size() >= 4) {
+            impl_->errors.pop_front();
+        }
+        impl_->errors.push_back(error);
     }
-    impl_->errors.push_back(error);
     static const bool s_trErr = (std::getenv("APPGL_TRACE_GL_ERR") != nullptr);
     if (s_trErr) {
         std::fprintf(stderr, "[GL_ERR] 0x%X (%.*s) at %s:%d msg='%.*s'\n",

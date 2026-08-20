@@ -5,6 +5,34 @@
 #define GL_RGBA_INTEGER_MODE_EXT 0x8D9E
 #endif
 
+#ifndef GL_MATRIX_MODE
+#define GL_MATRIX_MODE 0x0BA0
+#endif
+
+#ifndef GL_MODELVIEW_MATRIX
+#define GL_MODELVIEW_MATRIX 0x0BA6
+#endif
+
+#ifndef GL_PROJECTION_MATRIX
+#define GL_PROJECTION_MATRIX 0x0BA7
+#endif
+
+#ifndef GL_TEXTURE_MATRIX
+#define GL_TEXTURE_MATRIX 0x0BA8
+#endif
+
+#ifndef GL_TRANSPOSE_MODELVIEW_MATRIX
+#define GL_TRANSPOSE_MODELVIEW_MATRIX 0x84E3
+#endif
+
+#ifndef GL_TRANSPOSE_PROJECTION_MATRIX
+#define GL_TRANSPOSE_PROJECTION_MATRIX 0x84E4
+#endif
+
+#ifndef GL_TRANSPOSE_TEXTURE_MATRIX
+#define GL_TRANSPOSE_TEXTURE_MATRIX 0x84E5
+#endif
+
 #if defined(APPGL_GLCONTEXT_QUERY_INDEXED)
 namespace {
 GLenum indexedBufferQueryLimitPname(GLenum target) {
@@ -192,6 +220,66 @@ bool isLegacySecondaryColorArrayParameter(GLenum pname) {
            pname == GL_SECONDARY_COLOR_ARRAY_TYPE ||
            pname == GL_SECONDARY_COLOR_ARRAY_STRIDE;
 }
+
+Matrix4 transposeLegacyMatrix(const Matrix4& matrix) {
+    Matrix4 out;
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            out.m[static_cast<std::size_t>(column * 4 + row)] =
+                matrix.m[static_cast<std::size_t>(row * 4 + column)];
+        }
+    }
+    return out;
+}
+
+bool queryLegacyMatrixFloat(
+    const MatrixStateMirror& matrixState,
+    GLuint activeTextureUnit,
+    GLenum pname,
+    GLfloat* data)
+{
+    Matrix4 matrix;
+    switch (pname) {
+        case GL_MODELVIEW_MATRIX:
+            matrix = matrixState.modelView();
+            break;
+        case GL_PROJECTION_MATRIX:
+            matrix = matrixState.projection();
+            break;
+        case GL_TEXTURE_MATRIX:
+            matrix = matrixState.textureMatrix(activeTextureUnit);
+            break;
+        case GL_TRANSPOSE_MODELVIEW_MATRIX:
+            matrix = transposeLegacyMatrix(matrixState.modelView());
+            break;
+        case GL_TRANSPOSE_PROJECTION_MATRIX:
+            matrix = transposeLegacyMatrix(matrixState.projection());
+            break;
+        case GL_TRANSPOSE_TEXTURE_MATRIX:
+            matrix = transposeLegacyMatrix(matrixState.textureMatrix(activeTextureUnit));
+            break;
+        default:
+            return false;
+    }
+    std::memcpy(data, matrix.m.data(), matrix.m.size() * sizeof(GLfloat));
+    return true;
+}
+
+bool queryLegacyMatrixDouble(
+    const MatrixStateMirror& matrixState,
+    GLuint activeTextureUnit,
+    GLenum pname,
+    GLdouble* data)
+{
+    GLfloat floats[16] = {};
+    if (!queryLegacyMatrixFloat(matrixState, activeTextureUnit, pname, floats)) {
+        return false;
+    }
+    for (int index = 0; index < 16; ++index) {
+        data[index] = static_cast<GLdouble>(floats[index]);
+    }
+    return true;
+}
 }  // namespace
 
 bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
@@ -361,6 +449,10 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
     }
     if (pname == GL_SHADE_MODEL) {
         *data = static_cast<GLint>(impl_->fixedFunctionShadeModel);
+        return true;
+    }
+    if (pname == GL_MATRIX_MODE) {
+        *data = static_cast<GLint>(impl_->matrixState.matrixMode());
         return true;
     }
     if (pname == GL_RENDER_MODE) {
@@ -981,6 +1073,10 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         *data = static_cast<GLfloat>(impl_->fixedFunctionShadeModel);
         return true;
     }
+    if (pname == GL_MATRIX_MODE) {
+        *data = static_cast<GLfloat>(impl_->matrixState.matrixMode());
+        return true;
+    }
     if (pname == GL_CURRENT_RASTER_POSITION) {
         std::memcpy(data, impl_->fixedFunctionRasterPosition, 4 * sizeof(GLfloat));
         return true;
@@ -1009,6 +1105,13 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
             return false;
         }
         *data = static_cast<GLfloat>(integerValue);
+        return true;
+    }
+    if (queryLegacyMatrixFloat(
+            impl_->matrixState,
+            impl_->state->activeTextureUnit(),
+            pname,
+            data)) {
         return true;
     }
     bool fragmentShadingRateHandled = false;
@@ -1075,6 +1178,10 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
         *data = static_cast<GLdouble>(impl_->fixedFunctionShadeModel);
         return true;
     }
+    if (pname == GL_MATRIX_MODE) {
+        *data = static_cast<GLdouble>(impl_->matrixState.matrixMode());
+        return true;
+    }
     if (pname == GL_CURRENT_RASTER_POSITION ||
         pname == GL_CURRENT_RASTER_COLOR ||
         pname == GL_CURRENT_RASTER_SECONDARY_COLOR ||
@@ -1096,6 +1203,13 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
             return false;
         }
         *data = static_cast<GLdouble>(integerValue);
+        return true;
+    }
+    if (queryLegacyMatrixDouble(
+            impl_->matrixState,
+            impl_->state->activeTextureUnit(),
+            pname,
+            data)) {
         return true;
     }
     bool fragmentShadingRateHandled = false;

@@ -4609,6 +4609,12 @@ void GLContext::endImmediate() {
         return;
     }
     impl_->immediate.active = false;
+    if (!impl_->validateCurrentProgramPipelineForDraw()) {
+        impl_->immediate.vertices.clear();
+        impl_->immediate.materialSnapshots.clear();
+        impl_->immediate.edgeFlags.clear();
+        return;
+    }
     if (impl_->state->boundDrawFramebuffer() != 0) {
         const GLFramebufferObject* drawFb =
             impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());

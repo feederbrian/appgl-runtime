@@ -338,9 +338,13 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             // All desktop BC/RGTC/BPTC formats use 4×4 blocks.
             // BC1/BC4/RGTC1: 8 bytes/block = 64 bits/block.
             // BC5/RGTC2/BPTC: 16 bytes/block = 128 bits/block.
+            case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
             case GL_COMPRESSED_RED_RGTC1:
             case GL_COMPRESSED_SIGNED_RED_RGTC1:
                 return 64;
+            case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
             case GL_COMPRESSED_RG_RGTC2:
             case GL_COMPRESSED_SIGNED_RG_RGTC2:
             case GL_COMPRESSED_RGBA_BPTC_UNORM:
@@ -356,10 +360,6 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     const GLenum dstInternal = getInternalFormat(dstName, dstIsTex, dstLevel);
     const int srcBits = bitsPerTexel(srcInternal);
     const int dstBits = bitsPerTexel(dstInternal);
-    if (srcBits > 0 && dstBits > 0 && srcBits != dstBits) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
 
     // GL 4.6 §18.2.3: when either side is a compressed texture, the
     // offsets and extents must be integer multiples of the block
@@ -369,6 +369,10 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // compressed source/destination and expects INVALID_VALUE.
     auto isCompressedFormat = [](GLenum fmt) {
         switch (fmt) {
+            case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
             case GL_COMPRESSED_RED_RGTC1:
             case GL_COMPRESSED_SIGNED_RED_RGTC1:
             case GL_COMPRESSED_RG_RGTC2:
@@ -429,6 +433,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             }
         }
         (void)extentValid;
+    }
+
+    if (srcBits > 0 && dstBits > 0 && srcBits != dstBits) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
 
     // No-op for zero-sized copies.

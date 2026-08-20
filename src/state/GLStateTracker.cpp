@@ -24,6 +24,9 @@
 #ifndef GL_COLOR_SUM
 #define GL_COLOR_SUM 0x8458
 #endif
+#ifndef GL_CLIENT_ACTIVE_TEXTURE
+#define GL_CLIENT_ACTIVE_TEXTURE 0x84E1
+#endif
 // R1.0-c item #14 — compat antialiasing/stipple state. See the matching
 // allowlist entries in AppGLRuntime.cpp (isValidEnableCap / isValidHintTarget).
 #ifndef GL_POINT_SMOOTH
@@ -338,6 +341,9 @@ bool queryValue(
             return true;
         }
         case GL_ACTIVE_TEXTURE:
+            writeScalar(out, GL_TEXTURE0 + activeTextureUnit);
+            return true;
+        case GL_CLIENT_ACTIVE_TEXTURE:
             writeScalar(out, GL_TEXTURE0 + activeTextureUnit);
             return true;
         case GL_TEXTURE_BINDING_1D:
