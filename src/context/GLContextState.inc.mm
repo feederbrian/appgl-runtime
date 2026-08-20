@@ -199,6 +199,7 @@ void GLContext::setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfloat w
         pushError(GL_INVALID_VALUE);
         return;
     }
+    clampViewportArrayValues(impl_->capabilities.get(), x, y, w, h);
     impl_->state->setViewportIndexed(index, x, y, w, h);
 }
 
@@ -220,7 +221,16 @@ void GLContext::setViewportArray(GLuint first, GLsizei count, const GLfloat* v) 
             }
         }
     }
-    impl_->state->setViewportArray(first, count, v);
+    if (v != nullptr) {
+        for (GLsizei i = 0; i < count; ++i) {
+            GLfloat x = v[i * 4 + 0];
+            GLfloat y = v[i * 4 + 1];
+            GLfloat w = v[i * 4 + 2];
+            GLfloat h = v[i * 4 + 3];
+            clampViewportArrayValues(impl_->capabilities.get(), x, y, w, h);
+            impl_->state->setViewportIndexed(first + static_cast<GLuint>(i), x, y, w, h);
+        }
+    }
 }
 
 void GLContext::setScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height) {

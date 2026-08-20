@@ -51,6 +51,10 @@ bool isImplementationInternalUniformLocation(
 }  // namespace
 
 bool GLContext::useProgram(GLuint program) {
+    if (immediateModeActiveCompat()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (program != 0) {
         GLProgramObject* object = impl_->objects->programs().get(program);
         if (object == nullptr) {
@@ -76,18 +80,22 @@ bool GLContext::useProgram(GLuint program) {
     // GL 4.6 §7.3 deferred-delete protocol: if the outgoing current
     // program was already flagged deleteRequested by a prior
     // glDeleteProgram, this is the moment it actually gets erased —
-    // "no longer part of any context's current state" is satisfied by
-    // the upcoming state->useProgram() call. See deleteProgram for
-    // the rationale. Skip when the outgoing program is the same as
-    // the incoming program (redundant glUseProgram(N)→glUseProgram(N)).
+    // after the state->useProgram() call below has made it no longer
+    // current. See deleteProgram for the rationale. Skip when the
+    // outgoing program is the same as the incoming program (redundant
+    // glUseProgram(N)→glUseProgram(N)).
     const GLuint outgoing = impl_->state->currentProgram();
+    bool finalizeOutgoingAfterSwitch = false;
     if (outgoing != 0 && outgoing != program) {
         GLProgramObject* outgoingObj = impl_->objects->programs().get(outgoing);
         if (outgoingObj != nullptr && outgoingObj->deleteRequested) {
-            impl_->finalizeDeletedProgramIfUnused(outgoing);
+            finalizeOutgoingAfterSwitch = true;
         }
     }
     impl_->state->useProgram(program);
+    if (finalizeOutgoingAfterSwitch) {
+        impl_->finalizeDeletedProgramIfUnused(outgoing);
+    }
     if (program != 0) {
         GLProgramObject* object = impl_->objects->programs().get(program);
         if (object != nullptr) {
@@ -662,6 +670,10 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
 }
 
 bool GLContext::getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    if (immediateModeActiveCompat()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     GLProgramObject* object = impl_->objects->programs().get(program);
     if (object == nullptr) {
         pushError(GL_INVALID_VALUE);

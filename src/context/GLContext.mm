@@ -36063,6 +36063,28 @@ static GLint64 queryMaxViewports(GLCapabilities* caps) {
     return v;
 }
 
+static void clampViewportArrayValues(GLCapabilities* caps,
+                                     GLfloat& x,
+                                     GLfloat& y,
+                                     GLfloat& w,
+                                     GLfloat& h) {
+    GLfloat bounds[2] = {-32768.0f, 32768.0f};
+    GLint maxDims[2] = {32768, 32768};
+    if (caps != nullptr) {
+        (void)caps->queryFloat(GL_VIEWPORT_BOUNDS_RANGE, bounds);
+        (void)caps->queryInteger(GL_MAX_VIEWPORT_DIMS, maxDims);
+    }
+    if (bounds[1] < bounds[0]) {
+        std::swap(bounds[0], bounds[1]);
+    }
+    const GLfloat maxWidth = maxDims[0] > 0 ? static_cast<GLfloat>(maxDims[0]) : 32768.0f;
+    const GLfloat maxHeight = maxDims[1] > 0 ? static_cast<GLfloat>(maxDims[1]) : 32768.0f;
+    x = std::clamp(x, bounds[0], bounds[1]);
+    y = std::clamp(y, bounds[0], bounds[1]);
+    w = std::clamp(w, 0.0f, maxWidth);
+    h = std::clamp(h, 0.0f, maxHeight);
+}
+
 #define APPGL_GLCONTEXT_STATE_VIEWPORT_ARRAY
 #include "GLContextState.inc.mm"
 #undef APPGL_GLCONTEXT_STATE_VIEWPORT_ARRAY

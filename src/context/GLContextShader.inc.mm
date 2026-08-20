@@ -262,6 +262,19 @@ static bool appglUniformTypeIsBool(GLenum type) {
     }
 }
 
+static bool validateUniformLocationCompat(
+    GLContext* context,
+    GLint location) {
+    if (location == -1) {
+        return true;
+    }
+    if (location < -1) {
+        context->pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    return true;
+}
+
 static void writeBoolUniformValues(GLProgramUniformValue& slot,
                                    GLContext::UniformElementType element,
                                    const void* values,
@@ -292,7 +305,10 @@ static void writeBoolUniformValues(GLProgramUniformValue& slot,
 }
 
 bool GLContext::setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
-    if (location < 0) {
+    if (!validateUniformLocationCompat(this, location)) {
+        return false;
+    }
+    if (location == -1) {
         return true;  // -1 silently no-ops per spec.
     }
     if (count < 0 || vectorSize < 1 || vectorSize > 4) {
@@ -393,7 +409,10 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
 }
 
 bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
-    if (location < 0) {
+    if (!validateUniformLocationCompat(this, location)) {
+        return false;
+    }
+    if (location == -1) {
         return true;
     }
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) {
@@ -527,7 +546,10 @@ static void writeDoubleUniformSlot(GLProgramUniformValue& slot,
 }
 
 bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
-    if (location < 0) {
+    if (!validateUniformLocationCompat(this, location)) {
+        return false;
+    }
+    if (location == -1) {
         return true;
     }
     if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) {
@@ -575,7 +597,10 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
 }
 
 bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
-    if (location < 0) {
+    if (!validateUniformLocationCompat(this, location)) {
+        return false;
+    }
+    if (location == -1) {
         return true;
     }
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) {
@@ -690,7 +715,8 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
     // cached location=-1 from an unlinked-program glGetUniformLocation.
     GLProgramObject* object = validateProgramUniformTarget(program);
     if (object == nullptr) return false;
-    if (location < 0) return true;
+    if (!validateUniformLocationCompat(this, location)) return false;
+    if (location == -1) return true;
     if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
@@ -753,7 +779,8 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
 bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
     GLProgramObject* object = validateProgramUniformTarget(program);
     if (object == nullptr) return false;
-    if (location < 0) return true;
+    if (!validateUniformLocationCompat(this, location)) return false;
+    if (location == -1) return true;
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     GLProgramUniformValue* slot = lookupUniformValue(object, location);
     if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
@@ -791,7 +818,8 @@ bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint
 bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
     GLProgramObject* object = validateProgramUniformTarget(program);
     if (object == nullptr) return false;
-    if (location < 0) return true;
+    if (!validateUniformLocationCompat(this, location)) return false;
+    if (location == -1) return true;
     if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
@@ -820,7 +848,8 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
 bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
     GLProgramObject* object = validateProgramUniformTarget(program);
     if (object == nullptr) return false;
-    if (location < 0) return true;
+    if (!validateUniformLocationCompat(this, location)) return false;
+    if (location == -1) return true;
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }

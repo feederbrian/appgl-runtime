@@ -26,6 +26,11 @@ GLint64 indexedBufferQueryLimit(const GLCapabilities* caps, GLenum target) {
     caps->queryInteger64(pname, &value);
     return value;
 }
+
+GLint roundIndexedFloatStateToInteger(GLfloat value) {
+    // GL Get integer conversion rounds floating-point state to nearest.
+    return static_cast<GLint>(std::floor(static_cast<GLdouble>(value) + 0.5));
+}
 }  // namespace
 
 bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
@@ -75,6 +80,7 @@ bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
             return true;
         }
     }
+    pushError(GL_INVALID_ENUM);
     return false;
 }
 
@@ -114,6 +120,7 @@ bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) 
             return true;
         }
     }
+    pushError(GL_INVALID_ENUM);
     return false;
 }
 
@@ -665,6 +672,12 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         *data = static_cast<GLint64>(integerValue);
         return true;
     }
+    if (pname == GL_TIMESTAMP) {
+        *data = static_cast<GLint64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        return true;
+    }
     if (pname == GL_SHADE_MODEL) {
         *data = static_cast<GLint64>(impl_->fixedFunctionShadeModel);
         return true;
@@ -826,12 +839,12 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
         }
         // GL 4.1+ per-viewport arrays. CTS
         // `viewport_array.scissor_api` / `viewport_api` query
-        // GL_VIEWPORT and GL_SCISSOR_BOX via glGetIntegeri_v — both
-        // are spec-legal. Route through the state tracker's float
-        // indexed query + cast. DEPTH_RANGE is float-only per
-        // Table 22.5, so stays handled by queryFloatIndexed.
+        // GL_VIEWPORT, GL_SCISSOR_BOX, and GL_DEPTH_RANGE via
+        // glGetIntegeri_v. Route through the state tracker's float
+        // indexed query and GL's float-to-integer query conversion.
         case GL_VIEWPORT:
-        case GL_SCISSOR_BOX: {
+        case GL_SCISSOR_BOX:
+        case GL_DEPTH_RANGE: {
             // GL 4.1 §13.6.1: index >= MAX_VIEWPORTS raises
             // INVALID_VALUE (not INVALID_ENUM).
             if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
@@ -843,10 +856,12 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
                 pushError(GL_INVALID_VALUE);
                 return false;
             }
-            data[0] = static_cast<GLint>(fdata[0]);
-            data[1] = static_cast<GLint>(fdata[1]);
-            data[2] = static_cast<GLint>(fdata[2]);
-            data[3] = static_cast<GLint>(fdata[3]);
+            data[0] = roundIndexedFloatStateToInteger(fdata[0]);
+            data[1] = roundIndexedFloatStateToInteger(fdata[1]);
+            if (pname != GL_DEPTH_RANGE) {
+                data[2] = roundIndexedFloatStateToInteger(fdata[2]);
+                data[3] = roundIndexedFloatStateToInteger(fdata[3]);
+            }
             return true;
         }
     }

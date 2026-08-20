@@ -3319,15 +3319,31 @@ static void APIENTRY glQueryCounter(GLuint id, GLenum target) {
     if (context == nullptr) {
         return;
     }
+    if (target != GL_TIMESTAMP) {
+        context->pushError(GL_INVALID_ENUM, "glQueryCounter", "target must be GL_TIMESTAMP");
+        return;
+    }
     auto* query = context->objects().queries().get(id);
     if (query == nullptr) {
         context->pushError(GL_INVALID_OPERATION, "glQueryCounter", "query id is not a valid query object");
         return;
     }
+    if (query->active) {
+        context->pushError(GL_INVALID_OPERATION, "glQueryCounter", "query object is active");
+        return;
+    }
+    if (query->boundTarget != 0 && query->boundTarget != target) {
+        context->pushError(GL_INVALID_OPERATION, "glQueryCounter",
+                           "query object was previously used with a different target");
+        return;
+    }
+    query->instantiated = true;
+    query->boundTarget = target;
     query->target = target;
     query->active = false;
-    // Deterministic synthetic counter so readback tests can assert a value.
-    query->result = 1;
+    query->result = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 constexpr FunctionId kGroup8CoverageIds[] = {

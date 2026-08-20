@@ -2048,22 +2048,51 @@ bool GLContext::blitNamedFramebuffer(GLuint readFB, GLuint drawFB,
 // §17.4.3.1. `value` is a 4-element vector for color clears and a scalar
 // for DEPTH / STENCIL. Validation errors (INVALID_ENUM / INVALID_VALUE)
 // are pushed via pushError; the return value is the accept-clear bool.
+namespace {
+constexpr std::size_t kAppGLDefaultFramebufferDrawBuffers = 8;
+
+bool validateClearDrawbuffer(GLContext* context,
+                             GLenum buffer,
+                             GLint drawbuffer,
+                             std::size_t colorSlotCount) {
+    if (buffer == GL_COLOR) {
+        if (drawbuffer < 0 ||
+            static_cast<std::size_t>(drawbuffer) >= colorSlotCount) {
+            context->pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        return true;
+    }
+    if (drawbuffer != 0) {
+        context->pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
 bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat* value) {
     DSA_FB_CHECK(framebuffer)
     if (value == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (buffer != GL_COLOR && buffer != GL_DEPTH) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
+    const std::size_t colorSlotCount =
+        fbo != nullptr ? fbo->drawBuffers.size() : kAppGLDefaultFramebufferDrawBuffers;
+    if (!validateClearDrawbuffer(this, buffer, drawbuffer, colorSlotCount)) {
+        return false;
+    }
     if (fbo == nullptr) {
         // DSA_FB_CHECK already handles non-existent FB. framebuffer==0 is
         // the default FB, which isn't currently backed as a GLFramebufferObject
         // in our store.
         if (framebuffer == 0 && buffer == GL_COLOR) {
-            if (drawbuffer != 0) {
-                pushError(GL_INVALID_VALUE);
-                return false;
-            }
+            if (drawbuffer != 0) return true;
             const GLClearState previousClear = impl_->state->clearState();
             impl_->state->setClearColor(value[0], value[1], value[2], value[3]);
             impl_->applyDefaultFramebufferColorClear();
@@ -2073,17 +2102,9 @@ bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint
                                         previousClear.color[3]);
             return true;
         }
-        if (framebuffer == 0 && buffer != GL_DEPTH) {
-            pushError(GL_INVALID_ENUM);
-            return false;
-        }
         return true;
     }
     if (buffer == GL_COLOR) {
-        if (drawbuffer < 0 || static_cast<std::size_t>(drawbuffer) >= fbo->drawBuffers.size()) {
-            pushError(GL_INVALID_VALUE);
-            return false;
-        }
         const GLenum attachmentEnum = fbo->drawBuffers[static_cast<std::size_t>(drawbuffer)];
         if (attachmentEnum == GL_NONE) {
             // No-op per spec (no error).
@@ -2100,10 +2121,6 @@ bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint
         return ok;
     }
     if (buffer == GL_DEPTH) {
-        if (drawbuffer != 0) {
-            pushError(GL_INVALID_VALUE);
-            return false;
-        }
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT);
         if (att == nullptr) return true;
         const bool ok = impl_->clearDepthAttachment(*att, value[0]);
@@ -2124,13 +2141,18 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (buffer != GL_COLOR && buffer != GL_STENCIL) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
+    const std::size_t colorSlotCount =
+        fbo != nullptr ? fbo->drawBuffers.size() : kAppGLDefaultFramebufferDrawBuffers;
+    if (!validateClearDrawbuffer(this, buffer, drawbuffer, colorSlotCount)) {
+        return false;
+    }
     if (fbo == nullptr) return true;
     if (buffer == GL_COLOR) {
-        if (drawbuffer < 0 || static_cast<std::size_t>(drawbuffer) >= fbo->drawBuffers.size()) {
-            pushError(GL_INVALID_VALUE);
-            return false;
-        }
         const GLenum attachmentEnum = fbo->drawBuffers[static_cast<std::size_t>(drawbuffer)];
         if (attachmentEnum == GL_NONE) return true;
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
@@ -2163,10 +2185,6 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
         return ok;
     }
     if (buffer == GL_STENCIL) {
-        if (drawbuffer != 0) {
-            pushError(GL_INVALID_VALUE);
-            return false;
-        }
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT);
         if (att == nullptr) return true;
         const bool ok = impl_->clearStencilAttachment(*att, value[0]);
@@ -2192,11 +2210,12 @@ bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLin
         return false;
     }
     GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
-    if (fbo == nullptr) return true;
-    if (drawbuffer < 0 || static_cast<std::size_t>(drawbuffer) >= fbo->drawBuffers.size()) {
-        pushError(GL_INVALID_VALUE);
+    const std::size_t colorSlotCount =
+        fbo != nullptr ? fbo->drawBuffers.size() : kAppGLDefaultFramebufferDrawBuffers;
+    if (!validateClearDrawbuffer(this, buffer, drawbuffer, colorSlotCount)) {
         return false;
     }
+    if (fbo == nullptr) return true;
     const GLenum attachmentEnum = fbo->drawBuffers[static_cast<std::size_t>(drawbuffer)];
     if (attachmentEnum == GL_NONE) return true;
     GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
