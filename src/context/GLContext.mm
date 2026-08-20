@@ -30627,7 +30627,12 @@ struct GLContext::Impl {
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
                 return false;
             }
+            const bool fullCoverage =
+                x == 0 && y == 0 &&
+                width == renderbuffer->width &&
+                height == renderbuffer->height;
             if (renderbuffer->stencil8.empty() &&
+                !fullCoverage &&
                 mirrorStencilRenderbufferRegionToMetal(
                     *renderbuffer, x, y, width, height, pixels)) {
                 renderbuffer->wasMetalStencilRendered = true;
@@ -30651,7 +30656,8 @@ struct GLContext::Impl {
             const bool mirroredStencil =
                 mirrorStencilRenderbufferRegionToMetal(*renderbuffer, x, y,
                                                        width, height, pixels);
-            renderbuffer->wasMetalStencilRendered = mirroredStencil;
+            renderbuffer->wasMetalStencilRendered =
+                fullCoverage ? false : mirroredStencil;
             return true;
         }
         return false;
