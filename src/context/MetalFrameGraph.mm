@@ -6931,10 +6931,13 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(immediateModeTextured1DMRT2FragmentFn);
         releaseOwnedObjCObject(immediateModeTextured3DFragmentFn);
         releaseOwnedObjCObject(immediateModeTextured3DMRT2FragmentFn);
+        releaseOwnedObjCObject(immediateModeTexturedCubeFragmentFn);
+        releaseOwnedObjCObject(immediateModeTexturedCubeMRT2FragmentFn);
         releaseOwnedObjCObject(immediateModeColorPipelineState);
         releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured3DPipelineState);
+        releaseOwnedObjCObject(immediateModeTexturedCubePipelineState);
         releaseOwnedObjCObject(immediateModeSamplerState);
         releaseOwnedObjCObject(depthStencilUploadLibrary);
         releaseOwnedObjCObject(depthStencilUploadVertexFn);
@@ -19609,6 +19612,32 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
     appgl_immediate_alpha_test(color.a, textureState);
     return appgl_immediate_mrt2_color(color);
 }
+
+fragment float4 appgl_immediate_textured_cube_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texturecube<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    const float3 coord = appgl_immediate_projected_str(in.texcoord);
+    const float4 sample = tex.sample(samp, coord);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return color;
+}
+
+fragment AppGLImmediateMRT2Out appgl_immediate_textured_cube_mrt2_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texturecube<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    const float3 coord = appgl_immediate_projected_str(in.texcoord);
+    const float4 sample = tex.sample(samp, coord);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return appgl_immediate_mrt2_color(color);
+}
 )MSL";
         NSError* error = nil;
         immediateModeLibrary = [device newLibraryWithSource:source options:nil error:&error];
@@ -19625,6 +19654,8 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
         immediateModeTextured1DMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_1d_mrt2_fs"];
         immediateModeTextured3DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_3d_fs"];
         immediateModeTextured3DMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_3d_mrt2_fs"];
+        immediateModeTexturedCubeFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_cube_fs"];
+        immediateModeTexturedCubeMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_cube_mrt2_fs"];
         return immediateModeVertexFn != nil
             && immediateModeColorFragmentFn != nil
             && immediateModeColorMRT2FragmentFn != nil
@@ -19633,7 +19664,9 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
             && immediateModeTextured1DFragmentFn != nil
             && immediateModeTextured1DMRT2FragmentFn != nil
             && immediateModeTextured3DFragmentFn != nil
-            && immediateModeTextured3DMRT2FragmentFn != nil;
+            && immediateModeTextured3DMRT2FragmentFn != nil
+            && immediateModeTexturedCubeFragmentFn != nil
+            && immediateModeTexturedCubeMRT2FragmentFn != nil;
     }
 
     static std::uint64_t computeImmediateModePipelineKey(
@@ -19699,6 +19732,7 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
             && immediateModeTextured2DPipelineState != nil
             && immediateModeTextured1DPipelineState != nil
             && immediateModeTextured3DPipelineState != nil
+            && immediateModeTexturedCubePipelineState != nil
             && immediateModePipelineKey == pipelineKey) {
             return true;
         }
@@ -19759,22 +19793,28 @@ fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
             useMRT2 ? immediateModeTextured1DMRT2FragmentFn : immediateModeTextured1DFragmentFn);
         id<MTLRenderPipelineState> textured3DState = makePipeline(
             useMRT2 ? immediateModeTextured3DMRT2FragmentFn : immediateModeTextured3DFragmentFn);
+        id<MTLRenderPipelineState> texturedCubeState = makePipeline(
+            useMRT2 ? immediateModeTexturedCubeMRT2FragmentFn : immediateModeTexturedCubeFragmentFn);
         if (colorState == nil || textured2DState == nil ||
-            textured1DState == nil || textured3DState == nil) {
+            textured1DState == nil || textured3DState == nil ||
+            texturedCubeState == nil) {
             releaseOwnedObjCObject(colorState);
             releaseOwnedObjCObject(textured2DState);
             releaseOwnedObjCObject(textured1DState);
             releaseOwnedObjCObject(textured3DState);
+            releaseOwnedObjCObject(texturedCubeState);
             return false;
         }
         releaseOwnedObjCObject(immediateModeColorPipelineState);
         releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured3DPipelineState);
+        releaseOwnedObjCObject(immediateModeTexturedCubePipelineState);
         immediateModeColorPipelineState = colorState;
         immediateModeTextured2DPipelineState = textured2DState;
         immediateModeTextured1DPipelineState = textured1DState;
         immediateModeTextured3DPipelineState = textured3DState;
+        immediateModeTexturedCubePipelineState = texturedCubeState;
         immediateModePipelineKey = pipelineKey;
         return true;
     }
@@ -21267,19 +21307,25 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             immediateTexture != nil && immediateTexture.textureType == MTLTextureType1D;
         const bool immediateTextureIsNative3D =
             immediateTexture != nil && immediateTexture.textureType == MTLTextureType3D;
+        const bool immediateTextureIsNativeCube =
+            immediateTexture != nil && immediateTexture.textureType == MTLTextureTypeCube;
         const bool immediateTexture1Usable =
             immediateTexture != nil &&
             immediateTexture1 != nil &&
             !immediateTextureIsNative1D &&
             !immediateTextureIsNative3D &&
+            !immediateTextureIsNativeCube &&
             immediateTexture1.textureType != MTLTextureType1D &&
-            immediateTexture1.textureType != MTLTextureType3D;
+            immediateTexture1.textureType != MTLTextureType3D &&
+            immediateTexture1.textureType != MTLTextureTypeCube;
         id<MTLRenderPipelineState> pipelineState = immediateTexture != nil
-            ? (immediateTextureIsNative3D
+            ? (immediateTextureIsNativeCube
+                ? immediateModeTexturedCubePipelineState
+                : (immediateTextureIsNative3D
                 ? immediateModeTextured3DPipelineState
                 : (immediateTextureIsNative1D
                 ? immediateModeTextured1DPipelineState
-                : immediateModeTextured2DPipelineState))
+                : immediateModeTextured2DPipelineState)))
             : immediateModeColorPipelineState;
         if (pipelineState == nil) {
             return false;
@@ -21465,9 +21511,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
                 : (info.textureTarget == GL_TEXTURE_3D
                     ? static_cast<std::uint32_t>(GL_TEXTURE_3D)
-                    : (info.textureTarget == GL_TEXTURE_RECTANGLE
-                        ? static_cast<std::uint32_t>(GL_TEXTURE_RECTANGLE)
-                        : 0u)),
+                    : (info.textureTarget == GL_TEXTURE_CUBE_MAP
+                        ? static_cast<std::uint32_t>(GL_TEXTURE_CUBE_MAP)
+                        : (info.textureTarget == GL_TEXTURE_RECTANGLE
+                            ? static_cast<std::uint32_t>(GL_TEXTURE_RECTANGLE)
+                            : 0u))),
             static_cast<std::uint32_t>(info.textureWrapS),
             static_cast<std::uint32_t>(info.textureWrapT),
             static_cast<std::uint32_t>(info.textureMinFilter),
@@ -21538,9 +21586,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
                 : (info.textureTarget1 == GL_TEXTURE_3D
                     ? static_cast<std::uint32_t>(GL_TEXTURE_3D)
-                    : (info.textureTarget1 == GL_TEXTURE_RECTANGLE
-                        ? static_cast<std::uint32_t>(GL_TEXTURE_RECTANGLE)
-                        : 0u)),
+                    : (info.textureTarget1 == GL_TEXTURE_CUBE_MAP
+                        ? static_cast<std::uint32_t>(GL_TEXTURE_CUBE_MAP)
+                        : (info.textureTarget1 == GL_TEXTURE_RECTANGLE
+                            ? static_cast<std::uint32_t>(GL_TEXTURE_RECTANGLE)
+                            : 0u))),
             info.textureSampleYFlip1 ? 1u : 0u,
             info.textureBaseClass1,
             info.textureSampleIsDepth1 ? 1u : 0u,
@@ -27054,10 +27104,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         addFunction(immediateModeTextured1DMRT2FragmentFn);
         addFunction(immediateModeTextured3DFragmentFn);
         addFunction(immediateModeTextured3DMRT2FragmentFn);
+        addFunction(immediateModeTexturedCubeFragmentFn);
+        addFunction(immediateModeTexturedCubeMRT2FragmentFn);
         addRenderPipeline(immediateModeColorPipelineState);
         addRenderPipeline(immediateModeTextured2DPipelineState);
         addRenderPipeline(immediateModeTextured1DPipelineState);
         addRenderPipeline(immediateModeTextured3DPipelineState);
+        addRenderPipeline(immediateModeTexturedCubePipelineState);
         addSampler(immediateModeSamplerState);
         addLibrary(depthStencilUploadLibrary);
         addFunction(depthStencilUploadVertexFn);
@@ -27449,10 +27502,13 @@ private:
     id<MTLFunction> immediateModeTextured1DMRT2FragmentFn = nil;
     id<MTLFunction> immediateModeTextured3DFragmentFn = nil;
     id<MTLFunction> immediateModeTextured3DMRT2FragmentFn = nil;
+    id<MTLFunction> immediateModeTexturedCubeFragmentFn = nil;
+    id<MTLFunction> immediateModeTexturedCubeMRT2FragmentFn = nil;
     id<MTLRenderPipelineState> immediateModeColorPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured2DPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured1DPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured3DPipelineState = nil;
+    id<MTLRenderPipelineState> immediateModeTexturedCubePipelineState = nil;
     std::uint64_t immediateModePipelineKey = 0;
     id<MTLSamplerState> immediateModeSamplerState = nil;
     id<MTLLibrary> depthStencilUploadLibrary = nil;

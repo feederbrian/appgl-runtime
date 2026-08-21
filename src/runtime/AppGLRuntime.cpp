@@ -503,6 +503,7 @@ bool isValidEnableCap(GLenum cap) {
         case GL_TEXTURE_1D:
         case GL_TEXTURE_2D:
         case GL_TEXTURE_3D:
+        case GL_TEXTURE_CUBE_MAP:
         // ARB_texture_rectangle adds GL_TEXTURE_RECTANGLE as a fixed-function
         // enable target alongside the others. Without it glEnable() rejected
         // the cap outright, so it never reached enabledCaps_, isEnabled() was

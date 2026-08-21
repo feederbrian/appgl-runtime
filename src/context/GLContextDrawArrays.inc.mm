@@ -1713,17 +1713,34 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 programUsesCompatVertexInput(program);
             bool programWantsLegacyColor = false;
             bool programWantsLegacySecondaryColor = false;
-            bool programWantsLegacyTexCoord0 = false;
+            const ShaderReflection::VertexInput* legacyTexCoordLoc1Input = nullptr;
+            const bool programHasSyntheticCompatTexCoord =
+                program->vertexMSL.find("piglit_texcoord") != std::string::npos ||
+                program->vertexMSL.find("_piglit_texcoord") != std::string::npos;
+            bool programWantsLegacyTexCoord0Loc8 = false;
             for (const auto& input : program->vertexReflection.vertexInputs) {
                 if (input.location == 3 &&
                     (input.name == "appgl_Color" ||
                      input.name == "_appgl_Color")) {
                     programWantsLegacyColor = true;
                 }
+                const bool genericAttributeSuppliesInput =
+                    vao != nullptr &&
+                    input.sourceLocation < vao->attributes.size() &&
+                    vao->attributes[input.sourceLocation].enabled;
+                const bool inputIsSyntheticCompatTexCoord =
+                    input.name == "piglit_texcoord" ||
+                    input.name == "_piglit_texcoord" ||
+                    programHasSyntheticCompatTexCoord;
+                if ((input.location == 1 || input.sourceLocation == 1) &&
+                    !genericAttributeSuppliesInput &&
+                    inputIsSyntheticCompatTexCoord) {
+                    legacyTexCoordLoc1Input = &input;
+                }
                 if (input.location == 8 &&
                     (input.name == "appgl_MultiTexCoord0" ||
                      input.name == "_appgl_MultiTexCoord0")) {
-                    programWantsLegacyTexCoord0 = true;
+                    programWantsLegacyTexCoord0Loc8 = true;
                 }
                 if ((input.location == 4 || input.sourceLocation == 4) &&
                     (input.name == "appgl_SecondaryColor" ||
@@ -1809,7 +1826,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             const bool needsLegacyColorInput = programWantsLegacyColor;
             const bool needsLegacySecondaryColorInput =
                 programWantsLegacySecondaryColor;
-            const bool needsLegacyTexCoord0Input = programWantsLegacyTexCoord0;
+            const bool needsLegacyTexCoord0Input =
+                legacyTexCoordLoc1Input != nullptr ||
+                programWantsLegacyTexCoord0Loc8;
             if (needsLegacyColorInput && legacyColorArray.enabled &&
                 !colorArrayUsable) {
                 pushError(GL_INVALID_OPERATION);
@@ -2009,7 +2028,19 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         tdi, 4,
                         offsetof(LegacyTranslatedVertex, secondaryColor), 4);
                 }
-                if (programWantsLegacyTexCoord0) {
+                if (legacyTexCoordLoc1Input != nullptr) {
+                    const GLint texcoordComponents =
+                        std::max<GLint>(
+                            1,
+                            std::min<GLint>(
+                                4,
+                                shaderVertexInputComponentCount(
+                                    legacyTexCoordLoc1Input->type)));
+                    addFloatLayout(tdi, 1,
+                                   offsetof(LegacyTranslatedVertex, texcoord),
+                                   texcoordComponents);
+                }
+                if (programWantsLegacyTexCoord0Loc8) {
                     addFloatLayout(tdi, 8,
                                    offsetof(LegacyTranslatedVertex, texcoord),
                                    4);

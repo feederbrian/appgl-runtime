@@ -881,7 +881,7 @@ struct TranslatedDrawInfo {
 // `mvp` is the projection * modelview matrix snapshot at glEnd time;
 // it's pushed as a vertex-stage constant because no shader program is
 // active on this path. `metalTexture` is the id<MTLTexture> bound to the
-// fixed-function unit-0 target (1D/2D/3D/rectangle, resolved by the caller),
+// fixed-function unit-0 target (1D/2D/3D/rectangle/cube, resolved by the caller),
 // or nullptr if no texture is bound; `metalTexture1` optionally carries the
 // GL 1.3 floor unit-1 2D/rectangle texture. The sampler fields carry the
 // matching fixed-function texture parameters when available. The frame graph

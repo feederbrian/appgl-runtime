@@ -894,24 +894,9 @@ static void APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, 
 static void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
     auto* ctx = currentContextOrNull();
     if (ctx == nullptr) return;
-    if (target != GL_TEXTURE_3D &&
-        target != GL_TEXTURE_2D_ARRAY &&
-        target != GL_TEXTURE_CUBE_MAP_ARRAY) {
-        ctx->pushError(GL_INVALID_ENUM);
-        return;
-    }
-    const GLuint texture = ctx->state().boundTexture(target);
-    if (!ctx->validateCopyTextureSubImage(texture, 3, level,
-                                          xoffset, yoffset, zoffset,
-                                          width, height)) {
-        return;
-    }
-    if (!ctx->blitReadFBOToTextureSubImage(texture, level,
-                                           xoffset, yoffset, zoffset,
-                                           x, y, width, height,
-                                           0)) {
-        warnDataDroppedOnce("glCopyTexSubImage3D");
-    }
+    (void)ctx->copyTexSubImage3D(target, level,
+                                 xoffset, yoffset, zoffset,
+                                 x, y, width, height);
 }
 
 static void APIENTRY glSampleCoverage(GLfloat value, GLboolean invert) {

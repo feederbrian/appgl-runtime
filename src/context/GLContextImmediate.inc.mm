@@ -133,12 +133,35 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_RG16F:
         case GL_RG32F:
         case GL_RGB:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB8:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGB16:
+        case GL_RGB565:
+        case GL_RGB8_SNORM:
+        case GL_RGB16_SNORM:
         case GL_RGB16F:
         case GL_RGB32F:
+        case GL_SRGB:
+        case GL_SRGB8:
             return kAppGLImmediateTextureBaseRGB;
         case GL_RGBA:
+        case GL_RGBA2:
+        case GL_RGBA4:
+        case GL_RGB5_A1:
+        case GL_RGBA8:
+        case GL_RGB10_A2:
+        case GL_RGBA12:
+        case GL_RGBA16:
+        case GL_RGBA8_SNORM:
+        case GL_RGBA16_SNORM:
         case GL_RGBA16F:
         case GL_RGBA32F:
+        case GL_SRGB_ALPHA:
+        case GL_SRGB8_ALPHA8:
             return kAppGLImmediateTextureBaseRGBA;
         default:
             return 0u;
@@ -6835,12 +6858,9 @@ void GLContext::endImmediate() {
                                            std::size_t sampleVertexCount,
                                            const Matrix4& sampleMvp) -> void* {
         // GL 2.1 section 3.8.15 precedence when several targets are enabled on a
-        // unit: CUBE_MAP > 3D > RECTANGLE > 2D > 1D. RECTANGLE was absent, so an
-        // enabled rectangle texture resolved to nothing and the primitive drew
-        // untextured in the current vertex colour.
-        // (CUBE_MAP is also absent here; no measured failure attributes to it, so
-        // it is deliberately left alone rather than added from reading.)
-        for (GLenum target : {GL_TEXTURE_3D, GL_TEXTURE_RECTANGLE, GL_TEXTURE_2D,
+        // unit: CUBE_MAP > 3D > RECTANGLE > 2D > 1D.
+        for (GLenum target : {GL_TEXTURE_CUBE_MAP, GL_TEXTURE_3D,
+                              GL_TEXTURE_RECTANGLE, GL_TEXTURE_2D,
                               GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
                 continue;
@@ -8398,12 +8418,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                                            std::size_t sampleVertexCount,
                                            const Matrix4& sampleMvp) -> void* {
         // GL 2.1 section 3.8.15 precedence when several targets are enabled on a
-        // unit: CUBE_MAP > 3D > RECTANGLE > 2D > 1D. RECTANGLE was absent, so an
-        // enabled rectangle texture resolved to nothing and the primitive drew
-        // untextured in the current vertex colour.
-        // (CUBE_MAP is also absent here; no measured failure attributes to it, so
-        // it is deliberately left alone rather than added from reading.)
-        for (GLenum target : {GL_TEXTURE_3D, GL_TEXTURE_RECTANGLE, GL_TEXTURE_2D,
+        // unit: CUBE_MAP > 3D > RECTANGLE > 2D > 1D.
+        for (GLenum target : {GL_TEXTURE_CUBE_MAP, GL_TEXTURE_3D,
+                              GL_TEXTURE_RECTANGLE, GL_TEXTURE_2D,
                               GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
                 continue;
