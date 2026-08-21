@@ -1817,15 +1817,6 @@ bool GLContext::copyTexSubImage3D(
         return false;
     }
 
-    const GLuint readFboName = impl_->state->boundReadFramebuffer();
-    if (readFboName != 0 &&
-        blitReadFBOToTextureSubImage(texture, level,
-                                     xoffset, yoffset, zoffset,
-                                     x, y, width, height,
-                                     0)) {
-        return true;
-    }
-
     GLTextureObject* dstObject = impl_->objects->textures().get(texture);
     if (dstObject == nullptr && texture == 0 && boundFallback != nullptr) {
         dstObject = boundFallback;
@@ -1844,6 +1835,64 @@ bool GLContext::copyTexSubImage3D(
         dstInternalFormat == GL_DEPTH32F_STENCIL8;
     const bool dstDepthOnly =
         !dstDepthStencil && isDepthFormat(dstInternalFormat);
+    const bool dstInteger =
+        Impl::isIntegerInternalFormat(dstInternalFormat);
+    const GLuint readFboName = impl_->state->boundReadFramebuffer();
+    GLenum readSourceInternalFormat = 0;
+    bool readSourceInteger = false;
+    bool readSourceResolved = false;
+    if (readFboName != 0) {
+        const GLFramebufferObject* readFbo =
+            impl_->objects->framebuffers().get(readFboName);
+        if (readFbo != nullptr) {
+            const GLFramebufferAttachment* attachment =
+                impl_->framebufferAttachment(*readFbo, readFbo->readBuffer);
+            if (attachment != nullptr) {
+                if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                    if (const GLTextureObject* sourceTexture =
+                            impl_->objects->textures().get(attachment->object)) {
+                        const GLint attachmentLevel =
+                            std::max<GLint>(attachment->level, 0);
+                        const auto sourceLevelIt =
+                            sourceTexture->levels.find(attachmentLevel);
+                        readSourceInternalFormat =
+                            (sourceLevelIt != sourceTexture->levels.end() &&
+                             sourceLevelIt->second.defined)
+                                ? sourceLevelIt->second.desc.internalFormat
+                                : sourceTexture->desc.internalFormat;
+                    }
+                } else if (attachment->kind ==
+                           GLFramebufferAttachment::Kind::Renderbuffer) {
+                    if (const GLRenderbufferObject* sourceRenderbuffer =
+                            impl_->objects->renderbuffers().get(attachment->object)) {
+                        readSourceInternalFormat =
+                            sourceRenderbuffer->internalFormat;
+                    }
+                }
+                readSourceInteger =
+                    Impl::isIntegerInternalFormat(readSourceInternalFormat);
+                readSourceResolved = readSourceInternalFormat != 0;
+            }
+        }
+    }
+    if (dstInteger) {
+        if (!readSourceResolved || !readSourceInteger ||
+            readSourceInternalFormat != dstInternalFormat) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    } else if (readSourceResolved && readSourceInteger &&
+               !dstDepthOnly && !dstDepthStencil) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (readFboName != 0 && !dstDepthOnly && !dstDepthStencil &&
+        blitReadFBOToTextureSubImage(texture, level,
+                                     xoffset, yoffset, zoffset,
+                                     x, y, width, height,
+                                     0)) {
+        return true;
+    }
     if (dstDepthOnly) {
         if (readFboName == 0 && appglCompatProfileEnabled()) {
             impl_->ensureDefaultFramebufferDepthStencilShadowAtLeast(
