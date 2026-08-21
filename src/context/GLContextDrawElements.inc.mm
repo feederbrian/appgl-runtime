@@ -1283,7 +1283,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         *impl_->objects,
         mode,
         "glDrawElements",
-        GL_SHADING_RATE_1X1_PIXELS_EXT
+        GL_SHADING_RATE_1X1_PIXELS_EXT,
+        impl_->immediate.currentColor
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -1302,6 +1303,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     setup.info.indices = drawElementsIndexPtr;
     setup.info.indexCount = drawElementsCount;
     setup.info.indexType = drawElementsIndexType;
+    populateSolidColorFboTarget(*impl_, setup.info);
 
     const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
     if (ok) {

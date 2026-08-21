@@ -114,6 +114,19 @@ struct MetalDrawInfo {
     GLenum stencilBackDepthFail = GL_KEEP;
     GLenum stencilBackDepthPass = GL_KEEP;
     GLuint stencilBackWriteMask = 0xFFFFFFFFu;
+    // User-FBO target resolved by the GL draw entry point. nullptr means the
+    // solid fallback renders to the default framebuffer.
+    void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
+    void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
+    void* fboStencilTexture = nullptr;      // separate stencil image
+    std::uint32_t fboStencilSlice = 0;
+    std::uint32_t fboStencilLevel = 0;
+    std::uint32_t fboColorSlice = 0;
+    std::uint32_t fboColorLevel = 0;
+    std::uint32_t fboDepthStencilSlice = 0;
+    std::uint32_t fboDepthStencilLevel = 0;
+    GLsizei fboWidth = 0;
+    GLsizei fboHeight = 0;
     // Diagnostic string that identifies the caller for error messages.
     std::string debugLabel;
 };

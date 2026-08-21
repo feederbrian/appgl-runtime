@@ -659,7 +659,8 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         *impl_->objects,
         mode,
         "glDrawElementsBaseVertex",
-        GL_SHADING_RATE_1X1_PIXELS_EXT
+        GL_SHADING_RATE_1X1_PIXELS_EXT,
+        impl_->immediate.currentColor
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -677,6 +678,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     setup.info.indices = effectivePtr;
     setup.info.indexCount = count;
     setup.info.indexType = effectiveType;
+    populateSolidColorFboTarget(*impl_, setup.info);
 
     const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
     if (solidOk) {
@@ -1626,7 +1628,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
         *impl_->objects,
         mode,
         "glDrawElementsInstancedBaseVertex",
-        GL_SHADING_RATE_1X1_PIXELS_EXT
+        GL_SHADING_RATE_1X1_PIXELS_EXT,
+        impl_->immediate.currentColor
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -1644,6 +1647,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     setup.info.indices = effectivePtr;
     setup.info.indexCount = count;
     setup.info.indexType = effectiveType;
+    populateSolidColorFboTarget(*impl_, setup.info);
 
     const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
     if (solidOk) {

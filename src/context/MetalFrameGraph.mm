@@ -5411,6 +5411,14 @@ static bool parseMslColorOutputField(const std::string& text,
     return true;
 }
 
+static int mslIntegerVectorComponentCount(const std::string& type) {
+    if (type == "int" || type == "uint") return 1;
+    if (type == "int2" || type == "uint2") return 2;
+    if (type == "int3" || type == "uint3") return 3;
+    if (type == "int4" || type == "uint4") return 4;
+    return 0;
+}
+
 static const char* integerVectorTypeForTarget(const std::string& currentType,
                                               MTLPixelFormat targetFormat) {
     const bool wantsUnsigned = isUnsignedIntegerColorFormat(targetFormat);
@@ -5418,23 +5426,68 @@ static const char* integerVectorTypeForTarget(const std::string& currentType,
     if (!wantsUnsigned && !wantsSigned) {
         return nullptr;
     }
-    if (wantsUnsigned) {
-        if (currentType == "int") return "uint";
-        if (currentType == "int2") return "uint2";
-        if (currentType == "int3") return "uint3";
-        if (currentType == "int4") return "uint4";
-    } else {
-        if (currentType == "uint") return "int";
-        if (currentType == "uint2") return "int2";
-        if (currentType == "uint3") return "int3";
-        if (currentType == "uint4") return "int4";
+    auto componentCount = [](MTLPixelFormat fmt) -> int {
+        switch (fmt) {
+            case MTLPixelFormatR8Sint:
+            case MTLPixelFormatR8Uint:
+            case MTLPixelFormatR16Sint:
+            case MTLPixelFormatR16Uint:
+            case MTLPixelFormatR32Sint:
+            case MTLPixelFormatR32Uint:
+                return 1;
+            case MTLPixelFormatRG8Sint:
+            case MTLPixelFormatRG8Uint:
+            case MTLPixelFormatRG16Sint:
+            case MTLPixelFormatRG16Uint:
+            case MTLPixelFormatRG32Sint:
+            case MTLPixelFormatRG32Uint:
+                return 2;
+            case MTLPixelFormatRGBA8Sint:
+            case MTLPixelFormatRGBA8Uint:
+            case MTLPixelFormatRGBA16Sint:
+            case MTLPixelFormatRGBA16Uint:
+            case MTLPixelFormatRGBA32Sint:
+            case MTLPixelFormatRGBA32Uint:
+            case MTLPixelFormatRGB10A2Uint:
+                return 4;
+            default:
+                return 0;
+        }
+    };
+    static const char* kSignedTypes[] = {"", "int", "int2", "int3", "int4"};
+    static const char* kUnsignedTypes[] =
+        {"", "uint", "uint2", "uint3", "uint4"};
+    const int targetComponents = componentCount(targetFormat);
+    const int currentComponents =
+        mslIntegerVectorComponentCount(currentType);
+    if (targetComponents > 0 && targetComponents < 5 &&
+        currentComponents > 0 && currentComponents < 5) {
+        const int components = currentComponents < targetComponents
+            ? currentComponents
+            : targetComponents;
+        const char* targetType =
+            wantsUnsigned ? kUnsignedTypes[components]
+                          : kSignedTypes[components];
+        if (targetType[0] != '\0' && currentType != targetType) {
+            return targetType;
+        }
     }
     return nullptr;
 }
 
+static const char* mslIntegerVectorSwizzle(int components) {
+    switch (components) {
+        case 1: return "x";
+        case 2: return "xy";
+        case 3: return "xyz";
+        default: return "";
+    }
+}
+
 static bool wrapMslOutputAssignments(std::string& msl,
                                      const std::string& outputName,
-                                     const std::string& constructorName) {
+                                     const std::string& constructorName,
+                                     const std::string& sourceSwizzle = {}) {
     bool changed = false;
     const std::string needle = "out." + outputName + " =";
     std::size_t pos = 0;
@@ -5456,8 +5509,11 @@ static bool wrapMslOutputAssignments(std::string& msl,
             continue;
         }
         const std::string expr = msl.substr(exprBegin, semi - exprBegin);
+        const std::string convertedExpr = !sourceSwizzle.empty()
+            ? "((" + expr + ")." + sourceSwizzle + ")"
+            : expr;
         const std::string replacement =
-            constructorName + "(" + expr + ")";
+            constructorName + "(" + convertedExpr + ")";
         msl.replace(exprBegin, semi - exprBegin, replacement);
         pos = exprBegin + replacement.size();
         changed = true;
@@ -5482,6 +5538,7 @@ static bool rewriteFragmentMSLForColorOutputABI(
     struct OutputCast {
         std::string name;
         std::string constructorName;
+        std::string sourceSwizzle;
     };
     std::vector<OutputCast> outputCasts;
     bool hasFragColorBuiltinOutput = false;
@@ -5534,6 +5591,7 @@ static bool rewriteFragmentMSLForColorOutputABI(
             const char* targetType =
                 integerVectorTypeForTarget(fieldType, colorFormats[loc]);
             if (targetType != nullptr) {
+                const std::string originalType = fieldType;
                 const std::string replacement = targetType;
                 msl.replace(typeBegin, typeEnd - typeBegin, replacement);
                 const std::ptrdiff_t delta =
@@ -5543,7 +5601,21 @@ static bool rewriteFragmentMSLForColorOutputABI(
                     static_cast<std::ptrdiff_t>(semi) + delta);
                 bodyEnd = static_cast<std::size_t>(
                     static_cast<std::ptrdiff_t>(bodyEnd) + delta);
-                outputCasts.push_back({fieldName, replacement});
+                const int originalComponents =
+                    mslIntegerVectorComponentCount(originalType);
+                const int replacementComponents =
+                    mslIntegerVectorComponentCount(replacement);
+                std::string sourceSwizzle;
+                if (originalComponents > replacementComponents &&
+                    replacementComponents > 0) {
+                    sourceSwizzle =
+                        mslIntegerVectorSwizzle(replacementComponents);
+                }
+                outputCasts.push_back({
+                    fieldName,
+                    replacement,
+                    sourceSwizzle
+                });
                 fieldType = replacement;
                 changed = true;
             }
@@ -5567,7 +5639,10 @@ static bool rewriteFragmentMSLForColorOutputABI(
 
     for (const auto& cast : outputCasts) {
         changed |= wrapMslOutputAssignments(
-            msl, cast.name, cast.constructorName);
+            msl,
+            cast.name,
+            cast.constructorName,
+            cast.sourceSwizzle);
     }
 
     if (hasFragColorBuiltinOutput &&
@@ -7943,7 +8018,13 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
-        ensureDrawableResources();
+        const bool isFBODraw =
+            info.fboColorTexture != nullptr ||
+            info.fboDepthStencilTexture != nullptr ||
+            info.fboStencilTexture != nullptr;
+        if (!isFBODraw) {
+            ensureDrawableResources();
+        }
         if (!ensureSolidColorLibrary()) {
             return false;
         }
@@ -7962,49 +8043,122 @@ struct MetalFrameGraph::Impl {
             }
         }
 
-        if (!acquireDrawableIfNeeded()) {  // ADV-7
+        if (!isFBODraw && !acquireDrawableIfNeeded()) {  // ADV-7
             FG_TRACE(@"encodeSolidColorDraw: nextDrawable returned nil!");
             return false;
         }
 
-        id<MTLTexture> colorTexture = defaultColorRenderTargetTexture();
+        id<MTLTexture> colorTexture = isFBODraw
+            ? (info.fboColorTexture != nullptr
+                ? (__bridge id<MTLTexture>)info.fboColorTexture
+                : nil)
+            : defaultColorRenderTargetTexture();
         if (colorTexture == nil) {
             return false;
+        }
+        id<MTLTexture> passDepthStencil = isFBODraw
+            ? (info.fboDepthStencilTexture != nullptr
+                ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture
+                : nil)
+            : defaultDepthStencilRenderTargetTexture();
+        id<MTLTexture> passStencilSeparate =
+            (isFBODraw && info.fboStencilTexture != nullptr)
+                ? (__bridge id<MTLTexture>)info.fboStencilTexture
+                : nil;
+        MTLPixelFormat depthFormat = MTLPixelFormatInvalid;
+        MTLPixelFormat stencilFormat = MTLPixelFormatInvalid;
+        if (passDepthStencil != nil) {
+            const MTLPixelFormat pf = passDepthStencil.pixelFormat;
+            if (pf == MTLPixelFormatDepth16Unorm ||
+                pf == MTLPixelFormatDepth32Float ||
+                pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                pf == MTLPixelFormatDepth32Float_Stencil8) {
+                depthFormat = pf;
+            }
+            if (passStencilSeparate == nil &&
+                (pf == MTLPixelFormatStencil8 ||
+                 pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                 pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                 pf == MTLPixelFormatX24_Stencil8 ||
+                 pf == MTLPixelFormatX32_Stencil8)) {
+                stencilFormat = pf;
+            }
+        }
+        if (passStencilSeparate != nil) {
+            stencilFormat = passStencilSeparate.pixelFormat;
         }
 
         // Merge any pending clear into this render pass's load action (OPT-4).
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
-        pass.colorAttachments[0].level = 0;
-        pass.colorAttachments[0].slice = 0;
-        pass.colorAttachments[0].depthPlane = 0;
+        pass.colorAttachments[0].level = isFBODraw
+            ? static_cast<NSUInteger>(info.fboColorLevel)
+            : 0;
+        const NSUInteger fboColorSlice = isFBODraw
+            ? static_cast<NSUInteger>(info.fboColorSlice)
+            : 0;
+        if (isFBODraw && colorTexture.textureType == MTLTextureType3D) {
+            pass.colorAttachments[0].slice = 0;
+            pass.colorAttachments[0].depthPlane = fboColorSlice;
+        } else {
+            pass.colorAttachments[0].slice = fboColorSlice;
+            pass.colorAttachments[0].depthPlane = 0;
+        }
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+        if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].clearColor = pendingClearColor;
         } else {
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
-        id<MTLTexture> passDepthStencil = defaultDepthStencilRenderTargetTexture();
-        if (passDepthStencil != nil) {
-            pass.depthAttachment.texture = passDepthStencil;
+        pass.depthAttachment.texture =
+            depthFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
+        pass.stencilAttachment.texture =
+            stencilFormat == MTLPixelFormatInvalid
+                ? nil
+                : (passStencilSeparate != nil ? passStencilSeparate
+                                              : passDepthStencil);
+        pass.depthAttachment.level = isFBODraw
+            ? static_cast<NSUInteger>(info.fboDepthStencilLevel)
+            : 0;
+        pass.depthAttachment.slice = isFBODraw
+            ? static_cast<NSUInteger>(info.fboDepthStencilSlice)
+            : 0;
+        pass.stencilAttachment.level = isFBODraw
+            ? static_cast<NSUInteger>(passStencilSeparate != nil
+                  ? info.fboStencilLevel : info.fboDepthStencilLevel)
+            : 0;
+        pass.stencilAttachment.slice = isFBODraw
+            ? static_cast<NSUInteger>(passStencilSeparate != nil
+                  ? info.fboStencilSlice : info.fboDepthStencilSlice)
+            : 0;
+        if (depthFormat != MTLPixelFormatInvalid) {
             pass.depthAttachment.storeAction = MTLStoreActionStore;
-            pass.stencilAttachment.texture = passDepthStencil;
-            pass.stencilAttachment.storeAction = MTLStoreActionStore;
-            if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+            if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
                 pass.depthAttachment.clearDepth = pendingClearDepth;
             } else {
                 pass.depthAttachment.loadAction = MTLLoadActionLoad;
             }
-            if (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+        } else {
+            pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+            pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        }
+        if (stencilFormat != MTLPixelFormatInvalid) {
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
                 pass.stencilAttachment.loadAction = MTLLoadActionClear;
                 pass.stencilAttachment.clearStencil = pendingClearStencil;
             } else {
                 pass.stencilAttachment.loadAction = MTLLoadActionLoad;
             }
+        } else {
+            pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+            pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
         }
-        hasPendingClear = false;
+        if (!isFBODraw) {
+            hasPendingClear = false;
+        }
 
         attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, 1);
         id<MTLRenderCommandEncoder> encoder =
@@ -8014,7 +8168,8 @@ struct MetalFrameGraph::Impl {
         }
         [encoder setRenderPipelineState:solidColorPipelineState];
 
-        if (passDepthStencil != nil) {
+        if (depthFormat != MTLPixelFormatInvalid ||
+            stencilFormat != MTLPixelFormatInvalid) {
             id<MTLDepthStencilState> dsState = depthStencilStateForDraw(info);
             if (dsState != nil) {
                 [encoder setDepthStencilState:dsState];
@@ -8086,10 +8241,13 @@ struct MetalFrameGraph::Impl {
         }
 
         [encoder endEncoding];
-        readbackSourceTexture = colorTexture;
-        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
-        markDefaultMsaaColorDirty();
-        pendingPresent = true;
+        if (!isFBODraw) {
+            readbackSourceTexture = colorTexture;
+            readbackSourceIsBGRA =
+                colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+            markDefaultMsaaColorDirty();
+            pendingPresent = true;
+        }
         return true;
     }
 
@@ -18462,13 +18620,66 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
     }
 
     bool ensureSolidColorPipelineState(const MetalDrawInfo& info) {
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : nil;
+        const bool isFBODraw =
+            info.fboColorTexture != nullptr ||
+            info.fboDepthStencilTexture != nullptr ||
+            info.fboStencilTexture != nullptr;
+        if (isFBODraw && info.fboColorTexture == nullptr) {
+            return false;
+        }
+        id<MTLTexture> colorTexture = info.fboColorTexture != nullptr
+            ? (__bridge id<MTLTexture>)info.fboColorTexture
+            : (usesOffscreenTarget ? offscreenColorTexture : nil);
         const MTLPixelFormat colorFormat = colorTexture != nil
             ? colorTexture.pixelFormat
             : MTLPixelFormatBGRA8Unorm;
+        const NSUInteger sampleCount = colorTexture != nil
+            ? std::max<NSUInteger>(colorTexture.sampleCount, 1u)
+            : 1u;
+        MTLPixelFormat depthFormat = MTLPixelFormatInvalid;
+        MTLPixelFormat stencilFormat = MTLPixelFormatInvalid;
+        auto classifyDepthStencil = [&](id<MTLTexture> depthStencilTex,
+                                        id<MTLTexture> separateStencilTex) {
+            if (separateStencilTex != nil) {
+                stencilFormat = separateStencilTex.pixelFormat;
+            }
+            if (depthStencilTex == nil) {
+                return;
+            }
+            const MTLPixelFormat pf = depthStencilTex.pixelFormat;
+            if (pf == MTLPixelFormatDepth16Unorm ||
+                pf == MTLPixelFormatDepth32Float ||
+                pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                pf == MTLPixelFormatDepth32Float_Stencil8) {
+                depthFormat = pf;
+            }
+            if (separateStencilTex == nil &&
+                (pf == MTLPixelFormatStencil8 ||
+                 pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                 pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                 pf == MTLPixelFormatX24_Stencil8 ||
+                 pf == MTLPixelFormatX32_Stencil8)) {
+                stencilFormat = pf;
+            }
+        };
+        if (isFBODraw) {
+            classifyDepthStencil(
+                info.fboDepthStencilTexture != nullptr
+                    ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture
+                    : nil,
+                info.fboStencilTexture != nullptr
+                    ? (__bridge id<MTLTexture>)info.fboStencilTexture
+                    : nil);
+        } else {
+            depthFormat = MTLPixelFormatDepth32Float_Stencil8;
+            stencilFormat = MTLPixelFormatDepth32Float_Stencil8;
+        }
 
         if (solidColorPipelineState != nil
-            && solidColorPipelineColorFormat == colorFormat) {
+            && solidColorPipelineColorFormat == colorFormat
+            && solidColorPipelineDepthFormat == depthFormat
+            && solidColorPipelineStencilFormat == stencilFormat
+            && solidColorPipelineSampleCount == sampleCount) {
             return true;
         }
 
@@ -18488,9 +18699,10 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         desc.vertexFunction = solidColorVertexFn;
         desc.fragmentFunction = solidColorFragmentFn;
         desc.vertexDescriptor = vertexDescriptor;
+        desc.rasterSampleCount = sampleCount;
         desc.colorAttachments[0].pixelFormat = colorFormat;
-        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-        desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        desc.depthAttachmentPixelFormat = depthFormat;
+        desc.stencilAttachmentPixelFormat = stencilFormat;
 
         NSError* error = nil;
         id<MTLRenderPipelineState> newState =
@@ -18501,6 +18713,9 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         releaseOwnedObjCObject(solidColorPipelineState);
         solidColorPipelineState = newState;
         solidColorPipelineColorFormat = colorFormat;
+        solidColorPipelineDepthFormat = depthFormat;
+        solidColorPipelineStencilFormat = stencilFormat;
+        solidColorPipelineSampleCount = sampleCount;
         return true;
     }
 
@@ -27165,6 +27380,9 @@ private:
     id<MTLFunction> solidColorFragmentFn = nil;
     id<MTLRenderPipelineState> solidColorPipelineState = nil;
     MTLPixelFormat solidColorPipelineColorFormat = MTLPixelFormatInvalid;
+    MTLPixelFormat solidColorPipelineDepthFormat = MTLPixelFormatInvalid;
+    MTLPixelFormat solidColorPipelineStencilFormat = MTLPixelFormatInvalid;
+    NSUInteger solidColorPipelineSampleCount = 1;
     id<MTLLibrary> msaaColorResolveCopyLibrary = nil;
     id<MTLFunction> msaaColorResolveCopyVertexFn = nil;
     id<MTLFunction> msaaColorResolveCopyFragmentFn = nil;

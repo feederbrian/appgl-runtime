@@ -3126,7 +3126,19 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             sourceName = sourceObj->viewSourceTexture;
             sourceObj = impl_->objects->textures().get(sourceName);
         }
+        const std::uint32_t staleViewRawShadowBits =
+            kProducerFboColorWrite |
+            kProducerStorageImageWrite;
+        const bool viewRawShadowMayBeStale =
+            (sourceObj != nullptr &&
+             (sourceObj->producerPending.hasAny(staleViewRawShadowBits) ||
+              sourceObj->wasFramebufferRenderedTo ||
+              sourceObj->wasViewportRenderedTo)) ||
+            obj->producerPending.hasAny(staleViewRawShadowBits) ||
+            obj->wasFramebufferRenderedTo ||
+            obj->wasViewportRenderedTo;
         if (sourceObj != nullptr &&
+            !viewRawShadowMayBeStale &&
             copyTextureViewClassRawShadow(*obj,
                                           *sourceObj,
                                           level,

@@ -74,6 +74,8 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             return false;
         }
     }
+    const bool zeroSizedCopy =
+        srcWidth == 0 || srcHeight == 0 || srcDepth == 0;
     // GL 4.6 §18.3.2: INVALID_OPERATION if source or destination texture
     // is not "complete" — i.e. has any required level missing or
     // dimensions inconsistent. CTS copy_image.incomplete_tex creates a
@@ -441,7 +443,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     }
 
     // No-op for zero-sized copies.
-    if (srcWidth == 0 || srcHeight == 0 || srcDepth == 0) return true;
+    if (zeroSizedCopy) return true;
 
     impl_->drainPendingGpuProducers({
         {srcIsTex ? Impl::GpuResourceAccess::Kind::Texture
@@ -458,6 +460,86 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     std::size_t srcBpp = 4; // RGBA8 default
     const bool srcCubeMap = srcIsTex && srcTarget == GL_TEXTURE_CUBE_MAP;
     const bool dstCubeMap = dstIsTex && dstTarget == GL_TEXTURE_CUBE_MAP;
+    struct CopyImageTextureOperand {
+        GLTextureObject* apiTexture = nullptr;
+        GLTextureObject* storageTexture = nullptr;
+        GLuint storageName = 0;
+        GLint storageLevel = 0;
+        GLint storageLayerBase = 0;
+        GLsizei viewLayerCount = 0;
+        bool throughView = false;
+        bool valid = false;
+    };
+    auto resolveCopyImageTextureOperand =
+        [&](GLuint name, GLint apiLevel) -> CopyImageTextureOperand {
+            CopyImageTextureOperand operand;
+            GLTextureObject* apiTexture = impl_->objects->textures().get(name);
+            if (apiTexture == nullptr || apiLevel < 0) {
+                return operand;
+            }
+            operand.apiTexture = apiTexture;
+            operand.storageTexture = apiTexture;
+            operand.storageName = name;
+            operand.storageLevel = apiLevel;
+            operand.storageLayerBase = 0;
+            operand.viewLayerCount = std::max<GLsizei>(
+                apiTexture->desc.layers > 0 ? apiTexture->desc.layers : 1,
+                1);
+            operand.valid = true;
+
+            if (apiTexture->viewSourceTexture == 0) {
+                return operand;
+            }
+
+            const GLsizei viewLevelCount = std::max<GLsizei>(
+                apiTexture->viewNumLevels > 0 ? apiTexture->viewNumLevels
+                                              : apiTexture->desc.levels,
+                1);
+            if (apiLevel >= viewLevelCount) {
+                operand.valid = false;
+                return operand;
+            }
+
+            GLuint rootName = apiTexture->viewSourceTexture;
+            GLTextureObject* rootTexture = impl_->objects->textures().get(rootName);
+            for (int hops = 0;
+                 rootTexture != nullptr && rootTexture->viewSourceTexture != 0 &&
+                 hops < 32;
+                 ++hops) {
+                rootName = rootTexture->viewSourceTexture;
+                rootTexture = impl_->objects->textures().get(rootName);
+            }
+            if (rootTexture == nullptr || rootTexture->viewSourceTexture != 0) {
+                operand.valid = false;
+                return operand;
+            }
+
+            operand.storageTexture = rootTexture;
+            operand.storageName = rootName;
+            operand.storageLevel =
+                std::max<GLint>(apiTexture->viewMinLevel, 0) + apiLevel;
+            operand.storageLayerBase =
+                std::max<GLint>(apiTexture->viewMinLayer, 0);
+            operand.viewLayerCount = std::max<GLsizei>(
+                apiTexture->viewNumLayers > 0 ? apiTexture->viewNumLayers
+                                              : apiTexture->desc.layers,
+                1);
+            operand.throughView = true;
+            return operand;
+        };
+    auto copyImageTargetHasLayerAxis = [](GLenum target) {
+        switch (target) {
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_CUBE_MAP:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                return true;
+            default:
+                return false;
+        }
+    };
     auto textureLevelForCopyLayer = [](GLTextureObject* tex,
                                        GLenum target,
                                        GLint level,
@@ -481,9 +563,25 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         }
         return nullptr;
     };
-    auto selectTextureReadPixels = [](const GLTextureImageLevel& image,
-                                      const std::uint8_t*& pixels,
-                                      std::size_t& bpp) -> bool {
+    auto copyImageSourceNeedsCanonicalRGBA8 = [](const GLTextureImageLevel& image) {
+        switch (image.desc.sourceFormat) {
+            case GL_BGR:
+            case GL_BGRA:
+            case GL_BGR_INTEGER:
+            case GL_BGRA_INTEGER:
+                return !image.rgba8.empty();
+            default:
+                return false;
+        }
+    };
+    auto selectTextureReadPixels = [&](const GLTextureImageLevel& image,
+                                       const std::uint8_t*& pixels,
+                                       std::size_t& bpp) -> bool {
+        if (copyImageSourceNeedsCanonicalRGBA8(image)) {
+            pixels = image.rgba8.data();
+            bpp = 4;
+            return true;
+        }
         if (image.nativeBpp > 0 && !image.nativeData.empty()) {
             pixels = image.nativeData.data();
             bpp = image.nativeBpp;
@@ -517,30 +615,40 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     };
 
     GLTextureObject* srcTex = nullptr;
+    CopyImageTextureOperand srcOperand;
     bool srcFramebufferYFlipped = false;
     if (srcIsTex) {
-        srcTex = impl_->objects->textures().get(srcName);
-        if (!srcTex) { pushError(GL_INVALID_VALUE); return false; }
-        auto it = srcTex->levels.find(srcLevel);
+        srcOperand = resolveCopyImageTextureOperand(srcName, srcLevel);
+        srcTex = srcOperand.storageTexture;
+        if (!srcOperand.valid || srcTex == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const GLint srcStorageLevel = srcOperand.storageLevel;
+        const GLint srcStorageZBase = srcOperand.throughView
+            ? srcOperand.storageLayerBase : 0;
+        auto it = srcTex->levels.find(srcStorageLevel);
         if (it == srcTex->levels.end() || !it->second.defined) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
         GLTextureImageLevel* srcImgPtr = &it->second;
         if (srcCubeMap && srcZ >= 0 && srcZ < 6) {
+            const GLint srcStorageZ = srcStorageZBase + srcZ;
             if (GLTextureImageLevel* faceImg =
-                    textureLevelForCopyLayer(srcTex, srcTarget, srcLevel, srcZ)) {
+                    textureLevelForCopyLayer(
+                        srcTex, srcTarget, srcStorageLevel, srcStorageZ)) {
                 srcImgPtr = faceImg;
             }
         }
         if (srcTex->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
             !srcTex->depthStencilShadowAuthoritative) {
             (void)impl_->syncDepth32FTextureLevelNativeFromMetal(
-                *srcTex, srcLevel);
+                *srcTex, srcStorageLevel);
         }
         if (!impl_->materializeTextureMipShadowFromMetal(
                 *srcTex,
-                srcLevel,
+                srcStorageLevel,
                 Impl::TextureMipShadowMaterializeConsumer::CopyImageSubData)) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -550,6 +658,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         srcImgW = srcImg.desc.width;
         srcImgH = srcImg.desc.height;
         srcImgD = srcCubeMap ? 6 : srcImg.desc.depth;
+        if (srcOperand.throughView) {
+            srcImgD = copyImageTargetHasLayerAxis(srcTarget)
+                ? std::max<GLsizei>(srcOperand.viewLayerCount, 1)
+                : 1;
+        }
         // Per GL 4.6 §18.2.3 Table 18.1 — copyImageSubData per-target axis
         // mapping. For TEXTURE_1D_ARRAY, the second axis (srcY/dstY) is the
         // layer index (0..layers-1) while the height dimension proper is
@@ -574,9 +687,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         // so a bound of 1 under-allocates by the layer factor. The value
         // must be correct here, at the override, not patched at the checks.
         if (srcTarget == GL_TEXTURE_1D_ARRAY) {
-            const GLsizei srcLayerCount = std::max<GLsizei>(
-                std::max<GLsizei>(srcTex->desc.height, srcTex->desc.layers),
-                std::max<GLsizei>(srcImg.desc.height, srcImg.desc.layers));
+            const GLsizei srcLayerCount = srcOperand.throughView
+                ? std::max<GLsizei>(srcOperand.viewLayerCount, 1)
+                : std::max<GLsizei>(
+                      std::max<GLsizei>(srcTex->desc.height, srcTex->desc.layers),
+                      std::max<GLsizei>(srcImg.desc.height, srcImg.desc.layers));
             // ⛔ srcImgH IS DELIBERATELY LEFT AT THE COLLAPSED VALUE. It is not
             // only the Y bound — it is the SLICE STRIDE HEIGHT (:794 srcSliceBytes
             // = srcRowBytes * srcImgH, and :843 on the bpp-mismatch path). A
@@ -593,8 +708,15 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             // a layer beyond 0 was rejected on `srcZ + srcDepth > srcImgD`.
             srcImgD = srcLayerCount;
         }
-        // Prefer native data if available, else fall back to rgba8.
-        if (srcImg.nativeBpp > 0 && !srcImg.nativeData.empty()) {
+        // Prefer native data if available, else fall back to rgba8. BGR/BGRA
+        // external upload formats are the exception: native/raw shadows can
+        // still carry upload byte order, while CopyImageSubData copies texture
+        // image values. Use the canonical RGBA8 shadow for those sources so
+        // format-swizzle copies preserve logical component order.
+        if (copyImageSourceNeedsCanonicalRGBA8(srcImg)) {
+            srcPixels = srcImg.rgba8.data();
+            srcBpp = 4;
+        } else if (srcImg.nativeBpp > 0 && !srcImg.nativeData.empty()) {
             srcPixels = srcImg.nativeData.data();
             srcBpp = srcImg.nativeBpp;
         } else if (!srcImg.rgba8.empty()) {
@@ -651,11 +773,19 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     GLTextureObject* dstTex = nullptr;
     GLRenderbufferObject* dstRB = nullptr;
     GLTextureImageLevel* dstImg = nullptr;
+    CopyImageTextureOperand dstOperand;
 
     if (dstIsTex) {
-        dstTex = impl_->objects->textures().get(dstName);
-        if (!dstTex) { pushError(GL_INVALID_VALUE); return false; }
-        auto it = dstTex->levels.find(dstLevel);
+        dstOperand = resolveCopyImageTextureOperand(dstName, dstLevel);
+        dstTex = dstOperand.storageTexture;
+        if (!dstOperand.valid || dstTex == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const GLint dstStorageLevel = dstOperand.storageLevel;
+        const GLint dstStorageZBase = dstOperand.throughView
+            ? dstOperand.storageLayerBase : 0;
+        auto it = dstTex->levels.find(dstStorageLevel);
         if (it == dstTex->levels.end()) {
             // Level not defined — create it on the fly with same dims as source.
             GLTextureImageLevel newLevel;
@@ -663,7 +793,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             newLevel.desc.height = srcImgH;
             newLevel.desc.depth = 1;
             newLevel.defined = true;
-            auto ins = dstTex->levels.emplace(dstLevel, std::move(newLevel));
+            auto ins = dstTex->levels.emplace(dstStorageLevel, std::move(newLevel));
             it = ins.first;
         }
         dstImg = &it->second;
@@ -672,8 +802,15 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             dstImg->defined = true;
         }
         if (dstCubeMap && dstZ >= 0 && dstZ < 6) {
-            auto& faceLevels = dstTex->cubeFaceLevels[static_cast<std::size_t>(dstZ)];
-            auto [faceIt, _inserted] = faceLevels.try_emplace(dstLevel, *dstImg);
+            const GLint dstStorageZ = dstStorageZBase + dstZ;
+            if (dstStorageZ < 0 || dstStorageZ >= 6) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            auto& faceLevels =
+                dstTex->cubeFaceLevels[static_cast<std::size_t>(dstStorageZ)];
+            auto [faceIt, _inserted] =
+                faceLevels.try_emplace(dstStorageLevel, *dstImg);
             if (!faceIt->second.defined) {
                 faceIt->second.defined = true;
             }
@@ -681,7 +818,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         }
         if (!impl_->materializeTextureMipShadowFromMetal(
                 *dstTex,
-                dstLevel,
+                dstStorageLevel,
                 Impl::TextureMipShadowMaterializeConsumer::CopyImageSubData)) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -690,6 +827,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         dstImgW = dstImg->desc.width;
         dstImgH = dstImg->desc.height;
         dstImgD = dstCubeMap ? 6 : dstImg->desc.depth;
+        if (dstOperand.throughView) {
+            dstImgD = copyImageTargetHasLayerAxis(dstTarget)
+                ? std::max<GLsizei>(dstOperand.viewLayerCount, 1)
+                : 1;
+        }
         // CKPT116: 1D_ARRAY layer-count-on-Y axis (mirror src logic).
         // 4-way max over {height, layers} on both objects — see the src-side
         // comment above for why `desc.depth` is never the 1D_ARRAY layer
@@ -697,9 +839,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         // bounds checks: it feeds the totalPixels allocation immediately
         // below (:631) as well as the byte strides.
         if (dstTarget == GL_TEXTURE_1D_ARRAY) {
-            const GLsizei dstLayerCount = std::max<GLsizei>(
-                std::max<GLsizei>(dstTex->desc.height, dstTex->desc.layers),
-                std::max<GLsizei>(dstImg->desc.height, dstImg->desc.layers));
+            const GLsizei dstLayerCount = dstOperand.throughView
+                ? std::max<GLsizei>(dstOperand.viewLayerCount, 1)
+                : std::max<GLsizei>(
+                      std::max<GLsizei>(dstTex->desc.height, dstTex->desc.layers),
+                      std::max<GLsizei>(dstImg->desc.height, dstImg->desc.layers));
             // ⛔ See the src-side note: dstImgH is the SLICE STRIDE HEIGHT and
             // must stay 1 for a 1D_ARRAY.
             dstImgH = std::max<GLsizei>(dstTex->desc.depth, dstImg->desc.depth);
@@ -766,6 +910,14 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const GLint srcCopyZBase =
+        (srcIsTex && srcOperand.throughView) ? srcOperand.storageLayerBase : 0;
+    const GLint dstCopyZBase =
+        (dstIsTex && dstOperand.throughView) ? dstOperand.storageLayerBase : 0;
+    const GLint srcCopyLevel =
+        (srcIsTex && srcOperand.valid) ? srcOperand.storageLevel : srcLevel;
+    const GLint dstCopyLevel =
+        (dstIsTex && dstOperand.valid) ? dstOperand.storageLevel : dstLevel;
 
     // -----------------------------------------------------------------------
     // Perform the pixel copy — row-by-row within each depth slice.
@@ -783,12 +935,13 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             GLsizei sliceSrcH = srcImgH;
             GLsizei sliceDstW = dstImgW;
             GLsizei sliceDstH = dstImgH;
-            GLint srcSlice = srcZ + z;
-            GLint dstSlice = dstZ + z;
+            GLint srcSlice = srcCopyZBase + srcZ + z;
+            GLint dstSlice = dstCopyZBase + dstZ + z;
 
             if (srcCubeMap) {
                 const GLTextureImageLevel* faceImg =
-                    textureLevelForCopyLayer(srcTex, srcTarget, srcLevel, srcSlice);
+                    textureLevelForCopyLayer(
+                        srcTex, srcTarget, srcCopyLevel, srcSlice);
                 if (faceImg == nullptr ||
                     !selectTextureReadPixels(*faceImg, sliceSrcPixels, sliceSrcBpp)) {
                     pushError(GL_INVALID_OPERATION);
@@ -805,14 +958,14 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
                 }
                 auto& faceLevels =
                     dstTex->cubeFaceLevels[static_cast<std::size_t>(dstSlice)];
-                auto faceIt = faceLevels.find(dstLevel);
+                auto faceIt = faceLevels.find(dstCopyLevel);
                 if (faceIt == faceLevels.end()) {
-                    auto baseIt = dstTex->levels.find(dstLevel);
+                    auto baseIt = dstTex->levels.find(dstCopyLevel);
                     if (baseIt == dstTex->levels.end() || !baseIt->second.defined) {
                         pushError(GL_INVALID_OPERATION);
                         return false;
                     }
-                    faceIt = faceLevels.emplace(dstLevel, baseIt->second).first;
+                    faceIt = faceLevels.emplace(dstCopyLevel, baseIt->second).first;
                 }
                 GLTextureImageLevel* faceImg = &faceIt->second;
                 if (faceImg == nullptr ||
@@ -855,8 +1008,10 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         const std::size_t copyRowBytes = static_cast<std::size_t>(srcWidth) * srcBpp;
 
         for (GLsizei z = 0; z < srcDepth; ++z) {
-            const std::size_t srcSliceOff = static_cast<std::size_t>(srcZ + z) * srcSliceBytes;
-            const std::size_t dstSliceOff = static_cast<std::size_t>(dstZ + z) * dstSliceBytes;
+            const std::size_t srcSliceOff =
+                static_cast<std::size_t>(srcCopyZBase + srcZ + z) * srcSliceBytes;
+            const std::size_t dstSliceOff =
+                static_cast<std::size_t>(dstCopyZBase + dstZ + z) * dstSliceBytes;
             for (GLsizei row = 0; row < srcHeight; ++row) {
                 const std::size_t srcOff = srcSliceOff
                                          + static_cast<std::size_t>(srcY + row) * srcRowBytes
@@ -874,12 +1029,12 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         std::uint8_t* dstRGBA = nullptr;
 
         if (srcIsTex) {
-            GLTextureObject* srcTex = impl_->objects->textures().get(srcName);
-            auto it = srcTex->levels.find(srcLevel);
-            if (it != srcTex->levels.end() && it->second.rgba8.empty()) {
+            GLTextureObject* resolvedSrcTex = srcOperand.storageTexture;
+            auto it = resolvedSrcTex->levels.find(srcCopyLevel);
+            if (it != resolvedSrcTex->levels.end() && it->second.rgba8.empty()) {
                 (void)materializeRedR8TextureShadowFromNativeData(it->second);
             }
-            if (it != srcTex->levels.end() && !it->second.rgba8.empty()) {
+            if (it != resolvedSrcTex->levels.end() && !it->second.rgba8.empty()) {
                 srcRGBA = it->second.rgba8.data();
             }
         } else {
@@ -903,8 +1058,10 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             const std::size_t dstSlice4 = dstRow4 * static_cast<std::size_t>(dstImgH);
             const std::size_t copyRow4 = static_cast<std::size_t>(srcWidth) * 4;
             for (GLsizei z = 0; z < srcDepth; ++z) {
-                const std::size_t sSliceOff = static_cast<std::size_t>(srcZ + z) * srcSlice4;
-                const std::size_t dSliceOff = static_cast<std::size_t>(dstZ + z) * dstSlice4;
+                const std::size_t sSliceOff =
+                    static_cast<std::size_t>(srcCopyZBase + srcZ + z) * srcSlice4;
+                const std::size_t dSliceOff =
+                    static_cast<std::size_t>(dstCopyZBase + dstZ + z) * dstSlice4;
                 for (GLsizei row = 0; row < srcHeight; ++row) {
                     const std::size_t sOff = sSliceOff + static_cast<std::size_t>(srcY + row) * srcRow4 + static_cast<std::size_t>(srcX) * 4;
                     const std::size_t dOff = dSliceOff + static_cast<std::size_t>(dstY + row) * dstRow4 + static_cast<std::size_t>(dstX) * 4;
@@ -935,11 +1092,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
                         for (GLsizei row = 0; row < srcHeight; ++row) {
                             for (GLsizei col = 0; col < srcWidth; ++col) {
                                 const std::size_t rgbaOff =
-                                    (static_cast<std::size_t>(dstZ + z) * dstSlice4)
+                                    (static_cast<std::size_t>(dstCopyZBase + dstZ + z) * dstSlice4)
                                     + (static_cast<std::size_t>(dstY + row) * dstRow4)
                                     + (static_cast<std::size_t>(dstX + col) * 4);
                                 const std::size_t natOff =
-                                    (static_cast<std::size_t>(dstZ + z) * natSliceBytes)
+                                    (static_cast<std::size_t>(dstCopyZBase + dstZ + z) * natSliceBytes)
                                     + (static_cast<std::size_t>(dstY + row) * natRowBytes)
                                     + (static_cast<std::size_t>(dstX + col) * info.bytesPerPixel);
                                 const std::uint8_t* rgbaPx = dstRGBA + rgbaOff;
@@ -991,15 +1148,54 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // because bindTexture re-sets instantiated=true before any subsequent
     // read, which would otherwise mask the pending re-upload.
     // -----------------------------------------------------------------------
+    const GLuint writtenTextureName =
+        (dstIsTex && dstOperand.valid) ? dstOperand.storageName : dstName;
+    auto invalidateMaterializedTextureView = [&](GLTextureObject& texture) {
+        impl_->releaseDepthCompareTextureView(texture);
+        texture.r5DepthCompareViewEvicted = false;
+        releaseRetainedMetalObject(texture.metalTexture);
+        texture.metalTexture = nullptr;
+        releaseRetainedMetalObject(texture.metalSwizzledView);
+        texture.metalSwizzledView = nullptr;
+        texture.swizzleDirty = true;
+        releaseRetainedMetalObject(texture.metalLinearRenderView);
+        texture.metalLinearRenderView = nullptr;
+        releaseRetainedMetalObject(texture.metalSamplingProxy);
+        texture.metalSamplingProxy = nullptr;
+    };
+    auto viewReferencesWrittenStorage = [&](const GLTextureObject& texture) {
+        GLuint cursorName = texture.viewSourceTexture;
+        for (int hops = 0; cursorName != 0 && hops < 32; ++hops) {
+            if (cursorName == writtenTextureName) {
+                return true;
+            }
+            const GLTextureObject* cursor =
+                impl_->objects->textures().get(cursorName);
+            if (cursor == nullptr || cursor->viewSourceTexture == 0) {
+                return false;
+            }
+            cursorName = cursor->viewSourceTexture;
+        }
+        return false;
+    };
     if (dstTex) {
         setTextureLevelFramebufferYFlipped(
-            *dstTex, dstLevel, srcIsTex && srcFramebufferYFlipped);
+            *dstTex, dstCopyLevel, srcIsTex && srcFramebufferYFlipped);
         impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
-            dstName, "copy-image-sub-data");
+            writtenTextureName, "copy-image-sub-data");
         impl_->releaseDepthCompareTextureView(*dstTex);
         dstTex->r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(dstTex->metalTexture);
         dstTex->metalTexture = nullptr;
+        if (dstOperand.throughView && impl_->objects != nullptr) {
+            impl_->objects->textures().forEach(
+                [&](GLuint, GLTextureObject& texture) {
+                    if (texture.viewSourceTexture != 0 &&
+                        viewReferencesWrittenStorage(texture)) {
+                        invalidateMaterializedTextureView(texture);
+                    }
+                });
+        }
     }
     if (dstRB) {
         dstRB->instantiated = false;
@@ -1007,7 +1203,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     impl_->markGpuResourceWrites({
         {dstIsTex ? Impl::GpuResourceAccess::Kind::Texture
                   : Impl::GpuResourceAccess::Kind::Renderbuffer,
-         dstName,
+         writtenTextureName,
          kProducerCopyWrite}
     });
     return true;
@@ -1181,7 +1377,7 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
     viewObj->viewNumLevels = static_cast<GLint>(effectiveNumLevels);
     viewObj->viewMinLayer = origObj->viewMinLayer + static_cast<GLint>(minlayer);
     viewObj->viewNumLayers = static_cast<GLint>(effectiveNumLayers);
-    viewObj->params = origObj->params;
+    viewObj->params = GLTextureParameters{};
     viewObj->samplerDirty = true;
 
     impl_->releaseDepthCompareTextureView(*viewObj);

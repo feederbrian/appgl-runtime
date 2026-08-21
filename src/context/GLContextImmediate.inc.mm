@@ -10087,6 +10087,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                     continue;
                 }
                 GLTextureImageLevel& image = level->second;
+                GLTextureObject* attachedTexture = resolved.attachedTexture;
                 const GLsizei tw = std::max<GLsizei>(image.desc.width, 1);
                 const GLsizei th = texture->target == GL_TEXTURE_1D
                     ? 1
@@ -10119,48 +10120,137 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 if (image.rgba8.size() < bytes) {
                     image.rgba8.assign(bytes, 0);
                 }
-	                for (GLint gy = py0; gy < py1; ++gy) {
-	                    const GLint sy = lowerLeft ? (th - 1 - gy) : gy;
-	                    for (GLint gx = px0; gx < px1; ++gx) {
-	                        const std::size_t offset =
-	                            static_cast<std::size_t>(layer) * layerBytes +
-	                            (static_cast<std::size_t>(sy) *
-	                             static_cast<std::size_t>(tw) +
-	                             static_cast<std::size_t>(gx)) * 4u;
-	                        std::uint8_t storagePixel[4] = {
-	                            rgba[0], rgba[1], rgba[2], rgba[3]
-	                        };
-	                        Impl::canonicalizeFboStorageRGBA8(
-	                            image.desc.internalFormat, storagePixel);
-	                        for (int c = 0; c < 4; ++c) {
-	                            if (blend.colorMask[c] != GL_FALSE) {
-	                                image.rgba8[offset + static_cast<std::size_t>(c)] =
-	                                    storagePixel[c];
-	                            }
-	                        }
-	                        if (image.nativeBpp > 0) {
-	                            (void)impl_->storeColorNativePixelFromRGBA8(
-	                                image,
-	                                tw,
-	                                th,
-	                                layer,
-	                                gx,
-	                                sy,
-	                                image.rgba8.data() + offset);
-	                        }
-	                    }
-	                }
-	                impl_->clearTextureLazyFboCanonicalClear(image);
-	                texture->colorShadowAuthoritative = true;
-	                setTextureLevelFramebufferYFlipped(
-	                    *texture, resolved.level, lowerLeft);
-	                if (lowerLeft) {
-	                    texture->wasFramebufferRenderedTo = true;
-	                }
-	                impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
-	                    attachment->object,
-	                    "immediate-client-array-shadow-mirror");
-	                painted = true;
+                const bool throughTextureView =
+                    resolved.throughView &&
+                    attachedTexture != nullptr &&
+                    attachedTexture != texture;
+                bool viewClassRawWrite = false;
+                std::size_t viewClassBytes = 0;
+                GLenum fboInternalFormat = image.desc.internalFormat;
+                if (throughTextureView) {
+                    const GLenum viewInternalFormat =
+                        attachedTexture->desc.internalFormat != 0
+                            ? attachedTexture->desc.internalFormat
+                            : image.desc.internalFormat;
+                    fboInternalFormat = viewInternalFormat;
+                    const TextureViewClass storageClass =
+                        textureViewClassForInternalFormat(
+                            image.desc.internalFormat);
+                    const TextureViewClass viewClass =
+                        textureViewClassForInternalFormat(
+                            viewInternalFormat);
+                    viewClassBytes = static_cast<std::size_t>(
+                        Impl::textureViewClassByteWidth(viewClass));
+                    viewClassRawWrite =
+                        storageClass != TextureViewClass::Undefined &&
+                        storageClass == viewClass &&
+                        viewClassBytes > 0u &&
+                        viewClassBytes <= 4u &&
+                        image.desc.internalFormat != viewInternalFormat;
+                    if (viewClassRawWrite) {
+                        const std::size_t rawBytes =
+                            static_cast<std::size_t>(tw) *
+                            static_cast<std::size_t>(th) *
+                            static_cast<std::size_t>(depth) *
+                            viewClassBytes;
+                        if (image.nativeBpp != viewClassBytes) {
+                            image.nativeBpp = viewClassBytes;
+                            image.nativeData.assign(rawBytes, 0);
+                        } else if (image.nativeData.size() < rawBytes) {
+                            image.nativeData.resize(rawBytes, 0);
+                        }
+                        if (image.rawUploadBpp != viewClassBytes) {
+                            image.rawUploadBpp = viewClassBytes;
+                            image.rawUploadData.assign(rawBytes, 0);
+                        } else if (image.rawUploadData.size() < rawBytes) {
+                            image.rawUploadData.resize(rawBytes, 0);
+                        }
+                    }
+                }
+                for (GLint gy = py0; gy < py1; ++gy) {
+                    const GLint sy = lowerLeft ? (th - 1 - gy) : gy;
+                    for (GLint gx = px0; gx < px1; ++gx) {
+                        const std::size_t offset =
+                            static_cast<std::size_t>(layer) * layerBytes +
+                            (static_cast<std::size_t>(sy) *
+                             static_cast<std::size_t>(tw) +
+                             static_cast<std::size_t>(gx)) * 4u;
+                        std::uint8_t storagePixel[4] = {
+                            rgba[0], rgba[1], rgba[2], rgba[3]
+                        };
+                        Impl::canonicalizeFboStorageRGBA8(
+                            fboInternalFormat, storagePixel);
+                        for (int c = 0; c < 4; ++c) {
+                            if (blend.colorMask[c] != GL_FALSE) {
+                                image.rgba8[offset + static_cast<std::size_t>(c)] =
+                                    storagePixel[c];
+                            }
+                        }
+                        if (viewClassRawWrite) {
+                            const std::size_t rawOffset =
+                                (static_cast<std::size_t>(layer) *
+                                 static_cast<std::size_t>(tw) *
+                                 static_cast<std::size_t>(th) +
+                                 static_cast<std::size_t>(sy) *
+                                 static_cast<std::size_t>(tw) +
+                                 static_cast<std::size_t>(gx)) *
+                                viewClassBytes;
+                            if (rawOffset + viewClassBytes <=
+                                image.nativeData.size()) {
+                                std::memcpy(
+                                    image.nativeData.data() + rawOffset,
+                                    storagePixel,
+                                    viewClassBytes);
+                            }
+                            if (rawOffset + viewClassBytes <=
+                                image.rawUploadData.size()) {
+                                std::memcpy(
+                                    image.rawUploadData.data() + rawOffset,
+                                    storagePixel,
+                                    viewClassBytes);
+                            }
+                        } else if (image.nativeBpp > 0) {
+                            (void)impl_->storeColorNativePixelFromRGBA8(
+                                image,
+                                tw,
+                                th,
+                                layer,
+                                gx,
+                                sy,
+                                image.rgba8.data() + offset);
+                        }
+                    }
+                }
+                impl_->clearTextureLazyFboCanonicalClear(image);
+                texture->colorShadowAuthoritative = true;
+                setTextureLevelFramebufferYFlipped(
+                    *texture, resolved.level, lowerLeft);
+                if (lowerLeft) {
+                    texture->wasFramebufferRenderedTo = true;
+                }
+                if (viewClassRawWrite) {
+                    if (!impl_->replaceMetalTexture(
+                            *texture, resolved.storageName)) {
+                        return false;
+                    }
+                    if (attachedTexture != nullptr) {
+                        attachedTexture->colorShadowAuthoritative =
+                            texture->colorShadowAuthoritative;
+                        setTextureLevelFramebufferYFlipped(
+                            *attachedTexture, attachment->level, lowerLeft);
+                        if (lowerLeft) {
+                            attachedTexture->wasFramebufferRenderedTo = true;
+                        }
+                        if (!impl_->materializeTextureView(
+                                *attachedTexture)) {
+                            return false;
+                        }
+                    }
+                }
+                impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                    attachment->object,
+                    "immediate-client-array-shadow-mirror");
+                painted = true;
             }
         }
         return painted;

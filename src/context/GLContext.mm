@@ -16147,7 +16147,8 @@ struct GLContext::Impl {
         return true;
     }
 
-    bool generateMipmaps(GLTextureObject& object) {
+    bool generateMipmaps(GLTextureObject& object,
+                         GLenum generationInternalFormat = 0) {
         const GLint baseLevelIndex = object.params.baseLevel;
         if (!materializeCubeFaceShadowsFromMetal(object)) {
             return false;
@@ -16167,13 +16168,62 @@ struct GLContext::Impl {
             !object.depthStencilShadowAuthoritative) {
             (void)syncDepth32FTextureLevelNativeFromMetal(object, baseLevelIndex);
         }
-        if (baseIt->second.rgba8.empty()) {
-            if (!materializeRedR8TextureShadowFromNativeData(baseIt->second) &&
-                !materializeDepth32FTextureShadowFromNativeData(baseIt->second)) {
+        GLTextureImageLevel baseLevel = baseIt->second;
+        const bool useGenerationInternalFormat =
+            generationInternalFormat != 0 &&
+            generationInternalFormat != baseLevel.desc.internalFormat;
+        std::size_t generationClassBytes = 0;
+        if (useGenerationInternalFormat) {
+            const GLenum storageInternalFormat = baseLevel.desc.internalFormat;
+            const TextureViewClass storageClass =
+                textureViewClassForInternalFormat(storageInternalFormat);
+            const TextureViewClass generationClass =
+                textureViewClassForInternalFormat(generationInternalFormat);
+            generationClassBytes = static_cast<std::size_t>(
+                textureViewClassByteWidth(generationClass));
+            if (storageClass == TextureViewClass::Undefined ||
+                storageClass != generationClass ||
+                generationClassBytes == 0u) {
+                return false;
+            }
+            if (baseLevel.rawUploadBpp == generationClassBytes &&
+                !baseLevel.rawUploadData.empty()) {
+                baseLevel.nativeBpp = generationClassBytes;
+                baseLevel.nativeData = baseLevel.rawUploadData;
+            }
+            if (storageInternalFormat == GL_R8 &&
+                generationInternalFormat == GL_R8_SNORM &&
+                generationClassBytes == 1u &&
+                !baseLevel.rgba8.empty()) {
+                const std::size_t pixelCount =
+                    static_cast<std::size_t>(
+                        std::max<GLsizei>(baseLevel.desc.width, 1)) *
+                    static_cast<std::size_t>(
+                        std::max<GLsizei>(baseLevel.desc.height, 1)) *
+                    static_cast<std::size_t>(
+                        std::max<GLsizei>(baseLevel.desc.depth, 1));
+                if (baseLevel.rgba8.size() >= pixelCount * 4u) {
+                    baseLevel.nativeData.resize(pixelCount);
+                    for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                        baseLevel.nativeData[pixel] =
+                            baseLevel.rgba8[pixel * 4u];
+                    }
+                    baseLevel.nativeBpp = generationClassBytes;
+                    baseLevel.rawUploadData = baseLevel.nativeData;
+                    baseLevel.rawUploadBpp = generationClassBytes;
+                }
+            }
+            baseLevel.desc.internalFormat = generationInternalFormat;
+        }
+        if (baseLevel.rgba8.empty()) {
+            if (!materializeRedR8TextureShadowFromNativeData(baseLevel) &&
+                !materializeDepth32FTextureShadowFromNativeData(baseLevel) &&
+                (baseLevel.nativeBpp == 0 || baseLevel.nativeData.empty())) {
                 return false;
             }
         }
-        if (baseIt->second.rgba8.empty()) {
+        if (baseLevel.rgba8.empty() &&
+            (baseLevel.nativeBpp == 0 || baseLevel.nativeData.empty())) {
             return false;
         }
         if (object.params.maxLevel < baseLevelIndex) {
@@ -16181,7 +16231,6 @@ struct GLContext::Impl {
         }
         drainPendingGpuProducers(object);
 
-        const GLTextureImageLevel baseLevel = baseIt->second;
         const GLint tailOffset = mipTailOffsetForDimensions(
             baseLevel.desc.width,
             // 1D-array layer count (carried in `height`) is not a spatial
@@ -16213,8 +16262,11 @@ struct GLContext::Impl {
                 chainBase.nativeBpp > 0 && !chainBase.nativeData.empty();
             NativeDownsampleFormat nativeFmt{};
             if (hasNativeBase) {
+                const GLenum nativeInternalFormat = useGenerationInternalFormat
+                    ? generationInternalFormat
+                    : chainBase.desc.internalFormat;
                 const MTLPixelFormat mtlFmt =
-                    metalRenderbufferFormat(chainBase.desc.internalFormat);
+                    metalRenderbufferFormat(nativeInternalFormat);
                 const auto info = nativeFormatInfo(mtlFmt);
                 nativeFmt.channels = info.channels;
                 nativeFmt.channelBytes = info.bytesPerChannel;
@@ -16290,6 +16342,14 @@ struct GLContext::Impl {
                         generated.desc.depth,
                         nativeFmt);
                     generated.nativeBpp = chainBase.nativeBpp;
+                    if (useGenerationInternalFormat &&
+                        generationClassBytes > 0u &&
+                        generated.nativeBpp == generationClassBytes) {
+                        generated.rawUploadBpp = generationClassBytes;
+                        generated.rawUploadData = generated.nativeData;
+                        generated.desc.internalFormat =
+                            object.desc.internalFormat;
+                    }
                 } else if (hasNativeBase &&
                            chainBase.nativeBpp == 4 &&
                            chainBase.desc.internalFormat == GL_RGB10_A2) {
@@ -28593,20 +28653,46 @@ struct GLContext::Impl {
             } else {
                 metalSlice = static_cast<NSUInteger>(std::max<GLint>(resolved.layer, 0));
             }
-            if (texture->metalTexture != nullptr) {
+            const bool readThroughView =
+                resolved.throughView &&
+                resolved.attachedTexture != nullptr &&
+                resolved.attachedTexture->metalTexture != nullptr;
+            if (readThroughView) {
+                metalTex =
+                    (__bridge id<MTLTexture>)resolved.attachedTexture->metalTexture;
+                metalMipLevel =
+                    static_cast<NSUInteger>(std::max<GLint>(attachment.level, 0));
+                if (resolved.attachedTexture->target == GL_TEXTURE_3D) {
+                    is3DTexture = true;
+                    depthSlice = static_cast<NSUInteger>(
+                        std::max<GLint>(attachment.layer, 0));
+                    metalSlice = 0;
+                } else {
+                    metalSlice = static_cast<NSUInteger>(
+                        std::max<GLint>(attachment.layer, 0));
+                }
+            } else if (texture->metalTexture != nullptr) {
                 metalTex = (__bridge id<MTLTexture>)texture->metalTexture;
             }
             sourceNeedsFboYFlip =
-                texture->wasFramebufferRenderedTo ||
-                texture->wasViewportRenderedTo;
+                readThroughView
+                    ? (resolved.attachedTexture->wasFramebufferRenderedTo ||
+                       resolved.attachedTexture->wasViewportRenderedTo ||
+                       texture->wasFramebufferRenderedTo ||
+                       texture->wasViewportRenderedTo)
+                    : (texture->wasFramebufferRenderedTo ||
+                       texture->wasViewportRenderedTo);
             // If no Metal texture, try CPU shadow
             const bool hasLazyCanonicalClearShadow =
                 texture->colorShadowAuthoritative &&
                 level->second.lazyFboCanonicalClearPending;
-            const bool preferTextureShadow =
+            const bool canReadTextureShadowForAttachment =
                 texture->colorShadowAuthoritative &&
+                !isIntegerInternalFormat(sourceInternalFormat) &&
                 (!level->second.rgba8.empty() ||
                  level->second.lazyFboCanonicalClearPending);
+            const bool preferTextureShadow =
+                canReadTextureShadowForAttachment;
             if (metalTex == nil || preferTextureShadow) {
                 GLsizei sourceLayer = 0;
                 GLsizei sourceLayers = 1;
@@ -30130,10 +30216,14 @@ struct GLContext::Impl {
         GLsizei destHeight = 0;
         GLsizei destLayer = 0;
         GLTextureObject* writableTexture = nullptr;
+        GLTextureObject* writableAttachedTexture = nullptr;
         GLTextureImageLevel* writableImage = nullptr;
         GLuint writableTextureName = 0;
         GLint writableLevel = 0;
         GLenum writableInternalFormat = 0;
+        bool writableThroughView = false;
+        bool writableViewClassRawWrite = false;
+        std::size_t writableViewClassBytes = 0;
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             const ResolvedTextureAttachment resolved =
@@ -30142,6 +30232,8 @@ struct GLContext::Impl {
             if (!resolved.valid || writableTexture == nullptr) {
                 return false;
             }
+            writableAttachedTexture = resolved.attachedTexture;
+            writableThroughView = resolved.throughView;
             writableTextureName = resolved.storageName;
             writableLevel = resolved.level;
             auto level = writableTexture->levels.find(resolved.level);
@@ -30175,6 +30267,44 @@ struct GLContext::Impl {
                 resolved.attachedTexture->desc.internalFormat != 0
                     ? resolved.attachedTexture->desc.internalFormat
                     : level->second.desc.internalFormat;
+            if (writableThroughView && writableAttachedTexture != nullptr) {
+                const TextureViewClass storageClass =
+                    textureViewClassForInternalFormat(
+                        level->second.desc.internalFormat);
+                const TextureViewClass viewClass =
+                    textureViewClassForInternalFormat(
+                        writableAttachedTexture->desc.internalFormat);
+                writableViewClassBytes = static_cast<std::size_t>(
+                    textureViewClassByteWidth(viewClass));
+                writableViewClassRawWrite =
+                    storageClass != TextureViewClass::Undefined &&
+                    storageClass == viewClass &&
+                    writableViewClassBytes > 0u &&
+                    writableViewClassBytes <= 4u &&
+                    level->second.desc.internalFormat !=
+                        writableAttachedTexture->desc.internalFormat;
+                if (writableViewClassRawWrite) {
+                    const std::size_t requiredBytes =
+                        static_cast<std::size_t>(sourceWidth) *
+                        static_cast<std::size_t>(sourceHeight) *
+                        static_cast<std::size_t>(sourceDepth) *
+                        writableViewClassBytes;
+                    if (level->second.nativeBpp != writableViewClassBytes) {
+                        level->second.nativeBpp = writableViewClassBytes;
+                        level->second.nativeData.assign(requiredBytes, 0);
+                    } else if (level->second.nativeData.size() <
+                               requiredBytes) {
+                        level->second.nativeData.resize(requiredBytes, 0);
+                    }
+                    if (level->second.rawUploadBpp != writableViewClassBytes) {
+                        level->second.rawUploadBpp = writableViewClassBytes;
+                        level->second.rawUploadData.assign(requiredBytes, 0);
+                    } else if (level->second.rawUploadData.size() <
+                               requiredBytes) {
+                        level->second.rawUploadData.resize(requiredBytes, 0);
+                    }
+                }
+            }
             destLayer =
                 (writableTexture->target == GL_TEXTURE_3D ||
                  writableTexture->target == GL_TEXTURE_2D_ARRAY ||
@@ -30456,7 +30586,29 @@ struct GLContext::Impl {
                 canonicalizeFboStorageRGBA8(
                     writableInternalFormat, storagePixel);
                 std::memcpy(dest + dstOffset, storagePixel, 4);
-                if (writableImage != nullptr && writableImage->nativeBpp > 0) {
+                if (writableImage != nullptr && writableViewClassRawWrite) {
+                    const std::size_t rawOffset =
+                        ((static_cast<std::size_t>(destLayer) *
+                          static_cast<std::size_t>(destHeight) +
+                          static_cast<std::size_t>(storageY)) *
+                         static_cast<std::size_t>(destWidth) +
+                         static_cast<std::size_t>(dstX)) *
+                        writableViewClassBytes;
+                    if (rawOffset + writableViewClassBytes <=
+                        writableImage->nativeData.size()) {
+                        std::memcpy(writableImage->nativeData.data() + rawOffset,
+                                    storagePixel,
+                                    writableViewClassBytes);
+                    }
+                    if (rawOffset + writableViewClassBytes <=
+                        writableImage->rawUploadData.size()) {
+                        std::memcpy(
+                            writableImage->rawUploadData.data() + rawOffset,
+                            storagePixel,
+                            writableViewClassBytes);
+                    }
+                } else if (writableImage != nullptr &&
+                           writableImage->nativeBpp > 0) {
                     (void)storeColorNativePixelFromRGBA8(
                         *writableImage, destWidth, destHeight, destLayer,
                         dstX, storageY, storagePixel);
@@ -30474,6 +30626,29 @@ struct GLContext::Impl {
             if (replaced) {
                 finishLazyFboCanonicalClearTextureCpuShadowWrite(
                     writableTextureName, "write-color-attachment-pixels");
+                if (writableThroughView &&
+                    writableAttachedTexture != nullptr &&
+                    writableAttachedTexture != writableTexture) {
+                    releaseDepthCompareTextureView(*writableAttachedTexture);
+                    writableAttachedTexture->r5DepthCompareViewEvicted = false;
+                    releaseRetainedMetalObject(
+                        writableAttachedTexture->metalTexture);
+                    writableAttachedTexture->metalTexture = nullptr;
+                    writableAttachedTexture->instantiated = false;
+                    releaseRetainedMetalObject(
+                        writableAttachedTexture->metalSwizzledView);
+                    writableAttachedTexture->metalSwizzledView = nullptr;
+                    writableAttachedTexture->swizzleDirty = true;
+                    releaseRetainedMetalObject(
+                        writableAttachedTexture->metalLinearRenderView);
+                    writableAttachedTexture->metalLinearRenderView = nullptr;
+                    releaseRetainedMetalObject(
+                        writableAttachedTexture->metalSamplingProxy);
+                    writableAttachedTexture->metalSamplingProxy = nullptr;
+                    if (!materializeTextureView(*writableAttachedTexture)) {
+                        return false;
+                    }
+                }
             }
             return replaced;
         }
@@ -30956,8 +31131,9 @@ struct GLContext::Impl {
                 const ResolvedTextureAttachment resolved =
                     resolveTextureAttachmentStorage(attachment);
                 GLTextureObject* texture = resolved.storageTexture;
+                GLTextureObject* attachedTexture = resolved.attachedTexture;
                 if (!resolved.valid || texture == nullptr ||
-                    texture->metalTexture == nullptr) {
+                    attachedTexture == nullptr) {
                     return view;
                 }
                 auto levelIt = texture->levels.find(resolved.level);
@@ -30965,10 +31141,20 @@ struct GLContext::Impl {
                     !levelIt->second.defined) {
                     return view;
                 }
-                view.texture = (__bridge id<MTLTexture>)texture->metalTexture;
-                view.textureObject = texture;
-                view.level =
-                    static_cast<NSUInteger>(std::max<GLint>(resolved.level, 0));
+                const bool throughView =
+                    resolved.throughView &&
+                    attachedTexture->metalTexture != nullptr;
+                void* metalTexture = throughView
+                    ? attachedTexture->metalTexture
+                    : texture->metalTexture;
+                if (metalTexture == nullptr) {
+                    return view;
+                }
+                view.texture = (__bridge id<MTLTexture>)metalTexture;
+                view.textureObject = throughView ? attachedTexture : texture;
+                view.level = static_cast<NSUInteger>(
+                    std::max<GLint>(
+                        throughView ? attachment.level : resolved.level, 0));
                 view.width = std::max<GLsizei>(levelIt->second.desc.width, 1);
                 view.height = texture->target == GL_TEXTURE_1D
                     ? 1 : std::max<GLsizei>(levelIt->second.desc.height, 1);
@@ -30978,10 +31164,14 @@ struct GLContext::Impl {
                     texType == MTLTextureTypeCube ||
                     texType == MTLTextureTypeCubeArray) {
                     view.slice = static_cast<NSUInteger>(
-                        std::max<GLint>(resolved.layer, 0));
+                        std::max<GLint>(
+                            throughView ? attachment.layer : resolved.layer,
+                            0));
                 }
                 view.yFlip =
-                    (texture->wasFramebufferRenderedTo ||
+                    (view.textureObject->wasFramebufferRenderedTo ||
+                     view.textureObject->wasViewportRenderedTo ||
+                     texture->wasFramebufferRenderedTo ||
                      texture->wasViewportRenderedTo) &&
                     state->clipOrigin() != GL_UPPER_LEFT;
                 return view;
@@ -32512,26 +32702,38 @@ struct GLContext::Impl {
                 return false;
             }
             const GLTextureImageLevel& image = levelIt->second;
-            if (tex->metalTexture == nullptr &&
+            const bool readThroughView =
+                resolved.throughView &&
+                attachedTex->metalTexture != nullptr;
+            if (!readThroughView &&
+                tex->metalTexture == nullptr &&
                 !(tex->colorShadowAuthoritative &&
                   image.nativeBpp > 0 &&
                   !image.nativeData.empty())) {
                 return false;
             }
-            metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
+            metalTex = readThroughView
+                ? (__bridge id<MTLTexture>)attachedTex->metalTexture
+                : (__bridge id<MTLTexture>)tex->metalTexture;
             sourceInternalFormat = attachedTex->desc.internalFormat != 0
                 ? attachedTex->desc.internalFormat
                 : image.desc.internalFormat;
             sourceStorageInternalFormat = image.desc.internalFormat;
-            metalMipLevel = static_cast<NSUInteger>(std::max<GLint>(resolved.level, 0));
-            if (tex->target == GL_TEXTURE_3D) {
+            metalMipLevel = static_cast<NSUInteger>(
+                std::max<GLint>(
+                    readThroughView ? att->level : resolved.level, 0));
+            const GLenum metalTarget =
+                readThroughView ? attachedTex->target : tex->target;
+            if (metalTarget == GL_TEXTURE_3D) {
                 is3DTextureSrc = true;
                 depthSlice3D = static_cast<NSUInteger>(
-                    std::max<GLint>(resolved.layer, 0));
+                    std::max<GLint>(
+                        readThroughView ? att->layer : resolved.layer, 0));
                 metalSlice = 0;
             } else {
                 metalSlice = static_cast<NSUInteger>(
-                    std::max<GLint>(resolved.layer, 0));
+                    std::max<GLint>(
+                        readThroughView ? att->layer : resolved.layer, 0));
             }
             if (metalTex != nil) {
                 sourceWidth = static_cast<GLsizei>(metalTex.width >> metalMipLevel);
@@ -32544,7 +32746,8 @@ struct GLContext::Impl {
             }
             if (sourceWidth < 1) sourceWidth = 1;
             if (sourceHeight < 1) sourceHeight = 1;
-            if (tex->colorShadowAuthoritative &&
+            if (!readThroughView &&
+                tex->colorShadowAuthoritative &&
                 image.nativeBpp > 0 &&
                 !image.nativeData.empty()) {
                 const GLsizei layerCount =
@@ -32565,8 +32768,13 @@ struct GLContext::Impl {
                 nativeShadowBpp = image.nativeBpp;
             }
             sourceNeedsFboYFlip =
-                tex->wasFramebufferRenderedTo ||
-                tex->wasViewportRenderedTo;
+                readThroughView
+                    ? (attachedTex->wasFramebufferRenderedTo ||
+                       attachedTex->wasViewportRenderedTo ||
+                       tex->wasFramebufferRenderedTo ||
+                       tex->wasViewportRenderedTo)
+                    : (tex->wasFramebufferRenderedTo ||
+                       tex->wasViewportRenderedTo);
         } else {
             return false;
         }
@@ -47855,7 +48063,8 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
                                              GLObjectStore& objects,
                                              GLenum mode,
                                              const char* debugLabel,
-                                             GLenum fragmentShadingRate) {
+                                             GLenum fragmentShadingRate,
+                                             const GLfloat* currentColor = nullptr) {
     SolidColorDrawSetup setup;
 
     if (mode != GL_TRIANGLES && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN) {
@@ -47913,13 +48122,21 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
     setup.positionShadow = vbo->shadowBytes.data();
     setup.positionShadowSize = vbo->shadowBytes.size();
 
-    // Default to opaque white, then override from the "uColor" uniform if the
-    // linked program has one. This mirrors what the hand-written fragment
-    // shader expects at fragment buffer index 0.
-    setup.info.uniformColor[0] = 1.0f;
-    setup.info.uniformColor[1] = 1.0f;
-    setup.info.uniformColor[2] = 1.0f;
-    setup.info.uniformColor[3] = 1.0f;
+    // Default to the compatibility current color, then override from the
+    // "uColor" uniform if the linked program has one. Piglit's rectangle
+    // helper changes color with glColor4f while feeding generic position
+    // arrays; when translated draw falls back to this hand-written pipeline,
+    // the fixed-function current color is still the caller's color source.
+    if (currentColor != nullptr) {
+        std::memcpy(setup.info.uniformColor,
+                    currentColor,
+                    sizeof(setup.info.uniformColor));
+    } else {
+        setup.info.uniformColor[0] = 1.0f;
+        setup.info.uniformColor[1] = 1.0f;
+        setup.info.uniformColor[2] = 1.0f;
+        setup.info.uniformColor[3] = 1.0f;
+    }
     for (const auto& uniform : program->uniforms) {
         if (uniform.name == "uColor" && uniform.type == GL_FLOAT_VEC4 && uniform.location >= 0) {
             auto it = program->uniformValues.find(uniform.location);
@@ -47969,6 +48186,44 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
     setup.program = program;
     setup.ok = true;
     return setup;
+}
+
+template <typename ImplT>
+static void populateSolidColorFboTarget(ImplT& impl, MetalDrawInfo& info) {
+    GLsizei fboW = 0;
+    GLsizei fboH = 0;
+    void* fboDSTex = nullptr;
+    std::uint32_t fboArrayLen = 0;
+    std::uint32_t fboDSSlice = 0;
+    std::uint32_t fboDSLevel = 0;
+    std::array<void*, 7> extraColTex = {};
+    std::array<std::uint32_t, 8> colSlices = {};
+    std::array<std::uint32_t, 8> colLevels = {};
+    std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
+    void* fboColTex = impl.resolveFBOColorTarget(
+        fboW,
+        fboH,
+        fboDSTex,
+        &fboArrayLen,
+        &extraColTex,
+        &colSlices,
+        &colLevels,
+        &colAlphaModes,
+        &fboDSSlice,
+        &fboDSLevel);
+    info.fboColorTexture = fboColTex;
+    info.fboDepthStencilTexture = fboDSTex;
+    info.fboStencilTexture = impl.resolveFBOSeparateStencilTarget(
+        &info.fboStencilSlice, &info.fboStencilLevel);
+    info.fboColorSlice = colSlices[0];
+    info.fboColorLevel = colLevels[0];
+    info.fboDepthStencilSlice = fboDSSlice;
+    info.fboDepthStencilLevel = fboDSLevel;
+    info.fboWidth = fboW;
+    info.fboHeight = fboH;
+    (void)fboArrayLen;
+    (void)extraColTex;
+    (void)colAlphaModes;
 }
 
 }  // namespace
@@ -55144,6 +55399,29 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     const std::size_t dstPixelBytes = bytesPerPixel(format, type);
     const std::size_t dstBpc = bytesPerComponent(type);
     const std::size_t dstComponents = componentCountForFormat(format);
+    auto textureViewClassByteWidthForSimpleReadback =
+        [](TextureViewClass cls) -> std::size_t {
+            switch (cls) {
+                case TextureViewClass::Bits128: return 16u;
+                case TextureViewClass::Bits96:  return 12u;
+                case TextureViewClass::Bits64:  return 8u;
+                case TextureViewClass::Bits48:  return 6u;
+                case TextureViewClass::Bits32:  return 4u;
+                case TextureViewClass::Bits24:  return 3u;
+                case TextureViewClass::Bits16:  return 2u;
+                case TextureViewClass::Bits8:   return 1u;
+                default:                        return 0u;
+            }
+        };
+    const TextureViewClass simpleViewClass =
+        textureViewClassForInternalFormat(image.desc.internalFormat);
+    const std::size_t simpleViewClassBytes =
+        textureViewClassByteWidthForSimpleReadback(simpleViewClass);
+    const bool viewClassRawReadbackRequest =
+        object.viewSourceTexture != 0 &&
+        simpleViewClass != TextureViewClass::Undefined &&
+        simpleViewClassBytes != 0u &&
+        dstPixelBytes == simpleViewClassBytes;
     const bool useNativeDepth32FAsRgba8 =
         format == GL_RGBA &&
         type == GL_UNSIGNED_BYTE &&
@@ -55201,6 +55479,18 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     } else if (legacyCompatSourceLevel &&
                format == image.desc.sourceFormat &&
                type == image.desc.sourceType &&
+               image.nativeBpp == dstPixelBytes &&
+               !image.nativeData.empty()) {
+        sourceBytes = image.nativeData.data();
+        sourceBpp = image.nativeBpp;
+        sourceByteCount = image.nativeData.size();
+    } else if (viewClassRawReadbackRequest &&
+               image.rawUploadBpp == dstPixelBytes &&
+               !image.rawUploadData.empty()) {
+        sourceBytes = image.rawUploadData.data();
+        sourceBpp = image.rawUploadBpp;
+        sourceByteCount = image.rawUploadData.size();
+    } else if (viewClassRawReadbackRequest &&
                image.nativeBpp == dstPixelBytes &&
                !image.nativeData.empty()) {
         sourceBytes = image.nativeData.data();
@@ -55295,6 +55585,10 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         sourceIsRGBA8Shadow &&
         ((format == GL_RGBA && type == GL_UNSIGNED_BYTE) ||
          useRGBA8ShadowAsFloat);
+    const bool readbackFormatIsBGR =
+        format == GL_BGR || format == GL_BGR_INTEGER;
+    const bool readbackFormatIsBGRA =
+        format == GL_BGRA || format == GL_BGRA_INTEGER;
     for (GLsizei z = 0; z < texD; ++z) {
         for (GLsizei y = 0; y < texH; ++y) {
             const GLsizei colorSourceY = applyColorYFlip
@@ -55376,14 +55670,37 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
                 continue;
             }
             if (sourceBpp == dstPixelBytes && !packSwapBytes &&
-                !canonicalizeRGBA8ShadowReadback) {
+                !canonicalizeRGBA8ShadowReadback &&
+                !readbackFormatIsBGR &&
+                !readbackFormatIsBGRA) {
                 std::memcpy(dstRow, srcRow, static_cast<std::size_t>(texW) * dstPixelBytes);
                 continue;
             }
             for (GLsizei x = 0; x < texW; ++x) {
                 const std::uint8_t* srcPixel = srcRow + static_cast<std::size_t>(x) * sourceBpp;
                 std::uint8_t* dstPixel = dstRow + static_cast<std::size_t>(x) * dstPixelBytes;
-                std::memcpy(dstPixel, srcPixel, dstPixelBytes);
+                if ((readbackFormatIsBGR || readbackFormatIsBGRA) &&
+                    dstComponents >= 3 &&
+                    sourceBpp >= 3u * dstBpc &&
+                    dstPixelBytes >= dstComponents * dstBpc) {
+                    std::memcpy(dstPixel + 0u * dstBpc,
+                                srcPixel + 2u * dstBpc,
+                                dstBpc);
+                    std::memcpy(dstPixel + 1u * dstBpc,
+                                srcPixel + 1u * dstBpc,
+                                dstBpc);
+                    std::memcpy(dstPixel + 2u * dstBpc,
+                                srcPixel + 0u * dstBpc,
+                                dstBpc);
+                    if (readbackFormatIsBGRA && dstComponents >= 4 &&
+                        sourceBpp >= 4u * dstBpc) {
+                        std::memcpy(dstPixel + 3u * dstBpc,
+                                    srcPixel + 3u * dstBpc,
+                                    dstBpc);
+                    }
+                } else {
+                    std::memcpy(dstPixel, srcPixel, dstPixelBytes);
+                }
                 if (canonicalizeRGBA8ShadowReadback) {
                     canonicalizeSimpleTextureReadbackRGBA8(
                         image.desc.internalFormat,

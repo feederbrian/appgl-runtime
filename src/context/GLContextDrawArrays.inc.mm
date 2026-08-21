@@ -2909,7 +2909,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         *impl_->objects,
         mode,
         "glDrawArrays",
-        GL_SHADING_RATE_1X1_PIXELS_EXT
+        GL_SHADING_RATE_1X1_PIXELS_EXT,
+        impl_->immediate.currentColor
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -2938,6 +2939,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     setup.info.indices = nullptr;
     setup.info.indexCount = 0;
     setup.info.indexType = 0;
+    populateSolidColorFboTarget(*impl_, setup.info);
 
     const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
     if (ok) {

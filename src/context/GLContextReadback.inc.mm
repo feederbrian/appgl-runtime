@@ -538,10 +538,17 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                     return false;
                 }
                 const auto level = texture->levels.find(resolved.level);
+                const GLenum attachmentInternalFormat =
+                    resolved.attachedTexture != nullptr &&
+                    resolved.attachedTexture->desc.internalFormat != 0
+                        ? resolved.attachedTexture->desc.internalFormat
+                        : (level != texture->levels.end()
+                               ? level->second.desc.internalFormat
+                               : 0);
                 return level != texture->levels.end() &&
                        level->second.defined &&
                        rgba8ShadowMatchesNativeFormat(
-                           level->second.desc.internalFormat) &&
+                           attachmentInternalFormat) &&
                        (!level->second.rgba8.empty() ||
                         level->second.lazyFboCanonicalClearPending);
             }

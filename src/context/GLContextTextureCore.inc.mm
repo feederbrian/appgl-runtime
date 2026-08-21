@@ -47,6 +47,22 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
                 GLint minLayer = 0;
             };
             std::vector<RebasedView> rebased;
+            auto invalidateDescendantViewMetalCaches =
+                [&](GLTextureObject& viewObject) {
+                    impl_->releaseDepthCompareTextureView(viewObject);
+                    impl_->releaseDepthCompare1DMipTextures(viewObject);
+                    viewObject.r5DepthCompareViewEvicted = false;
+                    releaseRetainedMetalObject(viewObject.metalTexture);
+                    viewObject.metalTexture = nullptr;
+                    viewObject.instantiated = false;
+                    releaseRetainedMetalObject(viewObject.metalSwizzledView);
+                    viewObject.metalSwizzledView = nullptr;
+                    viewObject.swizzleDirty = true;
+                    releaseRetainedMetalObject(viewObject.metalLinearRenderView);
+                    viewObject.metalLinearRenderView = nullptr;
+                    releaseRetainedMetalObject(viewObject.metalSamplingProxy);
+                    viewObject.metalSamplingProxy = nullptr;
+                };
             impl_->objects->textures().forEach(
                 [&](GLuint viewName, GLTextureObject& viewObject) {
                     if (viewObject.viewSourceTexture != sourceName) {
@@ -141,6 +157,7 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
                                 std::max<GLint>(0,
                                                 child.viewMinLayer -
                                                     view.minLayer);
+                            invalidateDescendantViewMetalCaches(child);
                             stack.push_back(childName);
                         });
                 }
@@ -3836,6 +3853,8 @@ bool GLContext::generateMipmap(GLenum target) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    const GLenum bindingTarget = Impl::normalizeTextureBindingTarget(target);
+    const GLuint boundTextureName = impl_->state->boundTexture(bindingTarget);
     GLTextureObject* object = impl_->currentTexture(target);
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);
@@ -3871,18 +3890,78 @@ bool GLContext::generateMipmap(GLenum target) {
             return false;
         }
     }
+    GLTextureObject* mipObject = object;
+    GLuint mipTextureName = boundTextureName;
+    GLenum mipGenerationInternalFormat = 0;
+    std::optional<GLTextureParameters> savedSourceParams;
+    if (object->viewSourceTexture != 0) {
+        const GLint viewLevels = std::max<GLint>(
+            object->viewNumLevels > 0 ? object->viewNumLevels
+                                      : object->desc.levels,
+            1);
+        const GLint viewBase = std::max<GLint>(object->params.baseLevel, 0);
+        if (viewBase >= viewLevels ||
+            object->params.maxLevel < viewBase) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const GLint viewMax = std::min<GLint>(
+            std::max<GLint>(object->params.maxLevel, 0),
+            viewLevels - 1);
+
+        GLuint rootName = object->viewSourceTexture;
+        GLTextureObject* rootObject = impl_->objects->textures().get(rootName);
+        std::unordered_set<GLuint> visited;
+        while (rootObject != nullptr && rootObject->viewSourceTexture != 0) {
+            if (!visited.insert(rootName).second) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            rootName = rootObject->viewSourceTexture;
+            rootObject = impl_->objects->textures().get(rootName);
+        }
+        if (rootObject == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        savedSourceParams = rootObject->params;
+        rootObject->params.baseLevel = object->viewMinLevel + viewBase;
+        rootObject->params.maxLevel = object->viewMinLevel + viewMax;
+        mipObject = rootObject;
+        mipTextureName = rootName;
+        mipGenerationInternalFormat = object->desc.internalFormat;
+    }
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
     impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
-        impl_->state->boundTexture(target), "generate-mipmap");
-    if (!impl_->generateMipmaps(*object)) {
+        mipTextureName, "generate-mipmap");
+    const bool generated =
+        impl_->generateMipmaps(*mipObject, mipGenerationInternalFormat);
+    if (savedSourceParams.has_value()) {
+        mipObject->params = *savedSourceParams;
+    }
+    if (!generated) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (mipObject != object) {
+        impl_->releaseDepthCompareTextureView(*object);
+        impl_->releaseDepthCompare1DMipTextures(*object);
+        object->r5DepthCompareViewEvicted = false;
+        releaseRetainedMetalObject(object->metalTexture);
+        object->metalTexture = nullptr;
+        object->instantiated = false;
+        releaseRetainedMetalObject(object->metalSwizzledView);
+        object->metalSwizzledView = nullptr;
+        object->swizzleDirty = true;
+        releaseRetainedMetalObject(object->metalSamplingProxy);
+        object->metalSamplingProxy = nullptr;
+    }
     impl_->markGpuResourceWrites({
         {Impl::GpuResourceAccess::Kind::Texture,
-         impl_->state->boundTexture(target),
+         mipTextureName,
          kProducerMipmapWrite}
     });
     return true;
