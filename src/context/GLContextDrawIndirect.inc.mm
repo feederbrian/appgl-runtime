@@ -53,7 +53,10 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         return false;
     }
     // Core profile: drawing with default VAO (0) is INVALID_OPERATION.
-    if (impl_->state->boundVertexArray() == 0) {
+    // Compatibility profile keeps the default VAO live, matching the
+    // drawElementsBaseVertex path that resolves currentVertexArrayOrDefault().
+    if (impl_->state->boundVertexArray() == 0 &&
+        !appglCompatProfileEnabled()) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -230,7 +233,10 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         return false;
     }
     // Core profile: drawing with default VAO (0) is INVALID_OPERATION.
-    if (impl_->state->boundVertexArray() == 0) {
+    // Compatibility profile keeps the default VAO live, matching the
+    // drawElementsBaseVertex path that resolves currentVertexArrayOrDefault().
+    if (impl_->state->boundVertexArray() == 0 &&
+        !appglCompatProfileEnabled()) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }

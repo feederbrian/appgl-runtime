@@ -1,6 +1,208 @@
 // This file is textually included by GLContextDraw.inc.mm. Do not compile it directly.
 // It contains the GLContext draw base-vertex method definitions split out for navigation only.
 
+static bool appglReadBaseVertexIndexValue(
+    const void* indices,
+    GLenum indexType,
+    GLsizei index,
+    GLuint& value)
+{
+    if (indices == nullptr || index < 0) {
+        return false;
+    }
+    switch (indexType) {
+        case GL_UNSIGNED_BYTE:
+            value = static_cast<GLuint>(
+                static_cast<const GLubyte*>(indices)[index]);
+            return true;
+        case GL_UNSIGNED_SHORT:
+            value = static_cast<GLuint>(
+                static_cast<const GLushort*>(indices)[index]);
+            return true;
+        case GL_UNSIGNED_INT:
+            value = static_cast<const GLuint*>(indices)[index];
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool appglBuildBaseVertexRebasedIndices(
+    const void* indices,
+    GLenum indexType,
+    GLsizei count,
+    GLint basevertex,
+    std::vector<std::uint32_t>& out)
+{
+    out.clear();
+    if (indices == nullptr || count <= 0) {
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(count));
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint raw = 0;
+        if (!appglReadBaseVertexIndexValue(indices, indexType, i, raw)) {
+            out.clear();
+            return false;
+        }
+        const std::int64_t rebased =
+            static_cast<std::int64_t>(raw) +
+            static_cast<std::int64_t>(basevertex);
+        if (rebased < 0 ||
+            rebased > static_cast<std::int64_t>(
+                std::numeric_limits<std::uint32_t>::max())) {
+            out.clear();
+            return false;
+        }
+        out[static_cast<std::size_t>(i)] =
+            static_cast<std::uint32_t>(rebased);
+    }
+    return true;
+}
+
+struct AppGLBaseVertexClientAttribute {
+    const GLVertexAttributeState* attr = nullptr;
+    std::size_t sourceStride = 0;
+    std::size_t packedOffset = 0;
+};
+
+struct AppGLBaseVertexPackedClientDraw {
+    std::vector<std::uint8_t> vertexBytes;
+    std::vector<TranslatedDrawInfo::VertexAttributeLayout> layouts;
+    std::size_t vertexStride = 0;
+};
+
+static std::size_t appglAlignBaseVertexClientOffset(
+    std::size_t value,
+    std::size_t alignment)
+{
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+static bool appglBuildBaseVertexGenericClientDraw(
+    const GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
+    const void* indices,
+    GLenum indexType,
+    GLsizei count,
+    GLint basevertex,
+    AppGLBaseVertexPackedClientDraw& out)
+{
+    out.vertexBytes.clear();
+    out.layouts.clear();
+    out.vertexStride = 0;
+    if (!appglCompatProfileEnabled() ||
+        indices == nullptr || count <= 0 ||
+        program.hasTessellation ||
+        program.gsPresent ||
+        program.shaderBaseVertexUniformLocation >= 0 ||
+        program.shaderDrawIDUniformLocation >= 0 ||
+        programUsesDrawArrayVertexBaseBuiltins(program, objects) ||
+        programUsesDrawOrPrimitiveIDDependency(program, objects)) {
+        return false;
+    }
+
+    std::vector<AppGLBaseVertexClientAttribute> attributes;
+    for (const auto& input : program.vertexReflection.vertexInputs) {
+        if (input.containsFp64 ||
+            input.sourceLocation >= vao.attributes.size()) {
+            return false;
+        }
+        const GLVertexAttributeState& attr =
+            vao.attributes[input.sourceLocation];
+        if (!attr.enabled) {
+            continue;
+        }
+        if (attr.useSeparatedFormat ||
+            effectiveVertexAttribDivisor(attr, vao) != 0 ||
+            attr.buffer != 0 ||
+            attr.pointer == 0 ||
+            attr.type != GL_FLOAT ||
+            attr.integer ||
+            attr.longData ||
+            attr.normalized != GL_FALSE ||
+            attr.size < 1 ||
+            attr.size > 4) {
+            return false;
+        }
+
+        AppGLBaseVertexClientAttribute packed;
+        packed.attr = &attr;
+        packed.sourceStride = attr.stride > 0
+            ? static_cast<std::size_t>(attr.stride)
+            : static_cast<std::size_t>(attr.size) * sizeof(GLfloat);
+        packed.packedOffset =
+            appglAlignBaseVertexClientOffset(out.vertexStride, 16u);
+        out.vertexStride = packed.packedOffset + sizeof(GLfloat) * 4u;
+        attributes.push_back(packed);
+
+        TranslatedDrawInfo::VertexAttributeLayout layout;
+        layout.location = input.location;
+        layout.offset = packed.packedOffset;
+        layout.glType = GL_FLOAT;
+        layout.glComponentCount = attr.size;
+        layout.glNormalized = GL_FALSE;
+        layout.glIsInteger = false;
+        out.layouts.push_back(layout);
+    }
+
+    if (attributes.empty()) {
+        return false;
+    }
+    out.vertexStride =
+        appglAlignBaseVertexClientOffset(out.vertexStride, 16u);
+    if (out.vertexStride == 0 ||
+        static_cast<std::size_t>(count) >
+            std::numeric_limits<std::size_t>::max() / out.vertexStride) {
+        out.vertexBytes.clear();
+        out.layouts.clear();
+        out.vertexStride = 0;
+        return false;
+    }
+    out.vertexBytes.assign(
+        static_cast<std::size_t>(count) * out.vertexStride, 0u);
+
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint raw = 0;
+        if (!appglReadBaseVertexIndexValue(indices, indexType, i, raw)) {
+            out.vertexBytes.clear();
+            out.layouts.clear();
+            out.vertexStride = 0;
+            return false;
+        }
+        const std::int64_t rebased =
+            static_cast<std::int64_t>(raw) +
+            static_cast<std::int64_t>(basevertex);
+        if (rebased < 0 ||
+            rebased > static_cast<std::int64_t>(
+                std::numeric_limits<std::uint32_t>::max())) {
+            out.vertexBytes.clear();
+            out.layouts.clear();
+            out.vertexStride = 0;
+            return false;
+        }
+        for (const auto& packed : attributes) {
+            const auto* sourceBase =
+                reinterpret_cast<const std::uint8_t*>(packed.attr->pointer);
+            const auto* source =
+                reinterpret_cast<const GLfloat*>(
+                    sourceBase +
+                    static_cast<std::size_t>(rebased) *
+                        packed.sourceStride);
+            auto* dest = reinterpret_cast<GLfloat*>(
+                out.vertexBytes.data() +
+                static_cast<std::size_t>(i) * out.vertexStride +
+                packed.packedOffset);
+            dest[0] = source[0];
+            dest[1] = packed.attr->size >= 2 ? source[1] : 0.0f;
+            dest[2] = packed.attr->size >= 3 ? source[2] : 0.0f;
+            dest[3] = packed.attr->size >= 4 ? source[3] : 1.0f;
+        }
+    }
+    return true;
+}
+
 #line 935 "/private/tmp/appgl-bug3-clean/src/context/GLContextDraw.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextDraw.inc.mm.
 bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex, GLuint drawID, bool forceDrawPrepReset) {
     // GL 4.6 §10.5: mode must be a valid primitive-assembly enum.
@@ -52,59 +254,183 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
 
-    // Resolve element buffer — same as drawElements.
+    // Resolve element indices. GL 2.x compatibility allows client-side index
+    // pointers when no GL_ELEMENT_ARRAY_BUFFER is bound; drawElements already
+    // supports this path, and base-vertex variants must match it.
     const GLuint vaoName = impl_->state->boundVertexArray();
-    GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+    GLVertexArrayObject* vao = (vaoName != 0)
+        ? impl_->objects->vertexArrays().get(vaoName)
+        : (appglCompatProfileEnabled()
+            ? impl_->currentVertexArrayOrDefault()
+            : nullptr);
     if (vao == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
     const GLuint elementBufferName = vao->elementArrayBuffer;
-    if (elementBufferName == 0) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    GLBufferObject* elementBuffer = impl_->objects->buffers().get(elementBufferName);
-    if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-
-    const std::size_t indexOffset = reinterpret_cast<std::uintptr_t>(indices);
-    if (indexOffset > elementBuffer->shadowBytes.size()) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
-
-    // Handle GL_UNSIGNED_BYTE expansion (same as drawElements).
+    GLBufferObject* elementBuffer = nullptr;
     GLenum effectiveType = type;
-    const void* effectivePtr = indexPtr;
-    if (elementIndexTypeNeedsExpansion(type)) {
-        const bool expansionCacheHit =
-            elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
-            !elementBuffer->cachedExpandedIndices.empty();
-        if (!expansionCacheHit) {
-            const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
-            IndexExpansionResult result = expandElementIndices(
-                totalIndices, type, elementBuffer->shadowBytes.data());
-            if (!result.ok) {
-                pushError(result.error);
+    const void* effectivePtr = nullptr;
+    std::size_t indexOffset = 0;
+    thread_local std::vector<std::uint8_t> clientIndexScratch;
+    clientIndexScratch.clear();
+    if (elementBufferName == 0) {
+        if (count > 0 && indices == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        IndexExpansionResult result = expandElementIndices(count, type, indices);
+        if (!result.ok) {
+            pushError(result.error);
+            return false;
+        }
+        clientIndexScratch = std::move(result.bytes);
+        effectiveType = result.outputType;
+        effectivePtr = clientIndexScratch.data();
+        if (elementIndexTypeNeedsExpansion(type)) {
+            logIndexExpansionCostClass(
+                "drawElementsBaseVertex-client", 0, type, effectiveType,
+                count, clientIndexScratch.size(), false, 0);
+        }
+    } else {
+        elementBuffer = impl_->objects->buffers().get(elementBufferName);
+        if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+        if (indexOffset > elementBuffer->shadowBytes.size()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+        effectivePtr = indexPtr;
+
+        // Handle GL_UNSIGNED_BYTE expansion (same as drawElements).
+        if (elementIndexTypeNeedsExpansion(type)) {
+            const bool expansionCacheHit =
+                elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
+                !elementBuffer->cachedExpandedIndices.empty();
+            if (!expansionCacheHit) {
+                const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+                IndexExpansionResult result = expandElementIndices(
+                    totalIndices, type, elementBuffer->shadowBytes.data());
+                if (!result.ok) {
+                    pushError(result.error);
+                    return false;
+                }
+                elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+                elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+                impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
+            }
+            effectiveType = GL_UNSIGNED_SHORT;
+            const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+            effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+            impl_->touchR5ExpandedIndexCache(*elementBuffer);
+            logIndexExpansionCostClass(
+                "drawElementsBaseVertex", elementBufferName, type, effectiveType,
+                static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
+                elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
+                elementBuffer->cachedExpansionGeneration);
+        }
+    }
+
+    const GLuint currentProgramNameForLegacyDraw = impl_->state->currentProgram();
+    const GLProgramObject* currentProgramForLegacyDraw =
+        currentProgramNameForLegacyDraw != 0
+            ? impl_->objects->programs().get(currentProgramNameForLegacyDraw)
+            : nullptr;
+    const bool transformFeedbackActiveForLegacyDraw =
+        isTransformFeedbackActive();
+    const bool transformFeedbackCaptureActiveForLegacyDraw =
+        transformFeedbackActiveForLegacyDraw && !isTransformFeedbackPaused();
+    const bool requiresTranslatedLegacyTfCapture =
+        transformFeedbackCaptureActiveForLegacyDraw &&
+        currentProgramForLegacyDraw != nullptr &&
+        currentProgramForLegacyDraw->linked &&
+        currentProgramForLegacyDraw->hasTranslatedPipeline &&
+        !currentProgramForLegacyDraw->transformFeedbackVaryingNames.empty();
+    const bool routeLegacyClientArrayThroughTranslatedProgram = [&]() {
+        if (requiresTranslatedLegacyTfCapture ||
+            currentProgramForLegacyDraw == nullptr ||
+            !currentProgramForLegacyDraw->linked ||
+            !currentProgramForLegacyDraw->hasTranslatedPipeline ||
+            currentProgramForLegacyDraw->hasTessellation ||
+            currentProgramForLegacyDraw->gsPresent) {
+            return false;
+        }
+        const auto& vertexArray = impl_->legacyVertexArray;
+        if (!vertexArray.enabled ||
+            (vertexArray.pointer == nullptr && vertexArray.bufferName == 0) ||
+            vertexArray.type != GL_FLOAT ||
+            vertexArray.size < 2 || vertexArray.size > 4) {
+            return false;
+        }
+        bool hasPositionInput = false;
+        for (const auto& input :
+             currentProgramForLegacyDraw->vertexReflection.vertexInputs) {
+            const GLuint location = input.location;
+            const GLuint sourceLocation = input.sourceLocation;
+            const bool supportedLocation =
+                location == 0 || location == 1 || location == 3 ||
+                location == 4 || location == 8 ||
+                sourceLocation == 0 || sourceLocation == 1 ||
+                sourceLocation == 3 || sourceLocation == 4 ||
+                sourceLocation == 8;
+            if (input.containsFp64 || !supportedLocation) {
                 return false;
             }
-            elementBuffer->cachedExpandedIndices = std::move(result.bytes);
-            elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
-            impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
+            hasPositionInput = hasPositionInput ||
+                location == 0 || sourceLocation == 0;
         }
-        effectiveType = GL_UNSIGNED_SHORT;
-        const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
-        effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
-        impl_->touchR5ExpandedIndexCache(*elementBuffer);
-        logIndexExpansionCostClass(
-            "drawElementsBaseVertex", elementBufferName, type, effectiveType,
-            static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
-            elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
-            elementBuffer->cachedExpansionGeneration);
+        if (!hasPositionInput) {
+            return false;
+        }
+        const GLVertexArrayObject* currentVao =
+            impl_->currentVertexArrayOrDefault();
+        if (currentVao != nullptr) {
+            for (const auto& input :
+                 currentProgramForLegacyDraw->vertexReflection.vertexInputs) {
+                if (input.sourceLocation < currentVao->attributes.size() &&
+                    currentVao->attributes[input.sourceLocation].enabled) {
+                    return false;
+                }
+            }
+        }
+        const auto& raster = impl_->state->rasterState();
+        return raster.polygonModeFront == GL_FILL &&
+            raster.polygonModeBack == GL_FILL;
+    }();
+    const bool suppressLegacyFixedFunctionForTf =
+        transformFeedbackCaptureActiveForLegacyDraw;
+    const bool hasProgrammableDrawForLegacyFallback =
+        currentProgramNameForLegacyDraw != 0 ||
+        impl_->state->currentProgramPipeline() != 0;
+    std::vector<std::uint32_t> legacyRebasedIndices;
+    const bool haveLegacyRebasedIndices =
+        appglBuildBaseVertexRebasedIndices(
+            effectivePtr, effectiveType, count, basevertex,
+            legacyRebasedIndices);
+    if (routeLegacyClientArrayThroughTranslatedProgram &&
+        haveLegacyRebasedIndices &&
+        impl_->encodeLegacyClientArrayTranslatedProgramDraw(
+            mode, legacyRebasedIndices.data(), count, GL_UNSIGNED_INT,
+            "drawElementsBaseVertex-legacy-logical-vertex-id",
+            /*instanceCount=*/1, /*baseInstance=*/0,
+            /*shaderBaseVertex=*/basevertex)) {
+        return true;
+    }
+    if (!suppressLegacyFixedFunctionForTf &&
+        !hasProgrammableDrawForLegacyFallback &&
+        !requiresTranslatedLegacyTfCapture &&
+        haveLegacyRebasedIndices &&
+        encodeLegacyClientArrayDraw(
+            mode, 0, count, legacyRebasedIndices.data(), GL_UNSIGNED_INT,
+            routeLegacyClientArrayThroughTranslatedProgram
+                ? "glDrawElementsBaseVertex-translated-fallback"
+                : "glDrawElementsBaseVertex")) {
+        return true;
     }
 
     // Try translated shader pipeline first.
@@ -213,7 +539,9 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
                     tdi.glIndexBuffer = elementBufferName;
-                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
+                    if (!elementIndexTypeNeedsExpansion(type) &&
+                        elementBuffer != nullptr &&
+                        elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         if (impl_->frameGraph != nullptr) {
                             elementBuffer->liveBindSubmitIndex =
@@ -441,59 +769,182 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
 
-    // Resolve element buffer.
+    // Resolve element indices. In compatibility profile with no
+    // GL_ELEMENT_ARRAY_BUFFER, `indices` is a client pointer, not an offset.
     const GLuint vaoName = impl_->state->boundVertexArray();
-    GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+    GLVertexArrayObject* vao = (vaoName != 0)
+        ? impl_->objects->vertexArrays().get(vaoName)
+        : (appglCompatProfileEnabled()
+            ? impl_->currentVertexArrayOrDefault()
+            : nullptr);
     if (vao == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
     const GLuint elementBufferName = vao->elementArrayBuffer;
-    if (elementBufferName == 0) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    GLBufferObject* elementBuffer = impl_->objects->buffers().get(elementBufferName);
-    if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-
-    const std::size_t indexOffset = reinterpret_cast<std::uintptr_t>(indices);
-    if (indexOffset > elementBuffer->shadowBytes.size()) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
-
+    GLBufferObject* elementBuffer = nullptr;
     GLenum effectiveType = type;
-    const void* effectivePtr = indexPtr;
-    if (elementIndexTypeNeedsExpansion(type)) {
-        const bool expansionCacheHit =
-            elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
-            !elementBuffer->cachedExpandedIndices.empty();
-        if (!expansionCacheHit) {
-            const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
-            IndexExpansionResult result = expandElementIndices(
-                totalIndices, type, elementBuffer->shadowBytes.data());
-            if (!result.ok) {
-                pushError(result.error);
+    const void* effectivePtr = nullptr;
+    std::size_t indexOffset = 0;
+    thread_local std::vector<std::uint8_t> clientIndexScratch;
+    clientIndexScratch.clear();
+    if (elementBufferName == 0) {
+        if (count > 0 && indices == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        IndexExpansionResult result = expandElementIndices(count, type, indices);
+        if (!result.ok) {
+            pushError(result.error);
+            return false;
+        }
+        clientIndexScratch = std::move(result.bytes);
+        effectiveType = result.outputType;
+        effectivePtr = clientIndexScratch.data();
+        if (elementIndexTypeNeedsExpansion(type)) {
+            logIndexExpansionCostClass(
+                "drawElementsInstancedBaseVertex-client", 0,
+                type, effectiveType, count, clientIndexScratch.size(),
+                false, 0);
+        }
+    } else {
+        elementBuffer = impl_->objects->buffers().get(elementBufferName);
+        if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+        if (indexOffset > elementBuffer->shadowBytes.size()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+        effectivePtr = indexPtr;
+
+        if (elementIndexTypeNeedsExpansion(type)) {
+            const bool expansionCacheHit =
+                elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
+                !elementBuffer->cachedExpandedIndices.empty();
+            if (!expansionCacheHit) {
+                const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+                IndexExpansionResult result = expandElementIndices(
+                    totalIndices, type, elementBuffer->shadowBytes.data());
+                if (!result.ok) {
+                    pushError(result.error);
+                    return false;
+                }
+                elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+                elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+                impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
+            }
+            effectiveType = GL_UNSIGNED_SHORT;
+            const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+            effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+            impl_->touchR5ExpandedIndexCache(*elementBuffer);
+            logIndexExpansionCostClass(
+                "drawElementsInstancedBaseVertex", elementBufferName,
+                type, effectiveType,
+                static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
+                elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
+                elementBuffer->cachedExpansionGeneration);
+        }
+    }
+
+    const GLuint currentProgramNameForLegacyDraw = impl_->state->currentProgram();
+    const GLProgramObject* currentProgramForLegacyDraw =
+        currentProgramNameForLegacyDraw != 0
+            ? impl_->objects->programs().get(currentProgramNameForLegacyDraw)
+            : nullptr;
+    const bool transformFeedbackActiveForLegacyDraw =
+        isTransformFeedbackActive();
+    const bool transformFeedbackCaptureActiveForLegacyDraw =
+        transformFeedbackActiveForLegacyDraw && !isTransformFeedbackPaused();
+    const bool requiresTranslatedLegacyTfCapture =
+        transformFeedbackCaptureActiveForLegacyDraw &&
+        currentProgramForLegacyDraw != nullptr &&
+        currentProgramForLegacyDraw->linked &&
+        currentProgramForLegacyDraw->hasTranslatedPipeline &&
+        !currentProgramForLegacyDraw->transformFeedbackVaryingNames.empty();
+    const bool routeLegacyClientArrayThroughTranslatedProgram = [&]() {
+        if (requiresTranslatedLegacyTfCapture ||
+            currentProgramForLegacyDraw == nullptr ||
+            !currentProgramForLegacyDraw->linked ||
+            !currentProgramForLegacyDraw->hasTranslatedPipeline ||
+            currentProgramForLegacyDraw->hasTessellation ||
+            currentProgramForLegacyDraw->gsPresent) {
+            return false;
+        }
+        const auto& vertexArray = impl_->legacyVertexArray;
+        if (!vertexArray.enabled ||
+            (vertexArray.pointer == nullptr && vertexArray.bufferName == 0) ||
+            vertexArray.type != GL_FLOAT ||
+            vertexArray.size < 2 || vertexArray.size > 4) {
+            return false;
+        }
+        bool hasPositionInput = false;
+        for (const auto& input :
+             currentProgramForLegacyDraw->vertexReflection.vertexInputs) {
+            const GLuint location = input.location;
+            const GLuint sourceLocation = input.sourceLocation;
+            const bool supportedLocation =
+                location == 0 || location == 1 || location == 3 ||
+                location == 4 || location == 8 ||
+                sourceLocation == 0 || sourceLocation == 1 ||
+                sourceLocation == 3 || sourceLocation == 4 ||
+                sourceLocation == 8;
+            if (input.containsFp64 || !supportedLocation) {
                 return false;
             }
-            elementBuffer->cachedExpandedIndices = std::move(result.bytes);
-            elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
-            impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
+            hasPositionInput = hasPositionInput ||
+                location == 0 || sourceLocation == 0;
         }
-        effectiveType = GL_UNSIGNED_SHORT;
-        const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
-        effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
-        impl_->touchR5ExpandedIndexCache(*elementBuffer);
-        logIndexExpansionCostClass(
-            "drawElementsInstancedBaseVertex", elementBufferName,
-            type, effectiveType,
-            static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
-            elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
-            elementBuffer->cachedExpansionGeneration);
+        if (!hasPositionInput) {
+            return false;
+        }
+        const GLVertexArrayObject* currentVao =
+            impl_->currentVertexArrayOrDefault();
+        if (currentVao != nullptr) {
+            for (const auto& input :
+                 currentProgramForLegacyDraw->vertexReflection.vertexInputs) {
+                if (input.sourceLocation < currentVao->attributes.size() &&
+                    currentVao->attributes[input.sourceLocation].enabled) {
+                    return false;
+                }
+            }
+        }
+        const auto& raster = impl_->state->rasterState();
+        return raster.polygonModeFront == GL_FILL &&
+            raster.polygonModeBack == GL_FILL;
+    }();
+    const bool suppressLegacyFixedFunctionForTf =
+        transformFeedbackCaptureActiveForLegacyDraw;
+    const bool hasProgrammableDrawForLegacyFallback =
+        currentProgramNameForLegacyDraw != 0 ||
+        impl_->state->currentProgramPipeline() != 0;
+    std::vector<std::uint32_t> legacyRebasedIndices;
+    const bool haveLegacyRebasedIndices =
+        appglBuildBaseVertexRebasedIndices(
+            effectivePtr, effectiveType, count, basevertex,
+            legacyRebasedIndices);
+    if (routeLegacyClientArrayThroughTranslatedProgram &&
+        haveLegacyRebasedIndices &&
+        impl_->encodeLegacyClientArrayTranslatedProgramDraw(
+            mode, legacyRebasedIndices.data(), count, GL_UNSIGNED_INT,
+            "drawElementsInstancedBaseVertex-legacy-logical-vertex-id",
+            instancecount, baseinstance, basevertex)) {
+        return true;
+    }
+    if (!suppressLegacyFixedFunctionForTf &&
+        !hasProgrammableDrawForLegacyFallback &&
+        !requiresTranslatedLegacyTfCapture &&
+        haveLegacyRebasedIndices &&
+        encodeLegacyClientArrayDraw(
+            mode, 0, count, legacyRebasedIndices.data(), GL_UNSIGNED_INT,
+            routeLegacyClientArrayThroughTranslatedProgram
+                ? "glDrawElementsInstancedBaseVertex-translated-fallback"
+                : "glDrawElementsInstancedBaseVertex")) {
+        return true;
     }
 
     // Try translated shader pipeline first.
@@ -796,6 +1247,132 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
                 ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
                 : nullptr;
+            AppGLBaseVertexPackedClientDraw packedClientDraw;
+            if (vbo == nullptr &&
+                appglBuildBaseVertexGenericClientDraw(
+                    *program, *vao, *impl_->objects, effectivePtr,
+                    effectiveType, count, basevertex, packedClientDraw)) {
+                TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
+                tdi.mode = mode;
+                tdi.vertexCount = count;
+                tdi.baseVertex = 0;
+                tdi.shaderBaseVertex = basevertex;
+                tdi.instanceCount = instancecount;
+                tdi.baseInstance = baseinstance;
+                tdi.vertexData = packedClientDraw.vertexBytes.data();
+                tdi.vertexDataByteCount = packedClientDraw.vertexBytes.size();
+                tdi.vertexStride = packedClientDraw.vertexStride;
+                tdi.metalVertexBuffer = nullptr;
+                tdi.metalVertexBufferOffset = 0;
+                tdi.glVertexBuffer = 0;
+                tdi.indices = nullptr;
+                tdi.indexCount = 0;
+                tdi.indexType = 0;
+                tdi.glIndexBuffer = 0;
+                tdi.metalIndexBuffer = nullptr;
+                tdi.metalIndexBufferOffset = 0;
+                tdi.vertexAttributeLayouts =
+                    std::move(packedClientDraw.layouts);
+
+                populateTranslatedDrawFixedFunctionState(
+                    tdi, *impl_->state,
+                    effectiveFragmentShadingRateForProgram(*this, program),
+                    this);
+                assignTranslatedDrawProgramMsl(tdi, *program);
+                tdi.vertexReflection = &program->vertexReflection;
+                tdi.fragmentReflection = &program->fragmentReflection;
+                tdi.pipelineStateOut = &program->metalPipelineState;
+                tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                tdi.pipelineStateCacheLastUseOut =
+                    &program->metalPipelineStateCacheLastUse;
+                tdi.pipelineStateCacheHighWaterOut =
+                    &program->metalPipelineStateCacheHighWater;
+                tdi.pipelineStateCacheHitsOut =
+                    &program->metalPipelineStateCacheHits;
+                tdi.pipelineStateCacheMissesOut =
+                    &program->metalPipelineStateCacheMisses;
+                tdi.pipelineStateCacheEvictionsOut =
+                    &program->metalPipelineStateCacheEvictions;
+                tdi.metalVertexFunction = program->metalVertexFunction;
+                tdi.metalFragmentFunction = program->metalFragmentFunction;
+                tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
+                tdi.program = programName;
+                tdi.pipelineEmulationFragmentProgram =
+                    program->pipelineEmulationFragmentProgram;
+
+                logStateResolveCostClass(
+                    "drawElementsInstancedBaseVertex-client-generic",
+                    programName, vaoName, tdi, vao->attributes.size(),
+                    vaoLayoutCacheHit);
+                const double bindingConstructionUniformPackUs =
+                    impl_->prepareBindingConstructionUniformBuffers(
+                        *program, programName, drawID, tdi,
+                        "drawElementsInstancedBaseVertex-client-generic");
+                impl_->resolveBindingConstructionForTranslatedDraw(
+                    *program, tdi, bindingConstructionUniformPackUs);
+
+                {
+                    GLsizei fboW = 0, fboH = 0;
+                    void* fboDSTex = nullptr;
+                    std::uint32_t fboArrayLen = 0;
+                    std::uint32_t fboDSSlice = 0;
+                    std::uint32_t fboDSLevel = 0;
+                    std::array<void*, 7> extraColTex = {};
+                    std::array<std::uint32_t, 8> colSlices = {};
+                    std::array<std::uint32_t, 8> colLevels = {};
+                    std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
+                    void* fboColTex = impl_->resolveFBOColorTarget(
+                        fboW, fboH, fboDSTex, &fboArrayLen,
+                        &extraColTex, &colSlices, &colLevels,
+                        &colAlphaModes,
+                        &fboDSSlice, &fboDSLevel);
+                    if (fboColTex != nullptr || fboDSTex != nullptr ||
+                        std::any_of(extraColTex.begin(), extraColTex.end(),
+                                    [](void* tex) { return tex != nullptr; })) {
+                        tdi.fboColorTexture = fboColTex;
+                        tdi.fboAdditionalColorTextures = extraColTex;
+                        tdi.fboColorSlices = colSlices;
+                        tdi.fboColorLevels = colLevels;
+                        tdi.fboColorAlphaModes = colAlphaModes;
+                        tdi.fboColorArrayLength = fboArrayLen;
+                        tdi.fboDepthStencilTexture = fboDSTex;
+                        tdi.fboStencilTexture =
+                            impl_->resolveFBOSeparateStencilTarget(
+                                &tdi.fboStencilSlice,
+                                &tdi.fboStencilLevel);
+                        tdi.fboDepthStencilSlice = fboDSSlice;
+                        tdi.fboDepthStencilLevel = fboDSLevel;
+                        tdi.fboWidth = fboW;
+                        tdi.fboHeight = fboH;
+                    }
+                }
+
+                thread_local std::string pipelineBuildError;
+                pipelineBuildError.clear();
+                tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
+                const TranslatedDrawPreflightSnapshot preflight =
+                    makeTranslatedDrawPreflightSnapshot(
+                        vaoName, vao,
+                        /*genericVertexAttributesPrepared=*/false);
+                const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                    tdi, &preflight);
+                if (ok) {
+                    return true;
+                }
+                if (reportTranslatedFallbackOnce(
+                        program, programName,
+                        TranslatedFallbackGate::EncodeFailed,
+                        "drawElementsInstancedBaseVertex-client-generic",
+                        vaoName, vao->attributes.size(),
+                        vaoLayout.primaryBufferName,
+                        packedClientDraw.vertexBytes.size())) {
+                    recordPipelineBuildFailureOnce(
+                        program, programName, pipelineBuildError);
+                }
+            }
             if (vbo == nullptr) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::NullVBO, "drawElementsInstancedBaseVertex",
@@ -911,7 +1488,9 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     // index buffer (the basevertex 5-case sweep catch).
                     tdi.metalIndexBuffer = nullptr;
                     tdi.metalIndexBufferOffset = 0;
-                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
+                    if (!elementIndexTypeNeedsExpansion(type) &&
+                        elementBuffer != nullptr &&
+                        elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         if (impl_->frameGraph != nullptr) {
                             elementBuffer->liveBindSubmitIndex =

@@ -33353,13 +33353,19 @@ struct GLContext::Impl {
                                               GLsizei indexCount = 0,
                                               GLenum indexType = 0,
                                               std::size_t secondaryColorOffset =
-                                                  std::numeric_limits<std::size_t>::max());
+                                                  std::numeric_limits<std::size_t>::max(),
+                                              GLsizei instanceCount = 1,
+                                              GLuint baseInstance = 0,
+                                              GLint shaderBaseVertex = 0);
     bool encodeLegacyClientArrayTranslatedProgramDraw(
         GLenum mode,
         const void* indices,
         GLsizei indexCount,
         GLenum indexType,
-        const char* label);
+        const char* label,
+        GLsizei instanceCount = 1,
+        GLuint baseInstance = 0,
+        GLint shaderBaseVertex = 0);
     // Draw-local compatibility-array staging tuple. The 48-byte prefix
     // matches ImmediateModeVertex; secondary colour is appended so the
     // established immediate-mode ABI stays unchanged.
@@ -50950,7 +50956,10 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     const void* indices,
     GLsizei indexCount,
     GLenum indexType,
-    std::size_t secondaryColorOffset)
+    std::size_t secondaryColorOffset,
+    GLsizei instanceCount,
+    GLuint baseInstance,
+    GLint shaderBaseVertex)
 {
     const bool hasSecondaryColorData =
         secondaryColorOffset != std::numeric_limits<std::size_t>::max() &&
@@ -50964,6 +50973,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         vertices == nullptr ||
         vertexCount == 0 ||
         vertexStride == 0 ||
+        instanceCount <= 0 ||
         indexCount < 0 ||
         ((indices == nullptr) != (indexCount == 0)) ||
         (indexCount > 0 &&
@@ -51044,10 +51054,31 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         return false;
     }
 
+    const GLuint vaoName = state->boundVertexArray();
+    const GLVertexArrayObject* vao =
+        vaoName != 0 ? objects->vertexArrays().get(vaoName)
+                     : currentVertexArrayOrDefault();
+    auto sourceAttributeEnabled =
+        [&](const ShaderReflection::VertexInput* input) {
+        return vao != nullptr &&
+               input != nullptr &&
+               input->sourceLocation < vao->attributes.size() &&
+               vao->attributes[input->sourceLocation].enabled;
+    };
+    auto isSyntheticCompatTexCoordInput =
+        [](const ShaderReflection::VertexInput* input) {
+        return input != nullptr &&
+               (input->name == "piglit_texcoord" ||
+                input->name == "_piglit_texcoord");
+    };
+
     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
     tdi.mode = mode;
     tdi.vertexCount = static_cast<GLsizei>(vertexCount);
     tdi.baseVertex = 0;
+    tdi.shaderBaseVertex = shaderBaseVertex;
+    tdi.instanceCount = instanceCount;
+    tdi.baseInstance = baseInstance;
     tdi.vertexData = vertices;
     tdi.vertexDataByteCount = vertexCount * vertexStride;
     tdi.vertexStride = vertexStride;
@@ -51071,9 +51102,13 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     };
     addImmediateAttributeLayout(0, 0, 4);
     if (const auto* input = vertexInputAt(1)) {
-        addImmediateAttributeLayout(
-            1, sizeof(float) * 8u,
-            shaderVertexInputComponentCount(input->type));
+        if (sourceAttributeEnabled(input) ||
+            isSyntheticCompatTexCoordInput(input) ||
+            program->attributes.empty()) {
+            addImmediateAttributeLayout(
+                1, sizeof(float) * 8u,
+                shaderVertexInputComponentCount(input->type));
+        }
     }
     if (vertexInputAt(3) != nullptr) {
         addImmediateAttributeLayout(3, sizeof(float) * 4u, 4);
@@ -51158,13 +51193,10 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     immediateTranslatedPipelineBuildError.clear();
     tdi.pipelineBuildErrorOut = &immediateTranslatedPipelineBuildError;
 
-    const GLuint vaoName = state->boundVertexArray();
-    const GLVertexArrayObject* vao =
-        vaoName != 0 ? objects->vertexArrays().get(vaoName) : nullptr;
     const TranslatedDrawPreflightSnapshot preflight =
         makeTranslatedDrawPreflightSnapshot(
             vaoName, vao,
-            /*genericVertexAttributesPrepared=*/true);
+            /*genericVertexAttributesPrepared=*/false);
     const bool ok = encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
     return ok;
 }
@@ -51174,7 +51206,10 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
     const void* indices,
     GLsizei indexCount,
     GLenum indexType,
-    const char* label)
+    const char* label,
+    GLsizei instanceCount,
+    GLuint baseInstance,
+    GLint shaderBaseVertex)
 {
     if (indices == nullptr || indexCount <= 0 ||
         (indexType != GL_UNSIGNED_SHORT && indexType != GL_UNSIGNED_INT)) {
@@ -51400,7 +51435,8 @@ bool GLContext::Impl::encodeLegacyClientArrayTranslatedProgramDraw(
         mode, vertices.data(), vertices.size(),
         sizeof(LegacyTranslatedClientVertex),
         label, indices, indexCount, indexType,
-        offsetof(LegacyTranslatedClientVertex, secondaryColor));
+        offsetof(LegacyTranslatedClientVertex, secondaryColor),
+        instanceCount, baseInstance, shaderBaseVertex);
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,

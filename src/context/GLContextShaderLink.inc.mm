@@ -1164,6 +1164,7 @@ bool GLContext::linkProgram(GLuint program) {
         }
         return count;
     };
+    bool hasCompatSynthesizedVertexAttribLocations = false;
     if (vertexShader != nullptr) {
         std::unordered_set<GLuint> usedAttribLocations;
         auto reserveAttribLocationRange = [&usedAttribLocations](
@@ -1184,6 +1185,39 @@ bool GLContext::linkProgram(GLuint program) {
             }
             return static_cast<GLint>(requested->second);
         };
+        // The compatibility rewriter may synthesize conventional vertex
+        // attributes such as gl_Vertex at fixed backend locations. Reserve
+        // those slots before auto-assigning ordinary user attributes so a
+        // shader that mixes gl_Vertex with an unbound attribute does not
+        // generate duplicate Metal [[attribute(N)]] declarations.
+        const CompatShaderRewriteResult legacyVertexView =
+            rewriteCompatShader(vertexShader->source, GL_VERTEX_SHADER);
+        hasCompatSynthesizedVertexAttribLocations =
+            legacyVertexView.legacy.attrVertex ||
+            legacyVertexView.legacy.attrNormal ||
+            legacyVertexView.legacy.attrColor ||
+            legacyVertexView.legacy.attrSecondaryColor ||
+            std::any_of(
+                legacyVertexView.legacy.attrMultiTexCoord.begin(),
+                legacyVertexView.legacy.attrMultiTexCoord.end(),
+                [](bool used) { return used; });
+        if (legacyVertexView.legacy.attrVertex) {
+            reserveAttribLocationRange(0, 1);
+        }
+        if (legacyVertexView.legacy.attrNormal) {
+            reserveAttribLocationRange(2, 1);
+        }
+        if (legacyVertexView.legacy.attrColor) {
+            reserveAttribLocationRange(3, 1);
+        }
+        if (legacyVertexView.legacy.attrSecondaryColor) {
+            reserveAttribLocationRange(4, 1);
+        }
+        for (unsigned int unit = 0; unit < 8; ++unit) {
+            if (legacyVertexView.legacy.attrMultiTexCoord[unit]) {
+                reserveAttribLocationRange(8u + unit, 1);
+            }
+        }
         auto findFreeAttribLocation =
             [&usedAttribLocations](GLuint slotCount, GLuint& next) -> GLuint {
             slotCount = std::max<GLuint>(1u, slotCount);
@@ -5398,6 +5432,9 @@ bool GLContext::linkProgram(GLuint program) {
                 }
             }
             if (it != locationsByName.end()) {
+                if (hasCompatSynthesizedVertexAttribLocations) {
+                    input.location = it->second;
+                }
                 input.sourceLocation = it->second;
             }
         }
@@ -5509,6 +5546,81 @@ bool GLContext::linkProgram(GLuint program) {
                 spirvData, spirvWords, bindings, nullptr, options);
             if (std::strcmp(stageName, "vertex") == 0) {
                 applyResolvedVertexInputSourceLocations(reflectionOut);
+                if (hasCompatSynthesizedVertexAttribLocations) {
+                    const std::size_t structPos = msl.find("struct main0_in");
+                    if (structPos != std::string::npos) {
+                        const std::size_t bodyStart = msl.find('{', structPos);
+                        std::size_t bodyEnd = msl.find("};", bodyStart);
+                        if (bodyStart != std::string::npos &&
+                            bodyEnd != std::string::npos) {
+                            auto isIdentChar = [](char c) {
+                                return c == '_' ||
+                                    (c >= '0' && c <= '9') ||
+                                    (c >= 'A' && c <= 'Z') ||
+                                    (c >= 'a' && c <= 'z');
+                            };
+                            for (const auto& input :
+                                 reflectionOut.vertexInputs) {
+                                if (input.name.empty()) {
+                                    continue;
+                                }
+                                std::size_t pos = bodyStart;
+                                while ((pos = msl.find(input.name, pos)) !=
+                                       std::string::npos && pos < bodyEnd) {
+                                    const std::size_t end =
+                                        pos + input.name.size();
+                                    const bool leftOk = pos == 0 ||
+                                        !isIdentChar(msl[pos - 1]);
+                                    const bool rightOk = end >= msl.size() ||
+                                        !isIdentChar(msl[end]);
+                                    if (!leftOk || !rightOk) {
+                                        pos = end;
+                                        continue;
+                                    }
+                                    const std::size_t semi =
+                                        msl.find(';', end);
+                                    if (semi == std::string::npos ||
+                                        semi >= bodyEnd) {
+                                        break;
+                                    }
+                                    const std::string attr =
+                                        "[[attribute(" +
+                                        std::to_string(input.location) +
+                                        ")]]";
+                                    const std::size_t existing =
+                                        msl.find("[[attribute(", end);
+                                    if (existing == std::string::npos ||
+                                        existing > semi) {
+                                        const std::string inserted =
+                                            " " + attr;
+                                        msl.insert(semi, inserted);
+                                        bodyEnd += inserted.size();
+                                    } else {
+                                        const std::size_t existingEnd =
+                                            msl.find(")]]", existing);
+                                        if (existingEnd != std::string::npos &&
+                                            existingEnd < semi) {
+                                            const std::size_t replaceEnd =
+                                                existingEnd + 3u;
+                                            const std::size_t oldSize =
+                                                replaceEnd - existing;
+                                            msl.replace(
+                                                existing, oldSize, attr);
+                                            if (attr.size() > oldSize) {
+                                                bodyEnd +=
+                                                    attr.size() - oldSize;
+                                            } else {
+                                                bodyEnd -=
+                                                    oldSize - attr.size();
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } catch (const std::exception& e) {
             APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
@@ -5669,7 +5781,8 @@ bool GLContext::linkProgram(GLuint program) {
         const bool fsDeclaresXfbLayout =
             sourceDeclaresTransformFeedbackLayout(fs420packLinkSource);
         const bool mayInjectResolvedVertexAttribLocations =
-            explicitAttribLocationCount > 0 &&
+            (explicitAttribLocationCount > 0 ||
+             hasCompatSynthesizedVertexAttribLocations) &&
             !hasTransformFeedbackVaryings &&
             !vsDeclaresXfbLayout &&
             !fsDeclaresXfbLayout &&
