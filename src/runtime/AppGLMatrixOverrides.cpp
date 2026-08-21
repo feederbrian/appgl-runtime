@@ -48,6 +48,8 @@ appgl::GLContext* matrixContext() {
 
 }  // namespace
 
+using CompatMatrixCommand = appgl::GLContext::CompatMatrixCommand;
+
 extern "C" void APIENTRY glClientActiveTexture(GLenum texture) {
     auto* ctx = matrixContext();
     if (ctx == nullptr) {
@@ -239,4 +241,243 @@ extern "C" void APIENTRY glFrustum(GLdouble left, GLdouble right, GLdouble botto
         return;
     }
     ctx->matrixState().frustum(left, right, bottom, top, zNear, zFar);
+}
+
+extern "C" void APIENTRY glMatrixLoadfEXT(GLenum mode, const GLfloat* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::LoadMatrixFloat,
+                                  mode, m, nullptr, "glMatrixLoadfEXT");
+}
+
+extern "C" void APIENTRY glMatrixLoaddEXT(GLenum mode, const GLdouble* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::LoadMatrixDouble,
+                                  mode, nullptr, m, "glMatrixLoaddEXT");
+}
+
+extern "C" void APIENTRY glMatrixMultfEXT(GLenum mode, const GLfloat* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::MultMatrixFloat,
+                                  mode, m, nullptr, "glMatrixMultfEXT");
+}
+
+extern "C" void APIENTRY glMatrixMultdEXT(GLenum mode, const GLdouble* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::MultMatrixDouble,
+                                  mode, nullptr, m, "glMatrixMultdEXT");
+}
+
+extern "C" void APIENTRY glMatrixLoadIdentityEXT(GLenum mode) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::LoadIdentity,
+                                  mode, nullptr, nullptr,
+                                  "glMatrixLoadIdentityEXT");
+}
+
+extern "C" void APIENTRY glMatrixRotatefEXT(GLenum mode,
+                                             GLfloat angle,
+                                             GLfloat x,
+                                             GLfloat y,
+                                             GLfloat z) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {
+        static_cast<GLdouble>(angle),
+        static_cast<GLdouble>(x),
+        static_cast<GLdouble>(y),
+        static_cast<GLdouble>(z),
+    };
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Rotate,
+                                  mode, nullptr, values,
+                                  "glMatrixRotatefEXT");
+}
+
+extern "C" void APIENTRY glMatrixRotatedEXT(GLenum mode,
+                                             GLdouble angle,
+                                             GLdouble x,
+                                             GLdouble y,
+                                             GLdouble z) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {angle, x, y, z};
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Rotate,
+                                  mode, nullptr, values,
+                                  "glMatrixRotatedEXT");
+}
+
+extern "C" void APIENTRY glMatrixScalefEXT(GLenum mode,
+                                            GLfloat x,
+                                            GLfloat y,
+                                            GLfloat z) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {
+        static_cast<GLdouble>(x),
+        static_cast<GLdouble>(y),
+        static_cast<GLdouble>(z),
+    };
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Scale,
+                                  mode, nullptr, values,
+                                  "glMatrixScalefEXT");
+}
+
+extern "C" void APIENTRY glMatrixScaledEXT(GLenum mode,
+                                            GLdouble x,
+                                            GLdouble y,
+                                            GLdouble z) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {x, y, z};
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Scale,
+                                  mode, nullptr, values,
+                                  "glMatrixScaledEXT");
+}
+
+extern "C" void APIENTRY glMatrixTranslatefEXT(GLenum mode,
+                                                GLfloat x,
+                                                GLfloat y,
+                                                GLfloat z) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {
+        static_cast<GLdouble>(x),
+        static_cast<GLdouble>(y),
+        static_cast<GLdouble>(z),
+    };
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Translate,
+                                  mode, nullptr, values,
+                                  "glMatrixTranslatefEXT");
+}
+
+extern "C" void APIENTRY glMatrixTranslatedEXT(GLenum mode,
+                                                GLdouble x,
+                                                GLdouble y,
+                                                GLdouble z) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {x, y, z};
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Translate,
+                                  mode, nullptr, values,
+                                  "glMatrixTranslatedEXT");
+}
+
+extern "C" void APIENTRY glMatrixOrthoEXT(GLenum mode,
+                                           GLdouble left,
+                                           GLdouble right,
+                                           GLdouble bottom,
+                                           GLdouble top,
+                                           GLdouble zNear,
+                                           GLdouble zFar) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {left, right, bottom, top, zNear, zFar};
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Ortho,
+                                  mode, nullptr, values,
+                                  "glMatrixOrthoEXT");
+}
+
+extern "C" void APIENTRY glMatrixFrustumEXT(GLenum mode,
+                                             GLdouble left,
+                                             GLdouble right,
+                                             GLdouble bottom,
+                                             GLdouble top,
+                                             GLdouble zNear,
+                                             GLdouble zFar) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    const GLdouble values[] = {left, right, bottom, top, zNear, zFar};
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Frustum,
+                                  mode, nullptr, values,
+                                  "glMatrixFrustumEXT");
+}
+
+extern "C" void APIENTRY glMatrixPushEXT(GLenum mode) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Push,
+                                  mode, nullptr, nullptr,
+                                  "glMatrixPushEXT");
+}
+
+extern "C" void APIENTRY glMatrixPopEXT(GLenum mode) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::Pop,
+                                  mode, nullptr, nullptr,
+                                  "glMatrixPopEXT");
+}
+
+extern "C" void APIENTRY glMatrixLoadTransposefEXT(GLenum mode, const GLfloat* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::LoadTransposeMatrixFloat,
+                                  mode, m, nullptr,
+                                  "glMatrixLoadTransposefEXT");
+}
+
+extern "C" void APIENTRY glMatrixLoadTransposedEXT(GLenum mode, const GLdouble* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::LoadTransposeMatrixDouble,
+                                  mode, nullptr, m,
+                                  "glMatrixLoadTransposedEXT");
+}
+
+extern "C" void APIENTRY glMatrixMultTransposefEXT(GLenum mode, const GLfloat* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::MultTransposeMatrixFloat,
+                                  mode, m, nullptr,
+                                  "glMatrixMultTransposefEXT");
+}
+
+extern "C" void APIENTRY glMatrixMultTransposedEXT(GLenum mode, const GLdouble* m) {
+    auto* ctx = matrixContext();
+    if (ctx == nullptr || m == nullptr) {
+        return;
+    }
+    ctx->applyMatrixCommandCompat(CompatMatrixCommand::MultTransposeMatrixDouble,
+                                  mode, nullptr, m,
+                                  "glMatrixMultTransposedEXT");
 }

@@ -1008,6 +1008,25 @@ void APIENTRY glEnableClientStateiEXT(GLenum array, GLuint index);
 void APIENTRY glDisableClientStateiEXT(GLenum array, GLuint index);
 void APIENTRY glGetPointerIndexedvEXT(GLenum target, GLuint index, void **data);
 void APIENTRY glGetPointeri_vEXT(GLenum pname, GLuint index, void **params);
+void APIENTRY glMatrixLoadfEXT(GLenum mode, const GLfloat *m);
+void APIENTRY glMatrixLoaddEXT(GLenum mode, const GLdouble *m);
+void APIENTRY glMatrixMultfEXT(GLenum mode, const GLfloat *m);
+void APIENTRY glMatrixMultdEXT(GLenum mode, const GLdouble *m);
+void APIENTRY glMatrixLoadIdentityEXT(GLenum mode);
+void APIENTRY glMatrixRotatefEXT(GLenum mode, GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glMatrixRotatedEXT(GLenum mode, GLdouble angle, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glMatrixScalefEXT(GLenum mode, GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glMatrixScaledEXT(GLenum mode, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glMatrixTranslatefEXT(GLenum mode, GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glMatrixTranslatedEXT(GLenum mode, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glMatrixOrthoEXT(GLenum mode, GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+void APIENTRY glMatrixFrustumEXT(GLenum mode, GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+void APIENTRY glMatrixPushEXT(GLenum mode);
+void APIENTRY glMatrixPopEXT(GLenum mode);
+void APIENTRY glMatrixLoadTransposefEXT(GLenum mode, const GLfloat *m);
+void APIENTRY glMatrixLoadTransposedEXT(GLenum mode, const GLdouble *m);
+void APIENTRY glMatrixMultTransposefEXT(GLenum mode, const GLfloat *m);
+void APIENTRY glMatrixMultTransposedEXT(GLenum mode, const GLdouble *m);
 }  // extern "C"
 
 namespace {
@@ -1789,7 +1808,26 @@ const ProcEntry kProcTable[] = {
     {"glMaterialfv", reinterpret_cast<AppGLProc>(&::glMaterialfv)},
     {"glMateriali", reinterpret_cast<AppGLProc>(&::glMateriali)},
     {"glMaterialiv", reinterpret_cast<AppGLProc>(&::glMaterialiv)},
+    {"glMatrixFrustumEXT", reinterpret_cast<AppGLProc>(&::glMatrixFrustumEXT)},
+    {"glMatrixLoadIdentityEXT", reinterpret_cast<AppGLProc>(&::glMatrixLoadIdentityEXT)},
+    {"glMatrixLoadTransposedEXT", reinterpret_cast<AppGLProc>(&::glMatrixLoadTransposedEXT)},
+    {"glMatrixLoadTransposefEXT", reinterpret_cast<AppGLProc>(&::glMatrixLoadTransposefEXT)},
+    {"glMatrixLoaddEXT", reinterpret_cast<AppGLProc>(&::glMatrixLoaddEXT)},
+    {"glMatrixLoadfEXT", reinterpret_cast<AppGLProc>(&::glMatrixLoadfEXT)},
     {"glMatrixMode", reinterpret_cast<AppGLProc>(&::glMatrixMode)},
+    {"glMatrixMultTransposedEXT", reinterpret_cast<AppGLProc>(&::glMatrixMultTransposedEXT)},
+    {"glMatrixMultTransposefEXT", reinterpret_cast<AppGLProc>(&::glMatrixMultTransposefEXT)},
+    {"glMatrixMultdEXT", reinterpret_cast<AppGLProc>(&::glMatrixMultdEXT)},
+    {"glMatrixMultfEXT", reinterpret_cast<AppGLProc>(&::glMatrixMultfEXT)},
+    {"glMatrixOrthoEXT", reinterpret_cast<AppGLProc>(&::glMatrixOrthoEXT)},
+    {"glMatrixPopEXT", reinterpret_cast<AppGLProc>(&::glMatrixPopEXT)},
+    {"glMatrixPushEXT", reinterpret_cast<AppGLProc>(&::glMatrixPushEXT)},
+    {"glMatrixRotatedEXT", reinterpret_cast<AppGLProc>(&::glMatrixRotatedEXT)},
+    {"glMatrixRotatefEXT", reinterpret_cast<AppGLProc>(&::glMatrixRotatefEXT)},
+    {"glMatrixScaledEXT", reinterpret_cast<AppGLProc>(&::glMatrixScaledEXT)},
+    {"glMatrixScalefEXT", reinterpret_cast<AppGLProc>(&::glMatrixScalefEXT)},
+    {"glMatrixTranslatedEXT", reinterpret_cast<AppGLProc>(&::glMatrixTranslatedEXT)},
+    {"glMatrixTranslatefEXT", reinterpret_cast<AppGLProc>(&::glMatrixTranslatefEXT)},
     {"glMaxShaderCompilerThreadsARB", reinterpret_cast<AppGLProc>(&::glMaxShaderCompilerThreadsARB)},
     {"glMaxShaderCompilerThreadsKHR", reinterpret_cast<AppGLProc>(&::glMaxShaderCompilerThreadsKHR)},
     {"glMemoryBarrier", reinterpret_cast<AppGLProc>(&::glMemoryBarrier)},

@@ -29,6 +29,24 @@ public:
         InvalidOperation,
         InvalidValue,
     };
+    enum class CompatMatrixCommand : GLenum {
+        LoadIdentity = 1,
+        LoadMatrixFloat,
+        LoadMatrixDouble,
+        LoadTransposeMatrixFloat,
+        LoadTransposeMatrixDouble,
+        MultMatrixFloat,
+        MultMatrixDouble,
+        MultTransposeMatrixFloat,
+        MultTransposeMatrixDouble,
+        Translate,
+        Rotate,
+        Scale,
+        Ortho,
+        Frustum,
+        Push,
+        Pop,
+    };
 
     explicit GLContext(void* layer);
     GLContext(GLsizei offscreenWidth, GLsizei offscreenHeight);
@@ -662,6 +680,11 @@ public:
     // uniform value buffer at draw time.
     MatrixStateMirror& matrixState();
     const MatrixStateMirror& matrixState() const;
+    void applyMatrixCommandCompat(CompatMatrixCommand command,
+                                  GLenum matrixMode,
+                                  const GLfloat* floatValues,
+                                  const GLdouble* doubleValues,
+                                  const char* functionName);
     void pushMatrixCompat();
     void popMatrixCompat();
 

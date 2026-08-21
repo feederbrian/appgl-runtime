@@ -137,6 +137,39 @@ MANUAL_EXTENSION_COMMANDS = [
     ("glDisableClientStateiEXT", "void", "GLenum array, GLuint index"),
     ("glGetPointerIndexedvEXT", "void", "GLenum target, GLuint index, void **data"),
     ("glGetPointeri_vEXT", "void", "GLenum pname, GLuint index, void **params"),
+    # GL_EXT_direct_state_access matrix commands. These are not aliases:
+    # the first argument names the matrix stack to update, and GL_TEXTUREi
+    # selectors must temporarily redirect the active texture unit while
+    # preserving caller-visible MATRIX_MODE/ACTIVE_TEXTURE state. The
+    # hand-written definitions live in src/runtime/AppGLMatrixOverrides.cpp
+    # and route through GLContext's display-list-aware matrix executor.
+    ("glMatrixLoadfEXT", "void", "GLenum mode, const GLfloat *m"),
+    ("glMatrixLoaddEXT", "void", "GLenum mode, const GLdouble *m"),
+    ("glMatrixMultfEXT", "void", "GLenum mode, const GLfloat *m"),
+    ("glMatrixMultdEXT", "void", "GLenum mode, const GLdouble *m"),
+    ("glMatrixLoadIdentityEXT", "void", "GLenum mode"),
+    ("glMatrixRotatefEXT", "void",
+     "GLenum mode, GLfloat angle, GLfloat x, GLfloat y, GLfloat z"),
+    ("glMatrixRotatedEXT", "void",
+     "GLenum mode, GLdouble angle, GLdouble x, GLdouble y, GLdouble z"),
+    ("glMatrixScalefEXT", "void",
+     "GLenum mode, GLfloat x, GLfloat y, GLfloat z"),
+    ("glMatrixScaledEXT", "void",
+     "GLenum mode, GLdouble x, GLdouble y, GLdouble z"),
+    ("glMatrixTranslatefEXT", "void",
+     "GLenum mode, GLfloat x, GLfloat y, GLfloat z"),
+    ("glMatrixTranslatedEXT", "void",
+     "GLenum mode, GLdouble x, GLdouble y, GLdouble z"),
+    ("glMatrixOrthoEXT", "void",
+     "GLenum mode, GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar"),
+    ("glMatrixFrustumEXT", "void",
+     "GLenum mode, GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar"),
+    ("glMatrixPushEXT", "void", "GLenum mode"),
+    ("glMatrixPopEXT", "void", "GLenum mode"),
+    ("glMatrixLoadTransposefEXT", "void", "GLenum mode, const GLfloat *m"),
+    ("glMatrixLoadTransposedEXT", "void", "GLenum mode, const GLdouble *m"),
+    ("glMatrixMultTransposefEXT", "void", "GLenum mode, const GLfloat *m"),
+    ("glMatrixMultTransposedEXT", "void", "GLenum mode, const GLdouble *m"),
 ]
 
 # Extension commands that are intentionally promoted into the generated

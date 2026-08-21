@@ -4410,6 +4410,183 @@ bool GLContext::getLegacyTextureCoordArrayPointerIndexed(GLuint index, void** pa
     return true;
 }
 
+namespace {
+const char* compatMatrixCommandName(GLContext::CompatMatrixCommand command) {
+    switch (command) {
+        case GLContext::CompatMatrixCommand::LoadIdentity: return "glMatrixLoadIdentityEXT";
+        case GLContext::CompatMatrixCommand::LoadMatrixFloat: return "glMatrixLoadfEXT";
+        case GLContext::CompatMatrixCommand::LoadMatrixDouble: return "glMatrixLoaddEXT";
+        case GLContext::CompatMatrixCommand::LoadTransposeMatrixFloat: return "glMatrixLoadTransposefEXT";
+        case GLContext::CompatMatrixCommand::LoadTransposeMatrixDouble: return "glMatrixLoadTransposedEXT";
+        case GLContext::CompatMatrixCommand::MultMatrixFloat: return "glMatrixMultfEXT";
+        case GLContext::CompatMatrixCommand::MultMatrixDouble: return "glMatrixMultdEXT";
+        case GLContext::CompatMatrixCommand::MultTransposeMatrixFloat: return "glMatrixMultTransposefEXT";
+        case GLContext::CompatMatrixCommand::MultTransposeMatrixDouble: return "glMatrixMultTransposedEXT";
+        case GLContext::CompatMatrixCommand::Translate: return "glMatrixTranslateEXT";
+        case GLContext::CompatMatrixCommand::Rotate: return "glMatrixRotateEXT";
+        case GLContext::CompatMatrixCommand::Scale: return "glMatrixScaleEXT";
+        case GLContext::CompatMatrixCommand::Ortho: return "glMatrixOrthoEXT";
+        case GLContext::CompatMatrixCommand::Frustum: return "glMatrixFrustumEXT";
+        case GLContext::CompatMatrixCommand::Push: return "glMatrixPushEXT";
+        case GLContext::CompatMatrixCommand::Pop: return "glMatrixPopEXT";
+    }
+    return "glMatrix*EXT";
+}
+
+std::size_t compatMatrixFloatValueCount(GLContext::CompatMatrixCommand command) {
+    switch (command) {
+        case GLContext::CompatMatrixCommand::LoadMatrixFloat:
+        case GLContext::CompatMatrixCommand::LoadTransposeMatrixFloat:
+        case GLContext::CompatMatrixCommand::MultMatrixFloat:
+        case GLContext::CompatMatrixCommand::MultTransposeMatrixFloat:
+            return 16;
+        default:
+            return 0;
+    }
+}
+
+std::size_t compatMatrixDoubleValueCount(GLContext::CompatMatrixCommand command) {
+    switch (command) {
+        case GLContext::CompatMatrixCommand::LoadMatrixDouble:
+        case GLContext::CompatMatrixCommand::LoadTransposeMatrixDouble:
+        case GLContext::CompatMatrixCommand::MultMatrixDouble:
+        case GLContext::CompatMatrixCommand::MultTransposeMatrixDouble:
+            return 16;
+        case GLContext::CompatMatrixCommand::Rotate:
+            return 4;
+        case GLContext::CompatMatrixCommand::Translate:
+        case GLContext::CompatMatrixCommand::Scale:
+            return 3;
+        case GLContext::CompatMatrixCommand::Ortho:
+        case GLContext::CompatMatrixCommand::Frustum:
+            return 6;
+        default:
+            return 0;
+    }
+}
+}  // namespace
+
+void GLContext::applyMatrixCommandCompat(CompatMatrixCommand command,
+                                         GLenum matrixMode,
+                                         const GLfloat* floatValues,
+                                         const GLdouble* doubleValues,
+                                         const char* functionName) {
+    const std::size_t floatCount = compatMatrixFloatValueCount(command);
+    const std::size_t doubleCount = compatMatrixDoubleValueCount(command);
+    if ((floatCount != 0 && floatValues == nullptr) ||
+        (doubleCount != 0 && doubleValues == nullptr)) {
+        return;
+    }
+    if (functionName == nullptr) {
+        functionName = compatMatrixCommandName(command);
+    }
+
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand listCommand;
+        listCommand.kind = Impl::DisplayListCommand::Kind::MatrixCommand;
+        listCommand.enumValue = matrixMode;
+        listCommand.enumValue2 = static_cast<GLenum>(command);
+        if (floatCount != 0) {
+            listCommand.uniformFloats.assign(floatValues, floatValues + floatCount);
+        }
+        if (doubleCount != 0) {
+            listCommand.uniformDoubles.assign(doubleValues, doubleValues + doubleCount);
+        }
+        impl_->displayLists.compileCommands.push_back(std::move(listCommand));
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
+
+    const GLenum savedMatrixMode = matrixState().matrixMode();
+    const GLuint savedActiveTextureUnit = impl_->state->activeTextureUnit();
+
+    if (matrixMode >= GL_TEXTURE0 && matrixMode <= GL_TEXTURE31) {
+        const GLuint unit = matrixMode - GL_TEXTURE0;
+        if (unit >= MatrixStateMirror::kMaxTextureUnits) {
+            pushError(GL_INVALID_ENUM, functionName,
+                      "texture matrix unit exceeds the compat texture-matrix stack count");
+            return;
+        }
+        if (!activeTexture(matrixMode)) {
+            return;
+        }
+        (void)matrixState().setMatrixMode(GL_TEXTURE);
+    } else if (!matrixState().setMatrixMode(matrixMode)) {
+        pushError(GL_INVALID_ENUM, functionName,
+                  "mode is not GL_MODELVIEW, GL_PROJECTION, GL_TEXTURE, or GL_TEXTUREi");
+        return;
+    }
+
+    auto restoreMatrixState = [&]() {
+        (void)matrixState().setMatrixMode(savedMatrixMode);
+        impl_->state->setActiveTextureUnit(savedActiveTextureUnit);
+        matrixState().setActiveTextureUnit(savedActiveTextureUnit);
+    };
+
+    switch (command) {
+        case CompatMatrixCommand::LoadIdentity:
+            matrixState().loadIdentity();
+            break;
+        case CompatMatrixCommand::LoadMatrixFloat:
+            matrixState().loadMatrix(floatValues);
+            break;
+        case CompatMatrixCommand::LoadMatrixDouble:
+            matrixState().loadMatrix(doubleValues);
+            break;
+        case CompatMatrixCommand::LoadTransposeMatrixFloat:
+            matrixState().loadTransposeMatrix(floatValues);
+            break;
+        case CompatMatrixCommand::LoadTransposeMatrixDouble:
+            matrixState().loadTransposeMatrix(doubleValues);
+            break;
+        case CompatMatrixCommand::MultMatrixFloat:
+            matrixState().multMatrix(floatValues);
+            break;
+        case CompatMatrixCommand::MultMatrixDouble:
+            matrixState().multMatrix(doubleValues);
+            break;
+        case CompatMatrixCommand::MultTransposeMatrixFloat:
+            matrixState().multTransposeMatrix(floatValues);
+            break;
+        case CompatMatrixCommand::MultTransposeMatrixDouble:
+            matrixState().multTransposeMatrix(doubleValues);
+            break;
+        case CompatMatrixCommand::Translate:
+            matrixState().translate(doubleValues[0], doubleValues[1], doubleValues[2]);
+            break;
+        case CompatMatrixCommand::Rotate:
+            matrixState().rotate(doubleValues[0], doubleValues[1],
+                                 doubleValues[2], doubleValues[3]);
+            break;
+        case CompatMatrixCommand::Scale:
+            matrixState().scale(doubleValues[0], doubleValues[1], doubleValues[2]);
+            break;
+        case CompatMatrixCommand::Ortho:
+            matrixState().ortho(doubleValues[0], doubleValues[1], doubleValues[2],
+                                doubleValues[3], doubleValues[4], doubleValues[5]);
+            break;
+        case CompatMatrixCommand::Frustum:
+            matrixState().frustum(doubleValues[0], doubleValues[1], doubleValues[2],
+                                  doubleValues[3], doubleValues[4], doubleValues[5]);
+            break;
+        case CompatMatrixCommand::Push:
+            if (!matrixState().pushMatrix()) {
+                pushError(GL_STACK_OVERFLOW, functionName,
+                          "matrix stack would exceed maximum depth");
+            }
+            break;
+        case CompatMatrixCommand::Pop:
+            if (!matrixState().popMatrix()) {
+                pushError(GL_STACK_UNDERFLOW, functionName,
+                          "matrix stack would underflow below the implicit identity entry");
+            }
+            break;
+    }
+
+    restoreMatrixState();
+}
+
 void GLContext::pushMatrixCompat() {
     if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
         Impl::DisplayListCommand command;
@@ -7292,6 +7469,20 @@ void GLContext::callListCompat(GLuint list) {
             case Impl::DisplayListCommand::Kind::AlphaFunc:
                 setAlphaFuncCompat(command.enumValue, command.values[0]);
                 break;
+            case Impl::DisplayListCommand::Kind::MatrixCommand: {
+                const auto matrixCommand =
+                    static_cast<CompatMatrixCommand>(command.enumValue2);
+                applyMatrixCommandCompat(matrixCommand,
+                                         command.enumValue,
+                                         command.uniformFloats.empty()
+                                             ? nullptr
+                                             : command.uniformFloats.data(),
+                                         command.uniformDoubles.empty()
+                                             ? nullptr
+                                             : command.uniformDoubles.data(),
+                                         compatMatrixCommandName(matrixCommand));
+                break;
+            }
             case Impl::DisplayListCommand::Kind::PushMatrix:
                 pushMatrixCompat();
                 break;

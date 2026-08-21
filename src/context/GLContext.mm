@@ -35646,6 +35646,7 @@ struct GLContext::Impl {
             ColorMaterial,
             Material,
             AlphaFunc,
+            MatrixCommand,
             PushMatrix,
             PopMatrix,
             DrawClientArrays,
