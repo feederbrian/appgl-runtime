@@ -7027,10 +7027,22 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_R32UI:
         case GL_ALPHA8I_EXT:
         case GL_ALPHA8UI_EXT:
+        case GL_ALPHA16I_EXT:
+        case GL_ALPHA16UI_EXT:
+        case GL_ALPHA32I_EXT:
+        case GL_ALPHA32UI_EXT:
         case GL_LUMINANCE8I_EXT:
         case GL_LUMINANCE8UI_EXT:
+        case GL_LUMINANCE16I_EXT:
+        case GL_LUMINANCE16UI_EXT:
+        case GL_LUMINANCE32I_EXT:
+        case GL_LUMINANCE32UI_EXT:
         case GL_INTENSITY8I_EXT:
         case GL_INTENSITY8UI_EXT:
+        case GL_INTENSITY16I_EXT:
+        case GL_INTENSITY16UI_EXT:
+        case GL_INTENSITY32I_EXT:
+        case GL_INTENSITY32UI_EXT:
         case GL_COMPRESSED_ALPHA:
         case GL_COMPRESSED_LUMINANCE:
         case GL_COMPRESSED_INTENSITY:
@@ -7052,6 +7064,10 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_RG32UI:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        case GL_LUMINANCE_ALPHA16I_EXT:
+        case GL_LUMINANCE_ALPHA16UI_EXT:
+        case GL_LUMINANCE_ALPHA32I_EXT:
+        case GL_LUMINANCE_ALPHA32UI_EXT:
         case GL_COMPRESSED_LUMINANCE_ALPHA:
             return 2;
         case 3:
@@ -12330,6 +12346,10 @@ struct GLContext::Impl {
             case GL_ALPHA32F_ARB:
             case GL_ALPHA8I_EXT:
             case GL_ALPHA8UI_EXT:
+            case GL_ALPHA16I_EXT:
+            case GL_ALPHA16UI_EXT:
+            case GL_ALPHA32I_EXT:
+            case GL_ALPHA32UI_EXT:
             case GL_COMPRESSED_ALPHA:
                 return CompatUploadBase::Alpha;
             case GL_LUMINANCE:
@@ -12342,6 +12362,10 @@ struct GLContext::Impl {
             case GL_SLUMINANCE8:
             case GL_LUMINANCE8I_EXT:
             case GL_LUMINANCE8UI_EXT:
+            case GL_LUMINANCE16I_EXT:
+            case GL_LUMINANCE16UI_EXT:
+            case GL_LUMINANCE32I_EXT:
+            case GL_LUMINANCE32UI_EXT:
             case GL_COMPRESSED_LUMINANCE:
                 return CompatUploadBase::Luminance;
             case GL_LUMINANCE_ALPHA:
@@ -12356,6 +12380,10 @@ struct GLContext::Impl {
             case GL_SLUMINANCE8_ALPHA8:
             case GL_LUMINANCE_ALPHA8I_EXT:
             case GL_LUMINANCE_ALPHA8UI_EXT:
+            case GL_LUMINANCE_ALPHA16I_EXT:
+            case GL_LUMINANCE_ALPHA16UI_EXT:
+            case GL_LUMINANCE_ALPHA32I_EXT:
+            case GL_LUMINANCE_ALPHA32UI_EXT:
             case GL_COMPRESSED_LUMINANCE_ALPHA:
                 return CompatUploadBase::LuminanceAlpha;
             case GL_INTENSITY:
@@ -12367,6 +12395,10 @@ struct GLContext::Impl {
             case GL_INTENSITY32F_ARB:
             case GL_INTENSITY8I_EXT:
             case GL_INTENSITY8UI_EXT:
+            case GL_INTENSITY16I_EXT:
+            case GL_INTENSITY16UI_EXT:
+            case GL_INTENSITY32I_EXT:
+            case GL_INTENSITY32UI_EXT:
             case GL_COMPRESSED_INTENSITY:
                 return CompatUploadBase::Intensity;
             case GL_RGBA:
@@ -55428,14 +55460,37 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         image.rgba8.empty() &&
         object.depthStencilShadowAuthoritative &&
         isDepth32FTextureShadowDropShape(image);
+    const auto legacyHighPrecisionIntensityReadbackFormat =
+        [](GLenum internalFormat) {
+            switch (internalFormat) {
+                case GL_INTENSITY12:
+                case GL_INTENSITY16:
+                case GL_INTENSITY16F_ARB:
+                case GL_INTENSITY32F_ARB:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+    const bool preferGeneratedLegacyIntensityRGBA8Shadow =
+        appglCompatProfileEnabled() &&
+        format == GL_RGBA &&
+        type == GL_FLOAT &&
+        !image.rgba8.empty() &&
+        image.generatedMipLevel &&
+        !image.mipShadowEvicted &&
+        legacyHighPrecisionIntensityReadbackFormat(
+            image.desc.internalFormat);
     const bool preferRGBA8ColorShadow =
         format == GL_RGBA &&
         type == GL_FLOAT &&
         !image.rgba8.empty() &&
-        (object.colorShadowAuthoritative ||
+        (preferGeneratedLegacyIntensityRGBA8Shadow ||
+         object.colorShadowAuthoritative ||
          (object.target == GL_TEXTURE_CUBE_MAP &&
           object.cubeFaceShadowsAuthoritative)) &&
-        (object.wasFramebufferRenderedTo || object.wasViewportRenderedTo);
+        (preferGeneratedLegacyIntensityRGBA8Shadow ||
+         object.wasFramebufferRenderedTo || object.wasViewportRenderedTo);
     const bool nativeShadowCanServeRequest =
         !preferRGBA8ColorShadow &&
         image.nativeBpp >= dstPixelBytes &&

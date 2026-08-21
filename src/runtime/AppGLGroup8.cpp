@@ -124,6 +124,78 @@
 #ifndef GL_LUMINANCE_ALPHA16F_ARB
 #define GL_LUMINANCE_ALPHA16F_ARB 0x881F
 #endif
+#ifndef GL_ALPHA32UI_EXT
+#define GL_ALPHA32UI_EXT 0x8D72
+#endif
+#ifndef GL_INTENSITY32UI_EXT
+#define GL_INTENSITY32UI_EXT 0x8D73
+#endif
+#ifndef GL_LUMINANCE32UI_EXT
+#define GL_LUMINANCE32UI_EXT 0x8D74
+#endif
+#ifndef GL_LUMINANCE_ALPHA32UI_EXT
+#define GL_LUMINANCE_ALPHA32UI_EXT 0x8D75
+#endif
+#ifndef GL_ALPHA16UI_EXT
+#define GL_ALPHA16UI_EXT 0x8D78
+#endif
+#ifndef GL_INTENSITY16UI_EXT
+#define GL_INTENSITY16UI_EXT 0x8D79
+#endif
+#ifndef GL_LUMINANCE16UI_EXT
+#define GL_LUMINANCE16UI_EXT 0x8D7A
+#endif
+#ifndef GL_LUMINANCE_ALPHA16UI_EXT
+#define GL_LUMINANCE_ALPHA16UI_EXT 0x8D7B
+#endif
+#ifndef GL_ALPHA8UI_EXT
+#define GL_ALPHA8UI_EXT 0x8D7E
+#endif
+#ifndef GL_INTENSITY8UI_EXT
+#define GL_INTENSITY8UI_EXT 0x8D7F
+#endif
+#ifndef GL_LUMINANCE8UI_EXT
+#define GL_LUMINANCE8UI_EXT 0x8D80
+#endif
+#ifndef GL_LUMINANCE_ALPHA8UI_EXT
+#define GL_LUMINANCE_ALPHA8UI_EXT 0x8D81
+#endif
+#ifndef GL_ALPHA32I_EXT
+#define GL_ALPHA32I_EXT 0x8D84
+#endif
+#ifndef GL_INTENSITY32I_EXT
+#define GL_INTENSITY32I_EXT 0x8D85
+#endif
+#ifndef GL_LUMINANCE32I_EXT
+#define GL_LUMINANCE32I_EXT 0x8D86
+#endif
+#ifndef GL_LUMINANCE_ALPHA32I_EXT
+#define GL_LUMINANCE_ALPHA32I_EXT 0x8D87
+#endif
+#ifndef GL_ALPHA16I_EXT
+#define GL_ALPHA16I_EXT 0x8D8A
+#endif
+#ifndef GL_INTENSITY16I_EXT
+#define GL_INTENSITY16I_EXT 0x8D8B
+#endif
+#ifndef GL_LUMINANCE16I_EXT
+#define GL_LUMINANCE16I_EXT 0x8D8C
+#endif
+#ifndef GL_LUMINANCE_ALPHA16I_EXT
+#define GL_LUMINANCE_ALPHA16I_EXT 0x8D8D
+#endif
+#ifndef GL_ALPHA8I_EXT
+#define GL_ALPHA8I_EXT 0x8D90
+#endif
+#ifndef GL_INTENSITY8I_EXT
+#define GL_INTENSITY8I_EXT 0x8D91
+#endif
+#ifndef GL_LUMINANCE8I_EXT
+#define GL_LUMINANCE8I_EXT 0x8D92
+#endif
+#ifndef GL_LUMINANCE_ALPHA8I_EXT
+#define GL_LUMINANCE_ALPHA8I_EXT 0x8D93
+#endif
 
 namespace appgl {
 
@@ -453,6 +525,10 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                     case GL_LUMINANCE8:
                     case GL_LUMINANCE_ALPHA:
                     case GL_LUMINANCE8_ALPHA8:
+                    case GL_LUMINANCE8I_EXT:
+                    case GL_LUMINANCE8UI_EXT:
+                    case GL_LUMINANCE_ALPHA8I_EXT:
+                    case GL_LUMINANCE_ALPHA8UI_EXT:
                     case GL_COMPRESSED_LUMINANCE:
                     case GL_COMPRESSED_LUMINANCE_ALPHA:
                         return 8;
@@ -470,9 +546,17 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                         return reportedCompatBits();
                     case GL_LUMINANCE16F_ARB:
                     case GL_LUMINANCE_ALPHA16F_ARB:
+                    case GL_LUMINANCE16I_EXT:
+                    case GL_LUMINANCE16UI_EXT:
+                    case GL_LUMINANCE_ALPHA16I_EXT:
+                    case GL_LUMINANCE_ALPHA16UI_EXT:
                         return 16;
                     case GL_LUMINANCE32F_ARB:
                     case GL_LUMINANCE_ALPHA32F_ARB:
+                    case GL_LUMINANCE32I_EXT:
+                    case GL_LUMINANCE32UI_EXT:
+                    case GL_LUMINANCE_ALPHA32I_EXT:
+                    case GL_LUMINANCE_ALPHA32UI_EXT:
                         return 32;
                     default:
                         return 0;
@@ -482,6 +566,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 switch (fmt) {
                     case GL_INTENSITY:
                     case GL_INTENSITY8:
+                    case GL_INTENSITY8I_EXT:
+                    case GL_INTENSITY8UI_EXT:
                     case GL_COMPRESSED_INTENSITY:
                         return 8;
                     case GL_INTENSITY4:
@@ -491,8 +577,12 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                     case GL_INTENSITY16:
                         return reportedCompatBits();
                     case GL_INTENSITY16F_ARB:
+                    case GL_INTENSITY16I_EXT:
+                    case GL_INTENSITY16UI_EXT:
                         return 16;
                     case GL_INTENSITY32F_ARB:
+                    case GL_INTENSITY32I_EXT:
+                    case GL_INTENSITY32UI_EXT:
                         return 32;
                     default:
                         return 0;
@@ -500,6 +590,7 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
             };
             auto channelSize = [&](int channel) -> GLint {
                 if (fmt == GL_ALPHA || fmt == GL_ALPHA8 ||
+                    fmt == GL_ALPHA8I_EXT || fmt == GL_ALPHA8UI_EXT ||
                     fmt == GL_COMPRESSED_ALPHA) {
                     return channel == 3 ? 8 : 0;
                 }
@@ -515,7 +606,13 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 if (fmt == GL_ALPHA16F_ARB) {
                     return channel == 3 ? 16 : 0;
                 }
+                if (fmt == GL_ALPHA16I_EXT || fmt == GL_ALPHA16UI_EXT) {
+                    return channel == 3 ? 16 : 0;
+                }
                 if (fmt == GL_ALPHA32F_ARB) {
+                    return channel == 3 ? 32 : 0;
+                }
+                if (fmt == GL_ALPHA32I_EXT || fmt == GL_ALPHA32UI_EXT) {
                     return channel == 3 ? 32 : 0;
                 }
                 const GLint luminanceBits = legacyLuminanceSize();
@@ -525,6 +622,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                             case 2:
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
+                            case GL_LUMINANCE_ALPHA8I_EXT:
+                            case GL_LUMINANCE_ALPHA8UI_EXT:
                             case GL_COMPRESSED_LUMINANCE_ALPHA:
                                 return 8;
                             case GL_SLUMINANCE8_ALPHA8:
@@ -539,8 +638,12 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                             case GL_LUMINANCE16_ALPHA16:
                                 return reportedCompatBits();
                             case GL_LUMINANCE_ALPHA16F_ARB:
+                            case GL_LUMINANCE_ALPHA16I_EXT:
+                            case GL_LUMINANCE_ALPHA16UI_EXT:
                                 return 16;
                             case GL_LUMINANCE_ALPHA32F_ARB:
+                            case GL_LUMINANCE_ALPHA32I_EXT:
+                            case GL_LUMINANCE_ALPHA32UI_EXT:
                                 return 32;
                             default:
                                 return 0;
@@ -749,12 +852,20 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 *params = GL_FLOAT;
             } else if (fmt == GL_R8I || fmt == GL_RG8I || fmt == GL_RGB8I || fmt == GL_RGBA8I
                 || fmt == GL_R16I || fmt == GL_RG16I || fmt == GL_RGB16I || fmt == GL_RGBA16I
-                || fmt == GL_R32I || fmt == GL_RG32I || fmt == GL_RGB32I || fmt == GL_RGBA32I) {
+                || fmt == GL_R32I || fmt == GL_RG32I || fmt == GL_RGB32I || fmt == GL_RGBA32I
+                || fmt == GL_ALPHA8I_EXT || fmt == GL_ALPHA16I_EXT || fmt == GL_ALPHA32I_EXT
+                || fmt == GL_LUMINANCE8I_EXT || fmt == GL_LUMINANCE16I_EXT || fmt == GL_LUMINANCE32I_EXT
+                || fmt == GL_INTENSITY8I_EXT || fmt == GL_INTENSITY16I_EXT || fmt == GL_INTENSITY32I_EXT
+                || fmt == GL_LUMINANCE_ALPHA8I_EXT || fmt == GL_LUMINANCE_ALPHA16I_EXT || fmt == GL_LUMINANCE_ALPHA32I_EXT) {
                 *params = GL_INT;
             } else if (fmt == GL_R8UI || fmt == GL_RG8UI || fmt == GL_RGB8UI || fmt == GL_RGBA8UI
                 || fmt == GL_R16UI || fmt == GL_RG16UI || fmt == GL_RGB16UI || fmt == GL_RGBA16UI
                 || fmt == GL_R32UI || fmt == GL_RG32UI || fmt == GL_RGB32UI || fmt == GL_RGBA32UI
-                || fmt == GL_RGB10_A2UI) {
+                || fmt == GL_RGB10_A2UI
+                || fmt == GL_ALPHA8UI_EXT || fmt == GL_ALPHA16UI_EXT || fmt == GL_ALPHA32UI_EXT
+                || fmt == GL_LUMINANCE8UI_EXT || fmt == GL_LUMINANCE16UI_EXT || fmt == GL_LUMINANCE32UI_EXT
+                || fmt == GL_INTENSITY8UI_EXT || fmt == GL_INTENSITY16UI_EXT || fmt == GL_INTENSITY32UI_EXT
+                || fmt == GL_LUMINANCE_ALPHA8UI_EXT || fmt == GL_LUMINANCE_ALPHA16UI_EXT || fmt == GL_LUMINANCE_ALPHA32UI_EXT) {
                 *params = GL_UNSIGNED_INT;
             } else if (fmt == GL_R8_SNORM || fmt == GL_RG8_SNORM || fmt == GL_RGB8_SNORM || fmt == GL_RGBA8_SNORM
                 || fmt == GL_R16_SNORM || fmt == GL_RG16_SNORM || fmt == GL_RGB16_SNORM || fmt == GL_RGBA16_SNORM

@@ -1718,13 +1718,21 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         }
         if (fmt == GL_R8I || fmt == GL_RG8I || fmt == GL_RGB8I || fmt == GL_RGBA8I
             || fmt == GL_R16I || fmt == GL_RG16I || fmt == GL_RGB16I || fmt == GL_RGBA16I
-            || fmt == GL_R32I || fmt == GL_RG32I || fmt == GL_RGB32I || fmt == GL_RGBA32I) {
+            || fmt == GL_R32I || fmt == GL_RG32I || fmt == GL_RGB32I || fmt == GL_RGBA32I
+            || fmt == GL_ALPHA8I_EXT || fmt == GL_ALPHA16I_EXT || fmt == GL_ALPHA32I_EXT
+            || fmt == GL_LUMINANCE8I_EXT || fmt == GL_LUMINANCE16I_EXT || fmt == GL_LUMINANCE32I_EXT
+            || fmt == GL_INTENSITY8I_EXT || fmt == GL_INTENSITY16I_EXT || fmt == GL_INTENSITY32I_EXT
+            || fmt == GL_LUMINANCE_ALPHA8I_EXT || fmt == GL_LUMINANCE_ALPHA16I_EXT || fmt == GL_LUMINANCE_ALPHA32I_EXT) {
             return GL_INT;
         }
         if (fmt == GL_R8UI || fmt == GL_RG8UI || fmt == GL_RGB8UI || fmt == GL_RGBA8UI
             || fmt == GL_R16UI || fmt == GL_RG16UI || fmt == GL_RGB16UI || fmt == GL_RGBA16UI
             || fmt == GL_R32UI || fmt == GL_RG32UI || fmt == GL_RGB32UI || fmt == GL_RGBA32UI
-            || fmt == GL_RGB10_A2UI) {
+            || fmt == GL_RGB10_A2UI
+            || fmt == GL_ALPHA8UI_EXT || fmt == GL_ALPHA16UI_EXT || fmt == GL_ALPHA32UI_EXT
+            || fmt == GL_LUMINANCE8UI_EXT || fmt == GL_LUMINANCE16UI_EXT || fmt == GL_LUMINANCE32UI_EXT
+            || fmt == GL_INTENSITY8UI_EXT || fmt == GL_INTENSITY16UI_EXT || fmt == GL_INTENSITY32UI_EXT
+            || fmt == GL_LUMINANCE_ALPHA8UI_EXT || fmt == GL_LUMINANCE_ALPHA16UI_EXT || fmt == GL_LUMINANCE_ALPHA32UI_EXT) {
             return GL_UNSIGNED_INT;
         }
         if (fmt == GL_R8_SNORM || fmt == GL_RG8_SNORM || fmt == GL_RGB8_SNORM || fmt == GL_RGBA8_SNORM
@@ -1807,6 +1815,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     case GL_LUMINANCE8:
                     case GL_LUMINANCE_ALPHA:
                     case GL_LUMINANCE8_ALPHA8:
+                    case GL_LUMINANCE8I_EXT:
+                    case GL_LUMINANCE8UI_EXT:
+                    case GL_LUMINANCE_ALPHA8I_EXT:
+                    case GL_LUMINANCE_ALPHA8UI_EXT:
                     case GL_COMPRESSED_LUMINANCE:
                     case GL_COMPRESSED_LUMINANCE_ALPHA:
                         return 8;
@@ -1824,9 +1836,17 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                         return reportedCompatBits();
                     case GL_LUMINANCE16F_ARB:
                     case GL_LUMINANCE_ALPHA16F_ARB:
+                    case GL_LUMINANCE16I_EXT:
+                    case GL_LUMINANCE16UI_EXT:
+                    case GL_LUMINANCE_ALPHA16I_EXT:
+                    case GL_LUMINANCE_ALPHA16UI_EXT:
                         return 16;
                     case GL_LUMINANCE32F_ARB:
                     case GL_LUMINANCE_ALPHA32F_ARB:
+                    case GL_LUMINANCE32I_EXT:
+                    case GL_LUMINANCE32UI_EXT:
+                    case GL_LUMINANCE_ALPHA32I_EXT:
+                    case GL_LUMINANCE_ALPHA32UI_EXT:
                         return 32;
                     default:
                         return 0;
@@ -1836,6 +1856,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 switch (fmt) {
                     case GL_INTENSITY:
                     case GL_INTENSITY8:
+                    case GL_INTENSITY8I_EXT:
+                    case GL_INTENSITY8UI_EXT:
                     case GL_COMPRESSED_INTENSITY:
                         return 8;
                     case GL_INTENSITY4:
@@ -1845,8 +1867,12 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     case GL_INTENSITY16:
                         return reportedCompatBits();
                     case GL_INTENSITY16F_ARB:
+                    case GL_INTENSITY16I_EXT:
+                    case GL_INTENSITY16UI_EXT:
                         return 16;
                     case GL_INTENSITY32F_ARB:
+                    case GL_INTENSITY32I_EXT:
+                    case GL_INTENSITY32UI_EXT:
                         return 32;
                     default:
                         return 0;
@@ -1859,6 +1885,7 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     return false;
                 };
                 if (fmt == GL_ALPHA || fmt == GL_ALPHA8 ||
+                    fmt == GL_ALPHA8I_EXT || fmt == GL_ALPHA8UI_EXT ||
                     fmt == GL_COMPRESSED_ALPHA) {
                     return channel == 3 ? 8 : 0;
                 }
@@ -1874,7 +1901,13 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 if (fmt == GL_ALPHA16F_ARB) {
                     return channel == 3 ? 16 : 0;
                 }
+                if (fmt == GL_ALPHA16I_EXT || fmt == GL_ALPHA16UI_EXT) {
+                    return channel == 3 ? 16 : 0;
+                }
                 if (fmt == GL_ALPHA32F_ARB) {
+                    return channel == 3 ? 32 : 0;
+                }
+                if (fmt == GL_ALPHA32I_EXT || fmt == GL_ALPHA32UI_EXT) {
                     return channel == 3 ? 32 : 0;
                 }
                 const GLint luminanceBits = legacyLuminanceSize();
@@ -1884,6 +1917,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                             case 2:
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
+                            case GL_LUMINANCE_ALPHA8I_EXT:
+                            case GL_LUMINANCE_ALPHA8UI_EXT:
                             case GL_COMPRESSED_LUMINANCE_ALPHA:
                                 return 8;
                             case GL_SLUMINANCE8_ALPHA8:
@@ -1898,8 +1933,12 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                             case GL_LUMINANCE16_ALPHA16:
                                 return reportedCompatBits();
                             case GL_LUMINANCE_ALPHA16F_ARB:
+                            case GL_LUMINANCE_ALPHA16I_EXT:
+                            case GL_LUMINANCE_ALPHA16UI_EXT:
                                 return 16;
                             case GL_LUMINANCE_ALPHA32F_ARB:
+                            case GL_LUMINANCE_ALPHA32I_EXT:
+                            case GL_LUMINANCE_ALPHA32UI_EXT:
                                 return 32;
                             default:
                                 return 0;
@@ -2816,7 +2855,6 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             }
 
             GLTextureImageLevel decoded = *image;
-            decoded.desc.internalFormat = GL_RGBA8;
             decoded.desc.sourceFormat = GL_RGBA;
             decoded.desc.sourceType = GL_UNSIGNED_BYTE;
             decoded.rgba8 = std::move(decodedRGBA8);
@@ -3014,6 +3052,18 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                         return false;
                 }
             };
+            const auto legacyHighPrecisionIntensityReadbackFormat =
+                [](GLenum internalFormat) {
+                    switch (internalFormat) {
+                        case GL_INTENSITY12:
+                        case GL_INTENSITY16:
+                        case GL_INTENSITY16F_ARB:
+                        case GL_INTENSITY32F_ARB:
+                            return true;
+                        default:
+                            return false;
+                    }
+                };
             const GLTextureImageLevel& levelImage = levelIt->second;
             const std::size_t requestedPixelBytes = bytesPerPixel(format, type);
             const bool uploadExactLegacyShadow =
@@ -3027,11 +3077,21 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                 !obj->wasFramebufferRenderedTo &&
                 !obj->wasViewportRenderedTo &&
                 !obj->producerPending.hasAny(kProducerAll);
+            const bool generatedHighPrecisionIntensityShadow =
+                legacyHighPrecisionIntensityReadbackFormat(
+                    levelImage.desc.internalFormat) &&
+                levelImage.generatedMipLevel &&
+                format == GL_RGBA &&
+                type == GL_FLOAT &&
+                !levelImage.rgba8.empty() &&
+                !levelImage.mipShadowEvicted;
             if (!materializeLazyFboCanonicalClearForReadback(level)) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
-            if ((obj->colorShadowAuthoritative || uploadExactLegacyShadow) &&
+            if ((obj->colorShadowAuthoritative ||
+                 uploadExactLegacyShadow ||
+                 generatedHighPrecisionIntensityShadow) &&
                 copySimpleTextureLevelShadow(*obj,
                                              levelImage,
                                              format,
@@ -4160,8 +4220,11 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
     const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
     const bool formatIsBlue = (format == GL_BLUE || format == GL_BLUE_INTEGER);
-    const bool formatIsAlpha = (format == GL_ALPHA);
-    const bool formatIsLuminanceAlpha = (format == GL_LUMINANCE_ALPHA);
+    const bool formatIsAlpha =
+        (format == GL_ALPHA || format == GL_ALPHA_INTEGER_EXT);
+    const bool formatIsLuminanceAlpha =
+        (format == GL_LUMINANCE_ALPHA ||
+         format == GL_LUMINANCE_ALPHA_INTEGER_EXT);
     auto pickComponent = [&](const double* vals4, int glCompIdx) -> double {
         if (formatIsBGR) {
             static const int map[3] = {2, 1, 0};
@@ -4226,13 +4289,45 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         return obj->desc.internalFormat;
     }();
     auto remapLegacyCompatReadback = [&](double vals[4]) {
+        const bool readbackInternalIsInteger =
+            Impl::isIntegerInternalFormat(readbackInternalFormat);
         switch (readbackInternalFormat) {
+            case GL_ALPHA:
+            case GL_ALPHA4:
+            case GL_ALPHA8:
+            case GL_ALPHA12:
+            case GL_ALPHA16:
+            case GL_ALPHA16F_ARB:
+            case GL_ALPHA32F_ARB:
+            case GL_ALPHA8I_EXT:
+            case GL_ALPHA8UI_EXT:
+            case GL_ALPHA16I_EXT:
+            case GL_ALPHA16UI_EXT:
+            case GL_ALPHA32I_EXT:
+            case GL_ALPHA32UI_EXT:
+            case GL_COMPRESSED_ALPHA: {
+                const double a = readbackInternalIsInteger ? vals[0] : vals[3];
+                vals[0] = 0.0;
+                vals[1] = 0.0;
+                vals[2] = 0.0;
+                vals[3] = a;
+                break;
+            }
             case GL_LUMINANCE:
             case GL_LUMINANCE4:
             case GL_LUMINANCE8:
             case GL_LUMINANCE12:
             case GL_LUMINANCE16:
-            case GL_SLUMINANCE8: {
+            case GL_LUMINANCE16F_ARB:
+            case GL_LUMINANCE32F_ARB:
+            case GL_SLUMINANCE8:
+            case GL_LUMINANCE8I_EXT:
+            case GL_LUMINANCE8UI_EXT:
+            case GL_LUMINANCE16I_EXT:
+            case GL_LUMINANCE16UI_EXT:
+            case GL_LUMINANCE32I_EXT:
+            case GL_LUMINANCE32UI_EXT:
+            case GL_COMPRESSED_LUMINANCE: {
                 const double l = vals[0];
                 vals[0] = l;
                 vals[1] = 0.0;
@@ -4247,9 +4342,18 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             case GL_LUMINANCE12_ALPHA4:
             case GL_LUMINANCE12_ALPHA12:
             case GL_LUMINANCE16_ALPHA16:
-            case GL_SLUMINANCE8_ALPHA8: {
+            case GL_LUMINANCE_ALPHA16F_ARB:
+            case GL_LUMINANCE_ALPHA32F_ARB:
+            case GL_SLUMINANCE8_ALPHA8:
+            case GL_LUMINANCE_ALPHA8I_EXT:
+            case GL_LUMINANCE_ALPHA8UI_EXT:
+            case GL_LUMINANCE_ALPHA16I_EXT:
+            case GL_LUMINANCE_ALPHA16UI_EXT:
+            case GL_LUMINANCE_ALPHA32I_EXT:
+            case GL_LUMINANCE_ALPHA32UI_EXT:
+            case GL_COMPRESSED_LUMINANCE_ALPHA: {
                 const double l = vals[0];
-                const double a = vals[3];
+                const double a = readbackInternalIsInteger ? vals[1] : vals[3];
                 vals[0] = l;
                 vals[1] = 0.0;
                 vals[2] = 0.0;
@@ -4260,12 +4364,21 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             case GL_INTENSITY4:
             case GL_INTENSITY8:
             case GL_INTENSITY12:
-            case GL_INTENSITY16: {
+            case GL_INTENSITY16:
+            case GL_INTENSITY16F_ARB:
+            case GL_INTENSITY32F_ARB:
+            case GL_INTENSITY8I_EXT:
+            case GL_INTENSITY8UI_EXT:
+            case GL_INTENSITY16I_EXT:
+            case GL_INTENSITY16UI_EXT:
+            case GL_INTENSITY32I_EXT:
+            case GL_INTENSITY32UI_EXT:
+            case GL_COMPRESSED_INTENSITY: {
                 const double i = vals[0];
                 vals[0] = i;
                 vals[1] = 0.0;
                 vals[2] = 0.0;
-                vals[3] = i;
+                vals[3] = readbackInternalIsInteger ? 1.0 : i;
                 break;
             }
             case GL_RGB5_A1:
