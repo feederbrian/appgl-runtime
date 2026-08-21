@@ -836,10 +836,6 @@ extern "C" void APIENTRY glGetNamedBufferParameterivEXT(GLuint buffer, GLenum pn
     ::glGetNamedBufferParameteriv(buffer, pname, params);
 }
 
-extern "C" void APIENTRY glGetNamedBufferPointervEXT(GLuint buffer, GLenum pname, void **params) {
-    ::glGetNamedBufferPointerv(buffer, pname, params);
-}
-
 extern "C" void APIENTRY glGetNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, void *data) {
     ::glGetNamedBufferSubData(buffer, offset, size, data);
 }

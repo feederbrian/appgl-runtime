@@ -6259,6 +6259,10 @@ constexpr std::size_t kMaxDebugMessages = 64;
 constexpr std::size_t kMaxDebugMessageLength = 1024;
 constexpr std::size_t kMaxDebugGroupDepth = 64;
 
+#ifndef GL_DISPLAY_LIST
+#define GL_DISPLAY_LIST 0x82E7
+#endif
+
 struct DebugMessageRecord {
     GLenum source = GL_DEBUG_SOURCE_APPLICATION;
     GLenum type = GL_DEBUG_TYPE_OTHER;
@@ -6274,6 +6278,11 @@ struct DebugControlRule {
     std::unordered_set<GLuint> ids;
     bool hasIds = false;
     bool enabled = true;
+};
+
+struct DebugGroupFrame {
+    DebugMessageRecord record;
+    std::vector<DebugControlRule> inheritedRules;
 };
 
 std::uint64_t objectLabelKey(GLenum identifier, GLuint name) {
@@ -6300,10 +6309,10 @@ std::string trimDebugMessage(std::string_view message) {
 }
 
 void copyLabelString(std::string_view value, GLsizei bufSize, GLsizei* length, GLchar* label) {
-    if (length != nullptr) {
-        *length = static_cast<GLsizei>(value.size());
-    }
     if (label == nullptr || bufSize <= 0) {
+        if (length != nullptr) {
+            *length = label == nullptr ? static_cast<GLsizei>(value.size()) : 0;
+        }
         return;
     }
 
@@ -6313,6 +6322,9 @@ void copyLabelString(std::string_view value, GLsizei bufSize, GLsizei* length, G
         std::memcpy(label, value.data(), copied);
     }
     label[copied] = '\0';
+    if (length != nullptr) {
+        *length = static_cast<GLsizei>(copied);
+    }
 }
 
 void* transferRetainedMetalObject(id object) {
@@ -35242,7 +35254,7 @@ struct GLContext::Impl {
     const void* debugUserParam = nullptr;
     std::deque<DebugMessageRecord> debugMessages;
     std::vector<DebugControlRule> debugControlRules;
-    std::vector<DebugMessageRecord> debugGroupStack;
+    std::vector<DebugGroupFrame> debugGroupStack;
     std::unordered_map<std::uint64_t, std::string> objectLabels;
     std::unordered_map<const void*, std::string> pointerLabels;
     std::deque<GLenum> errors;

@@ -103,8 +103,8 @@ void GLContext::pushDebugGroup(GLenum source, GLuint id, std::string_view messag
         return;
     }
     DebugMessageRecord record{source, GL_DEBUG_TYPE_PUSH_GROUP, id, GL_DEBUG_SEVERITY_NOTIFICATION, std::string(message)};
-    impl_->debugGroupStack.push_back(record);
     impl_->enqueueDebugMessage(record);
+    impl_->debugGroupStack.push_back({record, impl_->debugControlRules});
 }
 
 bool GLContext::popDebugGroup() {
@@ -112,25 +112,79 @@ bool GLContext::popDebugGroup() {
         pushError(GL_STACK_UNDERFLOW);
         return false;
     }
-    DebugMessageRecord record = impl_->debugGroupStack.back();
+    DebugGroupFrame frame = impl_->debugGroupStack.back();
     impl_->debugGroupStack.pop_back();
+    impl_->debugControlRules = std::move(frame.inheritedRules);
+    DebugMessageRecord record = std::move(frame.record);
     record.type = GL_DEBUG_TYPE_POP_GROUP;
     impl_->enqueueDebugMessage(std::move(record));
     return true;
 }
 
 #elif defined(APPGL_GLCONTEXT_DEBUG_LABELS)
+static bool isDebugObjectName(GLContext& context, GLenum identifier, GLuint name) {
+    if (name == 0) {
+        return false;
+    }
+    switch (identifier) {
+        case GL_BUFFER:
+            return context.isBuffer(name);
+        case GL_SHADER:
+            return context.isShader(name);
+        case GL_PROGRAM:
+            return context.isProgram(name);
+        case GL_VERTEX_ARRAY:
+            return context.isVertexArray(name);
+        case GL_QUERY: {
+            const GLQueryObject* object = context.objects().queries().get(name);
+            return object != nullptr && object->instantiated;
+        }
+        case GL_PROGRAM_PIPELINE: {
+            const GLProgramPipelineObject* object = context.objects().programPipelines().get(name);
+            return object != nullptr && object->instantiated;
+        }
+        case GL_TRANSFORM_FEEDBACK: {
+            const GLTransformFeedbackObject* object = context.objects().transformFeedbacks().get(name);
+            return object != nullptr && object->instantiated;
+        }
+        case GL_SAMPLER:
+            return context.isSampler(name);
+        case GL_TEXTURE:
+            return context.isTexture(name);
+        case GL_RENDERBUFFER:
+            return context.isRenderbuffer(name);
+        case GL_FRAMEBUFFER:
+            return context.isFramebuffer(name);
+        case GL_DISPLAY_LIST:
+            return context.isListCompat(name) == GL_TRUE;
+        default:
+            return false;
+    }
+}
+
 void GLContext::setObjectLabel(GLenum identifier, GLuint name, std::string_view label) {
+    if (!isDebugObjectName(*this, identifier, name)) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (label.size() >= kMaxDebugMessageLength) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     const std::uint64_t key = objectLabelKey(identifier, name);
     if (label.empty()) {
         impl_->objectLabels.erase(key);
         return;
     }
-    impl_->objectLabels[key] = trimDebugMessage(label);
+    impl_->objectLabels[key] = std::string(label);
 }
 
 void GLContext::getObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei* length, GLchar* label) {
     if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (!isDebugObjectName(*this, identifier, name)) {
         pushError(GL_INVALID_VALUE);
         return;
     }
@@ -140,15 +194,27 @@ void GLContext::getObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, 
 }
 
 void GLContext::setObjectPtrLabel(const void* ptr, std::string_view label) {
+    if (ptr == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (label.size() >= kMaxDebugMessageLength) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     if (label.empty()) {
         impl_->pointerLabels.erase(ptr);
         return;
     }
-    impl_->pointerLabels[ptr] = trimDebugMessage(label);
+    impl_->pointerLabels[ptr] = std::string(label);
 }
 
 void GLContext::getObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label) {
     if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (ptr == nullptr) {
         pushError(GL_INVALID_VALUE);
         return;
     }

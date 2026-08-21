@@ -2243,6 +2243,35 @@ extern "C" void APIENTRY glNamedBufferDataEXT(GLuint buffer,
     ::glNamedBufferData(buffer, size, data, usage);
 }
 
+extern "C" void APIENTRY glGetNamedBufferPointervEXT(GLuint buffer,
+                                                     GLenum pname,
+                                                     void** params) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    if (params == nullptr) {
+        context->pushError(GL_INVALID_VALUE, "glGetNamedBufferPointervEXT",
+                           "params must not be null");
+        return;
+    }
+    if (pname != GL_BUFFER_MAP_POINTER) {
+        context->pushError(GL_INVALID_ENUM, "glGetNamedBufferPointervEXT",
+                           "unsupported named-buffer pointer query");
+        return;
+    }
+    if (buffer == 0) {
+        context->pushError(GL_INVALID_OPERATION,
+                           "glGetNamedBufferPointervEXT",
+                           "buffer zero has no named-buffer state");
+        return;
+    }
+    GLBufferObject* object = context->objects().buffers().get(buffer);
+    if (object == nullptr || !object->instantiated) {
+        *params = nullptr;
+        return;
+    }
+    ::glGetNamedBufferPointerv(buffer, pname, params);
+}
+
 namespace {
 
 static bool uniformResourceNameMatches(const std::string& stored,

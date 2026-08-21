@@ -2223,6 +2223,9 @@ bool isValidDebugSeverity(GLenum severity, bool allowDontCare) {
 }
 
 bool isValidDebugObjectIdentifier(GLenum identifier) {
+#ifndef GL_DISPLAY_LIST
+#define GL_DISPLAY_LIST 0x82E7
+#endif
     switch (identifier) {
         case GL_BUFFER:
         case GL_SHADER:
@@ -2235,10 +2238,22 @@ bool isValidDebugObjectIdentifier(GLenum identifier) {
         case GL_TEXTURE:
         case GL_RENDERBUFFER:
         case GL_FRAMEBUFFER:
+        case GL_DISPLAY_LIST:
             return true;
         default:
             return false;
     }
+}
+
+bool isValidDebugSyncPointer(const void* ptr) {
+    if (ptr == nullptr) {
+        return false;
+    }
+    const auto& dispatch = Runtime::shared().dispatch();
+    if (dispatch.glIsSync == nullptr) {
+        return false;
+    }
+    return dispatch.glIsSync(reinterpret_cast<GLsync>(const_cast<void*>(ptr))) == GL_TRUE;
 }
 
 std::string stringFromGLText(GLsizei length, const GLchar* text) {
@@ -8274,8 +8289,14 @@ void APIENTRY glObjectLabel(GLenum identifier, GLuint name, GLsizei length, cons
         recordValidationError(context, "glObjectLabel", GL_INVALID_ENUM, "object identifier is invalid");
         return;
     }
-    if ((length < 0 || length > 0) && label == nullptr) {
-        recordValidationError(context, "glObjectLabel", GL_INVALID_VALUE, "label must be non-null");
+    if (label != nullptr && length >= static_cast<GLsizei>(1024)) {
+        recordValidationError(context, "glObjectLabel", GL_INVALID_VALUE, "label length exceeds GL_MAX_LABEL_LENGTH");
+        return;
+    }
+    if (label == nullptr) {
+        context->setObjectLabel(identifier, name, {});
+        markDebugFunction(FunctionId::glObjectLabel, "Named GL object labels are tracked.");
+        Runtime::shared().recordBootstrapTrace("glObjectLabel(" + std::to_string(identifier) + ", " + std::to_string(name) + ")");
         return;
     }
     context->setObjectLabel(identifier, name, stringFromGLText(length, label));
@@ -8302,8 +8323,18 @@ void APIENTRY glObjectPtrLabel(const void* ptr, GLsizei length, const GLchar* la
     if (context == nullptr) {
         return;
     }
-    if ((length < 0 || length > 0) && label == nullptr) {
-        recordValidationError(context, "glObjectPtrLabel", GL_INVALID_VALUE, "label must be non-null");
+    if (!isValidDebugSyncPointer(ptr)) {
+        recordValidationError(context, "glObjectPtrLabel", GL_INVALID_VALUE, "ptr must be a sync object");
+        return;
+    }
+    if (label != nullptr && length >= static_cast<GLsizei>(1024)) {
+        recordValidationError(context, "glObjectPtrLabel", GL_INVALID_VALUE, "label length exceeds GL_MAX_LABEL_LENGTH");
+        return;
+    }
+    if (label == nullptr) {
+        context->setObjectPtrLabel(ptr, {});
+        markDebugFunction(FunctionId::glObjectPtrLabel, "Pointer labels are tracked.");
+        Runtime::shared().recordBootstrapTrace("glObjectPtrLabel()");
         return;
     }
     context->setObjectPtrLabel(ptr, stringFromGLText(length, label));
@@ -8314,6 +8345,10 @@ void APIENTRY glObjectPtrLabel(const void* ptr, GLsizei length, const GLchar* la
 void APIENTRY glGetObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label) {
     auto* context = requireCurrentContext("glGetObjectPtrLabel");
     if (context == nullptr) {
+        return;
+    }
+    if (!isValidDebugSyncPointer(ptr)) {
+        recordValidationError(context, "glGetObjectPtrLabel", GL_INVALID_VALUE, "ptr must be a sync object");
         return;
     }
     context->getObjectPtrLabel(ptr, bufSize, length, label);

@@ -93,7 +93,6 @@ EXTRA_ALIASES = [
     ("glUnmapNamedBufferEXT", "glUnmapNamedBuffer"),
     ("glFlushMappedNamedBufferRangeEXT", "glFlushMappedNamedBufferRange"),
     ("glGetNamedBufferParameterivEXT", "glGetNamedBufferParameteriv"),
-    ("glGetNamedBufferPointervEXT", "glGetNamedBufferPointerv"),
     ("glGetNamedBufferSubDataEXT", "glGetNamedBufferSubData"),
     ("glNamedCopyBufferSubDataEXT", "glCopyNamedBufferSubData"),
 ]
@@ -123,6 +122,8 @@ MANUAL_EXTENSION_COMMANDS = [
     # the name and then forwards to the core entry point.
     ("glNamedBufferDataEXT", "void",
      "GLuint buffer, GLsizeiptr size, const void *data, GLenum usage"),
+    ("glGetNamedBufferPointervEXT", "void",
+     "GLuint buffer, GLenum pname, void **params"),
     # GL_EXT_direct_state_access indexed client-state and pointer queries.
     # These are compat-profile surface entry points, not core aliases:
     # the EXT spec restricts the client-state Indexed/i forms to
