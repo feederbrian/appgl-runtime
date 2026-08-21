@@ -1002,6 +1002,12 @@ void APIENTRY glWindowPos3sv(const GLshort *v);
 void APIENTRY glMaxShaderCompilerThreadsARB(GLuint count);
 void APIENTRY glMaxShaderCompilerThreadsKHR(GLuint count);
 void APIENTRY glNamedBufferDataEXT(GLuint buffer, GLsizeiptr size, const void *data, GLenum usage);
+void APIENTRY glEnableClientStateIndexedEXT(GLenum array, GLuint index);
+void APIENTRY glDisableClientStateIndexedEXT(GLenum array, GLuint index);
+void APIENTRY glEnableClientStateiEXT(GLenum array, GLuint index);
+void APIENTRY glDisableClientStateiEXT(GLenum array, GLuint index);
+void APIENTRY glGetPointerIndexedvEXT(GLenum target, GLuint index, void **data);
+void APIENTRY glGetPointeri_vEXT(GLenum pname, GLuint index, void **params);
 }  // extern "C"
 
 namespace {
@@ -1290,6 +1296,8 @@ const ProcEntry kProcTable[] = {
     {"glDetachShader", reinterpret_cast<AppGLProc>(&::glDetachShader)},
     {"glDisable", reinterpret_cast<AppGLProc>(&::glDisable)},
     {"glDisableClientState", reinterpret_cast<AppGLProc>(&::glDisableClientState)},
+    {"glDisableClientStateIndexedEXT", reinterpret_cast<AppGLProc>(&::glDisableClientStateIndexedEXT)},
+    {"glDisableClientStateiEXT", reinterpret_cast<AppGLProc>(&::glDisableClientStateiEXT)},
     {"glDisableIndexedEXT", reinterpret_cast<AppGLProc>(&::glDisableIndexedEXT)},
     {"glDisableVertexArrayAttrib", reinterpret_cast<AppGLProc>(&::glDisableVertexArrayAttrib)},
     {"glDisableVertexAttribArray", reinterpret_cast<AppGLProc>(&::glDisableVertexAttribArray)},
@@ -1350,6 +1358,8 @@ const ProcEntry kProcTable[] = {
     {"glEdgeFlagv", reinterpret_cast<AppGLProc>(&::glEdgeFlagv)},
     {"glEnable", reinterpret_cast<AppGLProc>(&::glEnable)},
     {"glEnableClientState", reinterpret_cast<AppGLProc>(&::glEnableClientState)},
+    {"glEnableClientStateIndexedEXT", reinterpret_cast<AppGLProc>(&::glEnableClientStateIndexedEXT)},
+    {"glEnableClientStateiEXT", reinterpret_cast<AppGLProc>(&::glEnableClientStateiEXT)},
     {"glEnableIndexedEXT", reinterpret_cast<AppGLProc>(&::glEnableIndexedEXT)},
     {"glEnableVertexArrayAttrib", reinterpret_cast<AppGLProc>(&::glEnableVertexArrayAttrib)},
     {"glEnableVertexAttribArray", reinterpret_cast<AppGLProc>(&::glEnableVertexAttribArray)},
@@ -1545,6 +1555,8 @@ const ProcEntry kProcTable[] = {
     {"glGetPixelMapfv", reinterpret_cast<AppGLProc>(&::glGetPixelMapfv)},
     {"glGetPixelMapuiv", reinterpret_cast<AppGLProc>(&::glGetPixelMapuiv)},
     {"glGetPixelMapusv", reinterpret_cast<AppGLProc>(&::glGetPixelMapusv)},
+    {"glGetPointerIndexedvEXT", reinterpret_cast<AppGLProc>(&::glGetPointerIndexedvEXT)},
+    {"glGetPointeri_vEXT", reinterpret_cast<AppGLProc>(&::glGetPointeri_vEXT)},
     {"glGetPointerv", reinterpret_cast<AppGLProc>(&::glGetPointerv)},
     {"glGetPointervEXT", reinterpret_cast<AppGLProc>(&::glGetPointervEXT)},
     {"glGetPointervKHR", reinterpret_cast<AppGLProc>(&::glGetPointervKHR)},

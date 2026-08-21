@@ -123,6 +123,19 @@ MANUAL_EXTENSION_COMMANDS = [
     # the name and then forwards to the core entry point.
     ("glNamedBufferDataEXT", "void",
      "GLuint buffer, GLsizeiptr size, const void *data, GLenum usage"),
+    # GL_EXT_direct_state_access indexed client-state and pointer queries.
+    # These are compat-profile surface entry points, not core aliases:
+    # the EXT spec restricts the client-state Indexed/i forms to
+    # TEXTURE_COORD_ARRAY and routes pointer queries through the legacy
+    # client-array state. Hand-written definitions live in
+    # src/runtime/AppGLImmediateMode.cpp next to the corresponding
+    # glEnableClientState/glTexCoordPointer compat entry points.
+    ("glEnableClientStateIndexedEXT", "void", "GLenum array, GLuint index"),
+    ("glDisableClientStateIndexedEXT", "void", "GLenum array, GLuint index"),
+    ("glEnableClientStateiEXT", "void", "GLenum array, GLuint index"),
+    ("glDisableClientStateiEXT", "void", "GLenum array, GLuint index"),
+    ("glGetPointerIndexedvEXT", "void", "GLenum target, GLuint index, void **data"),
+    ("glGetPointeri_vEXT", "void", "GLenum pname, GLuint index, void **params"),
 ]
 
 # Extension commands that are intentionally promoted into the generated

@@ -720,6 +720,9 @@ public:
     bool setLegacyClientArrayPointer(GLenum array, GLint size, GLenum type, GLsizei stride, const void* pointer);
     bool setLegacyClientArrayEnabled(GLenum array, bool enabled);
     bool isLegacyClientArrayEnabled(GLenum array) const;
+    bool setLegacyTextureCoordArrayEnabledIndexed(GLuint index, bool enabled);
+    bool isLegacyTextureCoordArrayEnabledIndexed(GLuint index) const;
+    bool getLegacyTextureCoordArrayPointerIndexed(GLuint index, void** params) const;
     bool encodeLegacyClientArrayDraw(GLenum mode, GLint first, GLsizei count, const void* indices, GLenum indexType, const char* debugLabel);
     void setRasterPosition(float x, float y, float z, float w);
     void setWindowRasterPosition(GLfloat x, GLfloat y, GLfloat z = 0.0f);

@@ -228,6 +228,10 @@ bool queryValue(
         case GL_SAMPLE_ALPHA_TO_COVERAGE:
         case GL_SAMPLE_ALPHA_TO_ONE:
         case GL_SAMPLE_MASK:
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_CUBE_MAP:
             writeBooleanScalar(out, enabled(pname));
             return true;
         case GL_BLEND_SRC:

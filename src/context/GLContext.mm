@@ -35356,6 +35356,7 @@ struct GLContext::Impl {
     LegacyClientArray legacyColorArray;
     LegacyClientArray legacySecondaryColorArray;
     LegacyClientArray legacyTexCoordArray;
+    std::array<LegacyClientArray, MatrixStateMirror::kMaxTextureUnits> legacyTexCoordArrays;
     // GL_EDGE_FLAG_ARRAY. `size`/`type` stay unused — glEdgeFlagPointer
     // takes neither; the element is always a single GLboolean.
     LegacyClientArray legacyEdgeFlagArray;

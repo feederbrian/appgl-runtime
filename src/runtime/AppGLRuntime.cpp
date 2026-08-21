@@ -406,6 +406,9 @@ void markStateFunction(FunctionId id, std::string_view note) {
 #ifndef GL_COLOR_ARRAY
 #define GL_COLOR_ARRAY 0x8076
 #endif
+#ifndef GL_TEXTURE_COORD_ARRAY
+#define GL_TEXTURE_COORD_ARRAY 0x8078
+#endif
 #ifndef GL_FOG
 #define GL_FOG 0x0B60
 #endif
@@ -453,7 +456,7 @@ void markStateFunction(FunctionId id, std::string_view note) {
 #endif
 bool isLegacyClientArrayCap(GLenum cap) {
     return cap == GL_VERTEX_ARRAY || cap == GL_COLOR_ARRAY ||
-        cap == GL_SECONDARY_COLOR_ARRAY;
+        cap == GL_TEXTURE_COORD_ARRAY || cap == GL_SECONDARY_COLOR_ARRAY;
 }
 
 bool admitsLegacyClientArrayCap(GLenum cap) {

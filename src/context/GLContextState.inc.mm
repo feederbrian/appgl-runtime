@@ -1,6 +1,10 @@
 // This file is textually included by GLContext.mm. Do not compile it directly.
 // It contains GLContext fixed-state-domain method definitions split out for navigation only.
 
+#ifndef GL_TEXTURE_COORD_ARRAY
+#define GL_TEXTURE_COORD_ARRAY 0x8078
+#endif
+
 #if defined(APPGL_GLCONTEXT_STATE_CLEAR_VIEWPORT)
 void GLContext::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     impl_->state->setClearColor(red, green, blue, alpha);
@@ -425,6 +429,9 @@ void GLContext::setEnabled(GLenum cap, bool enabled) {
 }
 
 bool GLContext::isEnabled(GLenum cap) const {
+    if (cap == GL_TEXTURE_COORD_ARRAY) {
+        return isLegacyClientArrayEnabled(GL_TEXTURE_COORD_ARRAY);
+    }
     return impl_->state->isEnabled(cap);
 }
 

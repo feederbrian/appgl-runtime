@@ -32,6 +32,9 @@
 #ifndef GL_TRANSPOSE_TEXTURE_MATRIX
 #define GL_TRANSPOSE_TEXTURE_MATRIX 0x84E5
 #endif
+#ifndef GL_TEXTURE_COORD_ARRAY
+#define GL_TEXTURE_COORD_ARRAY 0x8078
+#endif
 
 #if defined(APPGL_GLCONTEXT_QUERY_INDEXED)
 namespace {
@@ -59,10 +62,60 @@ GLint roundIndexedFloatStateToInteger(GLfloat value) {
     // GL Get integer conversion rounds floating-point state to nearest.
     return static_cast<GLint>(std::floor(static_cast<GLdouble>(value) + 0.5));
 }
+
+bool isExtDsaTextureEnableIndexedTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_CUBE_MAP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+GLint64 queryIndexedTextureEnableLimit(const GLCapabilities* caps) {
+    GLint64 maxUnits = 144;
+    if (caps != nullptr) {
+        caps->queryInteger64(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxUnits);
+    }
+    return std::max<GLint64>(maxUnits, 0);
+}
+
+template <typename Destination>
+void writeIndexedTextureMatrix(const Matrix4& matrix, GLenum target, Destination* data) {
+    const bool transpose = target == GL_TRANSPOSE_TEXTURE_MATRIX;
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            const int outIndex = column * 4 + row;
+            const int srcIndex = transpose ? row * 4 + column : outIndex;
+            data[outIndex] = static_cast<Destination>(matrix.m[static_cast<std::size_t>(srcIndex)]);
+        }
+    }
+}
+
+template <typename Destination>
+bool queryIndexedTextureMatrix(const MatrixStateMirror& matrixState,
+                               GLenum target,
+                               GLuint index,
+                               Destination* data) {
+    if (target != GL_TEXTURE_MATRIX && target != GL_TRANSPOSE_TEXTURE_MATRIX) {
+        return false;
+    }
+    if (index >= MatrixStateMirror::kMaxTextureUnits) {
+        return false;
+    }
+    writeIndexedTextureMatrix(matrixState.textureMatrix(index), target, data);
+    return true;
+}
 }  // namespace
 
 bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
     if (data == nullptr) return false;
+    if (queryIndexedTextureMatrix(matrixState(), target, index, data)) {
+        return true;
+    }
     // GL 4.1 §13.6.1 — viewport-array targets reject out-of-range
     // index with INVALID_VALUE. CTS `viewport_array.api_errors`
     // asserts `getFloati_v(GL_VIEWPORT, GL_MAX_VIEWPORTS, ...)`
@@ -114,6 +167,9 @@ bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
 
 bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) {
     if (data == nullptr) return false;
+    if (queryIndexedTextureMatrix(matrixState(), target, index, data)) {
+        return true;
+    }
     if (target == GL_VIEWPORT || target == GL_SCISSOR_BOX || target == GL_DEPTH_RANGE) {
         if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
             pushError(GL_INVALID_VALUE);
@@ -154,6 +210,24 @@ bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) 
 
 bool GLContext::queryBooleanIndexed(GLenum target, GLuint index, GLboolean* data) {
     if (data == nullptr) return false;
+    if (isExtDsaTextureEnableIndexedTarget(target)) {
+        if (static_cast<GLint64>(index) >=
+            queryIndexedTextureEnableLimit(impl_->capabilities.get())) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const bool enabled = impl_->state->isEnabled(target);
+        *data = enabled ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (target == GL_TEXTURE_COORD_ARRAY) {
+        if (index >= MatrixStateMirror::kMaxTextureUnits) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        *data = isLegacyTextureCoordArrayEnabledIndexed(index) ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(target, ibp)) {
         const GLint64 maxIndex =
@@ -298,6 +372,10 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
             return false;
         }
         *data = integerValue != 0 ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (pname == GL_TEXTURE_COORD_ARRAY) {
+        *data = isLegacyClientArrayEnabled(GL_TEXTURE_COORD_ARRAY) ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {

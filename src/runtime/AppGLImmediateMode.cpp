@@ -62,6 +62,9 @@
 #ifndef GL_TEXTURE_COORD_ARRAY
 #define GL_TEXTURE_COORD_ARRAY 0x8078
 #endif
+#ifndef GL_TEXTURE_COORD_ARRAY_POINTER
+#define GL_TEXTURE_COORD_ARRAY_POINTER 0x8092
+#endif
 #ifndef GL_RENDER
 #define GL_RENDER 0x1C00
 #endif
@@ -555,6 +558,70 @@ extern "C" void APIENTRY glDisableClientState(GLenum array) {
         return;
     }
     (void)ctx->setLegacyClientArrayEnabled(array, false);
+}
+
+namespace {
+void setIndexedTextureCoordClientState(GLenum array,
+                                       GLuint index,
+                                       bool enabled,
+                                       const char* functionName) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    if (array != GL_TEXTURE_COORD_ARRAY) {
+        ctx->pushError(GL_INVALID_ENUM, functionName,
+                       "EXT DSA indexed client-state commands only accept GL_TEXTURE_COORD_ARRAY");
+        return;
+    }
+    (void)ctx->setLegacyTextureCoordArrayEnabledIndexed(index, enabled);
+}
+
+void getIndexedTextureCoordPointer(GLenum pname,
+                                   GLuint index,
+                                   void** params,
+                                   const char* functionName) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    if (params == nullptr) {
+        ctx->pushError(GL_INVALID_VALUE, functionName, "params must be non-null");
+        return;
+    }
+    if (pname != GL_TEXTURE_COORD_ARRAY_POINTER) {
+        ctx->pushError(GL_INVALID_ENUM, functionName,
+                       "EXT DSA indexed pointer queries only accept GL_TEXTURE_COORD_ARRAY_POINTER");
+        return;
+    }
+    if (!ctx->getLegacyTextureCoordArrayPointerIndexed(index, params)) {
+        ctx->pushError(GL_INVALID_VALUE, functionName, "texture coordinate index is out of range");
+    }
+}
+}  // namespace
+
+extern "C" void APIENTRY glEnableClientStateIndexedEXT(GLenum array, GLuint index) {
+    setIndexedTextureCoordClientState(array, index, true, "glEnableClientStateIndexedEXT");
+}
+
+extern "C" void APIENTRY glDisableClientStateIndexedEXT(GLenum array, GLuint index) {
+    setIndexedTextureCoordClientState(array, index, false, "glDisableClientStateIndexedEXT");
+}
+
+extern "C" void APIENTRY glEnableClientStateiEXT(GLenum array, GLuint index) {
+    setIndexedTextureCoordClientState(array, index, true, "glEnableClientStateiEXT");
+}
+
+extern "C" void APIENTRY glDisableClientStateiEXT(GLenum array, GLuint index) {
+    setIndexedTextureCoordClientState(array, index, false, "glDisableClientStateiEXT");
+}
+
+extern "C" void APIENTRY glGetPointerIndexedvEXT(GLenum target, GLuint index, void** data) {
+    getIndexedTextureCoordPointer(target, index, data, "glGetPointerIndexedvEXT");
+}
+
+extern "C" void APIENTRY glGetPointeri_vEXT(GLenum pname, GLuint index, void** params) {
+    getIndexedTextureCoordPointer(pname, index, params, "glGetPointeri_vEXT");
 }
 
 // ── Raster pixel position / copy ─────────────────────────────────────

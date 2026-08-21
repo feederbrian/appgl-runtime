@@ -28,6 +28,10 @@ constexpr std::uint32_t kAppGLImmediateTextureBaseIntensity = 4u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseRGB = 5u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseRGBA = 6u;
 
+GLuint legacyTexCoordClientArrayUnit(GLuint unit) {
+    return unit < MatrixStateMirror::kMaxTextureUnits ? unit : 0u;
+}
+
 bool appglImmediateTextureFormatIsDepth(GLenum internalFormat) {
     switch (internalFormat) {
         case GL_DEPTH_COMPONENT:
@@ -4280,7 +4284,8 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
             label = "glSecondaryColorPointer";
             break;
         case GL_TEXTURE_COORD_ARRAY:
-            state = &impl_->legacyTexCoordArray;
+            state = &impl_->legacyTexCoordArrays[
+                legacyTexCoordClientArrayUnit(impl_->state->activeTextureUnit())];
             minSize = 1;
             maxSize = 4;
             label = "glTexCoordPointer";
@@ -4303,6 +4308,9 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
     state->stride = stride;
     state->pointer = pointer;
     state->bufferName = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
+    if (array == GL_TEXTURE_COORD_ARRAY) {
+        impl_->legacyTexCoordArray = *state;
+    }
     return true;
 }
 
@@ -4335,9 +4343,13 @@ bool GLContext::setLegacyClientArrayEnabled(GLenum array, bool enabled) {
         case GL_SECONDARY_COLOR_ARRAY:
             impl_->legacySecondaryColorArray.enabled = enabled;
             return true;
-        case GL_TEXTURE_COORD_ARRAY:
-            impl_->legacyTexCoordArray.enabled = enabled;
+        case GL_TEXTURE_COORD_ARRAY: {
+            auto& state = impl_->legacyTexCoordArrays[
+                legacyTexCoordClientArrayUnit(impl_->state->activeTextureUnit())];
+            state.enabled = enabled;
+            impl_->legacyTexCoordArray = state;
             return true;
+        }
         case GL_NORMAL_ARRAY:
             // Accepted as a no-op for legacy fixed-function tests that
             // deliberately bind an unused normal array.
@@ -4360,10 +4372,42 @@ bool GLContext::isLegacyClientArrayEnabled(GLenum array) const {
         case GL_SECONDARY_COLOR_ARRAY:
             return impl_->legacySecondaryColorArray.enabled;
         case GL_TEXTURE_COORD_ARRAY:
-            return impl_->legacyTexCoordArray.enabled;
+            return impl_->legacyTexCoordArrays[
+                legacyTexCoordClientArrayUnit(impl_->state->activeTextureUnit())].enabled;
         default:
             return false;
     }
+}
+
+bool GLContext::setLegacyTextureCoordArrayEnabledIndexed(GLuint index, bool enabled) {
+    if (index >= MatrixStateMirror::kMaxTextureUnits) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    auto& state = impl_->legacyTexCoordArrays[index];
+    state.enabled = enabled;
+    if (index == 0u) {
+        impl_->legacyTexCoordArray = state;
+    }
+    return true;
+}
+
+bool GLContext::isLegacyTextureCoordArrayEnabledIndexed(GLuint index) const {
+    if (index >= MatrixStateMirror::kMaxTextureUnits) {
+        return false;
+    }
+    return impl_->legacyTexCoordArrays[index].enabled;
+}
+
+bool GLContext::getLegacyTextureCoordArrayPointerIndexed(GLuint index, void** params) const {
+    if (params == nullptr) {
+        return false;
+    }
+    if (index >= MatrixStateMirror::kMaxTextureUnits) {
+        return false;
+    }
+    *params = const_cast<void*>(impl_->legacyTexCoordArrays[index].pointer);
+    return true;
 }
 
 void GLContext::pushMatrixCompat() {

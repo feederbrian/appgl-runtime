@@ -162,12 +162,36 @@ bool GLContext::getPointer(GLenum pname, void** params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+#ifndef GL_VERTEX_ARRAY_POINTER
+#define GL_VERTEX_ARRAY_POINTER 0x808E
+#endif
+#ifndef GL_COLOR_ARRAY_POINTER
+#define GL_COLOR_ARRAY_POINTER 0x8090
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_POINTER
+#define GL_TEXTURE_COORD_ARRAY_POINTER 0x8092
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_POINTER
+#define GL_SECONDARY_COLOR_ARRAY_POINTER 0x845D
+#endif
     switch (pname) {
         case GL_DEBUG_CALLBACK_FUNCTION:
             *params = reinterpret_cast<void*>(impl_->debugCallback);
             return true;
         case GL_DEBUG_CALLBACK_USER_PARAM:
             *params = const_cast<void*>(impl_->debugUserParam);
+            return true;
+        case GL_VERTEX_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacyVertexArray.pointer);
+            return true;
+        case GL_COLOR_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacyColorArray.pointer);
+            return true;
+        case GL_TEXTURE_COORD_ARRAY_POINTER:
+            return getLegacyTextureCoordArrayPointerIndexed(
+                impl_->state->activeTextureUnit(), params);
+        case GL_SECONDARY_COLOR_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacySecondaryColorArray.pointer);
             return true;
         default:
             pushError(GL_INVALID_ENUM);
