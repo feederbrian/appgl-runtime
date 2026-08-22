@@ -25,6 +25,19 @@
 #include <limits>
 #include <unordered_set>
 
+#ifndef GL_CLAMP_VERTEX_COLOR
+#define GL_CLAMP_VERTEX_COLOR 0x891A
+#endif
+#ifndef GL_CLAMP_FRAGMENT_COLOR
+#define GL_CLAMP_FRAGMENT_COLOR 0x891B
+#endif
+#ifndef GL_CLAMP_READ_COLOR
+#define GL_CLAMP_READ_COLOR 0x891C
+#endif
+#ifndef GL_FIXED_ONLY
+#define GL_FIXED_ONLY 0x891D
+#endif
+
 #ifndef GL_ALPHA4
 #define GL_ALPHA4 0x803B
 #endif
@@ -1760,8 +1773,9 @@ static void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index,
 }
 
 static void APIENTRY glClampColor(GLenum target, GLenum clamp) {
-    (void)target;
-    (void)clamp;
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    ctx->clampColor(target, clamp);
 }
 
 static void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {

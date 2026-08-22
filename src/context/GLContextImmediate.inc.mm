@@ -3185,6 +3185,10 @@ void GLContext::pushAttribCompat(GLbitfield mask) {
         snapshot.sampleCoverageValue = impl_->state->sampleCoverageValue();
         snapshot.sampleCoverageInvert = impl_->state->sampleCoverageInvert();
     }
+    if ((mask & (GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)) != 0) {
+        snapshot.hasFramebufferSrgb = true;
+        snapshot.framebufferSrgb = impl_->state->isEnabled(GL_FRAMEBUFFER_SRGB);
+    }
     impl_->compatAttribStack.push_back(snapshot);
 }
 
@@ -3211,6 +3215,9 @@ void GLContext::popAttribCompat() {
     if (snapshot.hasSampleCoverageValues) {
         impl_->state->setSampleCoverage(snapshot.sampleCoverageValue,
                                         snapshot.sampleCoverageInvert);
+    }
+    if (snapshot.hasFramebufferSrgb) {
+        setEnabled(GL_FRAMEBUFFER_SRGB, snapshot.framebufferSrgb);
     }
 }
 
@@ -5547,6 +5554,10 @@ void GLContext::endImmediate() {
         const Impl::ImmediateModeVertex tri[3] = {a, b, c};
         return polygonIsFrontFacing(tri, 3);
     };
+    const bool fixedFunctionClampVertexColor =
+        impl_->state->currentProgram() == 0 &&
+        impl_->state->currentProgramPipeline() == 0 &&
+        impl_->vertexColorClampActive();
     auto applyCompatVertexState = [&](Impl::ImmediateModeVertex v,
                                       bool frontFacing,
                                       const Impl::ImmediateModeMaterialSnapshot* materialSnapshot) {
@@ -5685,6 +5696,9 @@ void GLContext::endImmediate() {
                     (1.0f - factor) * impl_->fog.color[c];
             }
         }
+        if (fixedFunctionClampVertexColor) {
+            impl_->applyVertexColorClamp(v.color);
+        }
         return v;
     };
     const bool anyCompatClipPlaneEnabled = [&]() {
@@ -5696,6 +5710,7 @@ void GLContext::endImmediate() {
         return false;
     }();
     const bool needsCompatVertexState =
+        fixedFunctionClampVertexColor ||
         impl_->state->isEnabled(GL_LIGHTING) ||
         impl_->state->isEnabled(GL_FOG) ||
         impl_->state->isEnabled(GL_TEXTURE_GEN_S) ||
@@ -9430,7 +9445,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         default:
             return false;
     }
+    const bool fixedFunctionClampVertexColor =
+        impl_->state->currentProgram() == 0 &&
+        impl_->state->currentProgramPipeline() == 0 &&
+        impl_->vertexColorClampActive();
     const bool needsCompatClientArrayState =
+        fixedFunctionClampVertexColor ||
         impl_->state->isEnabled(GL_LIGHTING) ||
         impl_->state->isEnabled(GL_FOG) ||
         impl_->state->isEnabled(GL_TEXTURE_GEN_S) ||
@@ -9539,6 +9559,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                     v.color[c] = factor * v.color[c] +
                         (1.0f - factor) * impl_->fog.color[c];
                 }
+            }
+            if (fixedFunctionClampVertexColor) {
+                impl_->applyVertexColorClamp(v.color);
             }
         };
         for (auto& v : fillVertices) {

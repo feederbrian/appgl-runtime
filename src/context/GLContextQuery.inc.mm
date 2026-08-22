@@ -5,6 +5,23 @@
 #define GL_RGBA_INTEGER_MODE_EXT 0x8D9E
 #endif
 
+#ifndef GL_FRAMEBUFFER_SRGB_CAPABLE_EXT
+#define GL_FRAMEBUFFER_SRGB_CAPABLE_EXT 0x8DBA
+#endif
+
+#ifndef GL_CLAMP_VERTEX_COLOR
+#define GL_CLAMP_VERTEX_COLOR 0x891A
+#endif
+#ifndef GL_CLAMP_FRAGMENT_COLOR
+#define GL_CLAMP_FRAGMENT_COLOR 0x891B
+#endif
+#ifndef GL_CLAMP_READ_COLOR
+#define GL_CLAMP_READ_COLOR 0x891C
+#endif
+#ifndef GL_FIXED_ONLY
+#define GL_FIXED_ONLY 0x891D
+#endif
+
 #ifndef GL_MATRIX_MODE
 #define GL_MATRIX_MODE 0x0BA0
 #endif
@@ -415,6 +432,18 @@ bool isLegacySecondaryColorArrayParameter(GLenum pname) {
            pname == GL_SECONDARY_COLOR_ARRAY_STRIDE;
 }
 
+bool isIntegerConvertibleQueryPname(GLenum pname) {
+    switch (pname) {
+        case GL_FRAMEBUFFER_SRGB_CAPABLE_EXT:
+        case GL_CLAMP_VERTEX_COLOR:
+        case GL_CLAMP_FRAGMENT_COLOR:
+        case GL_CLAMP_READ_COLOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
 template <typename LegacyClientArray>
 bool queryLegacyClientArrayInteger(
     const LegacyClientArray& array,
@@ -620,6 +649,43 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = integerMode ? GL_TRUE : GL_FALSE;
         return true;
     }
+    if (pname == GL_FRAMEBUFFER_SRGB_CAPABLE_EXT) {
+        bool srgbCapable = false;
+        const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
+        if (framebufferName != 0) {
+            if (const GLFramebufferObject* framebuffer =
+                    impl_->objects->framebuffers().get(framebufferName)) {
+                for (GLenum drawBuffer : framebuffer->drawBuffers) {
+                    if (drawBuffer == GL_NONE) {
+                        continue;
+                    }
+                    const GLFramebufferAttachment* attachment =
+                        impl_->framebufferAttachment(*framebuffer, drawBuffer);
+                    if (attachment == nullptr) {
+                        continue;
+                    }
+                    const auto info =
+                        impl_->framebufferAttachmentInfo(*attachment);
+                    if (info.complete && isSRGBTextureFormat(info.internalFormat)) {
+                        srgbCapable = true;
+                        break;
+                    }
+                }
+            }
+        }
+        *data = srgbCapable ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (pname == GL_CLAMP_VERTEX_COLOR ||
+        pname == GL_CLAMP_FRAGMENT_COLOR ||
+        pname == GL_CLAMP_READ_COLOR) {
+        GLint mode = 0;
+        if (!queryInteger(pname, &mode)) {
+            return false;
+        }
+        *data = mode != GL_FALSE ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     bool fragmentShadingRateHandled = false;
     if (!queryFragmentShadingRateBoolean(*this, pname, data, fragmentShadingRateHandled)) {
         return false;
@@ -677,6 +743,26 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
     }
     if (pname == GL_CLIENT_ACTIVE_TEXTURE) {
         *data = static_cast<GLint>(GL_TEXTURE0 + impl_->state->activeTextureUnit());
+        return true;
+    }
+    if (pname == GL_FRAMEBUFFER_SRGB_CAPABLE_EXT) {
+        GLboolean capable = GL_FALSE;
+        if (!queryBoolean(pname, &capable)) {
+            return false;
+        }
+        *data = capable == GL_TRUE ? 1 : 0;
+        return true;
+    }
+    if (pname == GL_CLAMP_VERTEX_COLOR) {
+        *data = static_cast<GLint>(impl_->clampVertexColorMode);
+        return true;
+    }
+    if (pname == GL_CLAMP_FRAGMENT_COLOR) {
+        *data = static_cast<GLint>(impl_->clampFragmentColorMode);
+        return true;
+    }
+    if (pname == GL_CLAMP_READ_COLOR) {
+        *data = static_cast<GLint>(impl_->clampReadColorMode);
         return true;
     }
     if (queryLegacyClientArrayInteger(
@@ -1059,6 +1145,14 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         *data = static_cast<GLint64>(integerValue);
         return true;
     }
+    if (isIntegerConvertibleQueryPname(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLint64>(integerValue);
+        return true;
+    }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
@@ -1364,6 +1458,14 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         *data = static_cast<GLfloat>(integerValue);
         return true;
     }
+    if (isIntegerConvertibleQueryPname(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLfloat>(integerValue);
+        return true;
+    }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
@@ -1462,6 +1564,14 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
         return true;
     }
     if (isLegacySecondaryColorArrayParameter(pname)) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLdouble>(integerValue);
+        return true;
+    }
+    if (isIntegerConvertibleQueryPname(pname)) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
             return false;

@@ -129,6 +129,7 @@ public:
                                    GLsizei texelHeight);
     void setEnabled(GLenum cap, bool enabled);
     bool isEnabled(GLenum cap) const;
+    bool clampColor(GLenum target, GLenum clamp);
     // MSAA-TAIL-5: true between glBegin and glEnd. GL 4.6 §10.7.4 makes
     // most commands INVALID_OPERATION there; entry points outside
     // GLContext (AppGLGroup8) need this to enforce it.

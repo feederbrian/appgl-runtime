@@ -4,6 +4,18 @@
 #ifndef GL_TEXTURE_COORD_ARRAY
 #define GL_TEXTURE_COORD_ARRAY 0x8078
 #endif
+#ifndef GL_CLAMP_VERTEX_COLOR
+#define GL_CLAMP_VERTEX_COLOR 0x891A
+#endif
+#ifndef GL_CLAMP_FRAGMENT_COLOR
+#define GL_CLAMP_FRAGMENT_COLOR 0x891B
+#endif
+#ifndef GL_CLAMP_READ_COLOR
+#define GL_CLAMP_READ_COLOR 0x891C
+#endif
+#ifndef GL_FIXED_ONLY
+#define GL_FIXED_ONLY 0x891D
+#endif
 
 #if defined(APPGL_GLCONTEXT_STATE_CLEAR_VIEWPORT)
 void GLContext::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
@@ -433,6 +445,27 @@ bool GLContext::isEnabled(GLenum cap) const {
         return isLegacyClientArrayEnabled(GL_TEXTURE_COORD_ARRAY);
     }
     return impl_->state->isEnabled(cap);
+}
+
+bool GLContext::clampColor(GLenum target, GLenum clamp) {
+    if (clamp != GL_TRUE && clamp != GL_FALSE && clamp != GL_FIXED_ONLY) {
+        pushError(GL_INVALID_ENUM, "glClampColor", "invalid clamp mode");
+        return false;
+    }
+    switch (target) {
+        case GL_CLAMP_VERTEX_COLOR:
+            impl_->clampVertexColorMode = clamp;
+            return true;
+        case GL_CLAMP_FRAGMENT_COLOR:
+            impl_->clampFragmentColorMode = clamp;
+            return true;
+        case GL_CLAMP_READ_COLOR:
+            impl_->clampReadColorMode = clamp;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM, "glClampColor", "invalid target");
+            return false;
+    }
 }
 
 #elif defined(APPGL_GLCONTEXT_STATE_CLIP_CONTROL)

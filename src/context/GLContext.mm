@@ -77,6 +77,18 @@
 #ifndef GL_SMOOTH
 #define GL_SMOOTH 0x1D01
 #endif
+#ifndef GL_CLAMP_VERTEX_COLOR
+#define GL_CLAMP_VERTEX_COLOR 0x891A
+#endif
+#ifndef GL_CLAMP_FRAGMENT_COLOR
+#define GL_CLAMP_FRAGMENT_COLOR 0x891B
+#endif
+#ifndef GL_CLAMP_READ_COLOR
+#define GL_CLAMP_READ_COLOR 0x891C
+#endif
+#ifndef GL_FIXED_ONLY
+#define GL_FIXED_ONLY 0x891D
+#endif
 #ifndef GL_CURRENT_RASTER_COLOR
 #define GL_CURRENT_RASTER_COLOR 0x0B04
 #endif
@@ -35333,6 +35345,9 @@ struct GLContext::Impl {
     GLfloat fixedFunctionRasterSecondaryColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     GLfloat fixedFunctionPixelZoomX = 1.0f;
     GLfloat fixedFunctionPixelZoomY = 1.0f;
+    GLenum clampVertexColorMode = GL_TRUE;
+    GLenum clampFragmentColorMode = GL_FIXED_ONLY;
+    GLenum clampReadColorMode = GL_FIXED_ONLY;
     static constexpr std::size_t kCompatRasterTextureUnits = 8;
     std::array<std::array<GLfloat, 4>, kCompatRasterTextureUnits> fixedFunctionRasterTexcoords{};
     GLfloat fixedFunctionCurrentSecondaryColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -35375,6 +35390,80 @@ struct GLContext::Impl {
     LegacyClientArray legacyIndexArray;
     LegacyClientArray legacyNormalArray;
     LegacyClientArray legacyFogCoordArray;
+
+    static bool isFloatingPointColorInternalFormat(GLenum internalFormat) {
+        switch (internalFormat) {
+            case GL_R16F:
+            case GL_R32F:
+            case GL_RG16F:
+            case GL_RG32F:
+            case GL_RGB16F:
+            case GL_RGB32F:
+            case GL_RGBA16F:
+            case GL_RGBA32F:
+            case GL_R11F_G11F_B10F:
+            case GL_RGB9_E5:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool isFixedPointColorInternalFormat(GLenum internalFormat) {
+        return isColorFormat(internalFormat) &&
+            !isFloatingPointColorInternalFormat(internalFormat) &&
+            !isIntegerInternalFormat(internalFormat);
+    }
+
+    bool drawColorBuffersAreFixedPoint() const {
+        const GLuint framebufferName = state->boundDrawFramebuffer();
+        if (framebufferName == 0) {
+            return true;
+        }
+        const GLFramebufferObject* framebuffer =
+            objects->framebuffers().get(framebufferName);
+        if (framebuffer == nullptr) {
+            return true;
+        }
+        bool sawColorAttachment = false;
+        for (GLenum drawBuffer : framebuffer->drawBuffers) {
+            if (drawBuffer == GL_NONE) {
+                continue;
+            }
+            const GLFramebufferAttachment* attachment =
+                framebufferAttachment(*framebuffer, drawBuffer);
+            if (attachment == nullptr) {
+                continue;
+            }
+            const AttachmentInfo info = framebufferAttachmentInfo(*attachment);
+            if (!info.complete || !isColorFormat(info.internalFormat)) {
+                continue;
+            }
+            sawColorAttachment = true;
+            if (!isFixedPointColorInternalFormat(info.internalFormat)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool colorClampModeActive(GLenum mode) const {
+        return mode == GL_TRUE ||
+            (mode == GL_FIXED_ONLY && drawColorBuffersAreFixedPoint());
+    }
+
+    bool vertexColorClampActive() const {
+        return colorClampModeActive(clampVertexColorMode);
+    }
+
+    void applyVertexColorClamp(float* color) const {
+        if (!vertexColorClampActive() || color == nullptr) {
+            return;
+        }
+        for (int channel = 0; channel < 4; ++channel) {
+            color[channel] = std::clamp(color[channel], 0.0f, 1.0f);
+        }
+    }
 
     static void exportLegacyClientArray(const LegacyClientArray& src,
                                         GLCompatClientArrayState& dst) {
@@ -35693,6 +35782,10 @@ struct GLContext::Impl {
         bool hasSampleCoverageValues = false;
         GLfloat sampleCoverageValue = 1.0f;
         GLboolean sampleCoverageInvert = GL_FALSE;
+        // GL_FRAMEBUFFER_SRGB belongs to both GL_ENABLE_BIT and
+        // GL_COLOR_BUFFER_BIT for compatibility glPushAttrib/glPopAttrib.
+        bool hasFramebufferSrgb = false;
+        bool framebufferSrgb = false;
     };
     std::vector<CompatAttribSnapshot> compatAttribStack;
 
