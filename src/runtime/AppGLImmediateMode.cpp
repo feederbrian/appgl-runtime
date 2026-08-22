@@ -39,9 +39,11 @@
 
 #include "../context/GLContext.h"
 #include "../runtime/AppGLProfile.h"
+#include "../state/GLStateTracker.h"
 #include "AppGLRuntime.h"
 
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #ifndef GL_SHADE_MODEL
@@ -64,6 +66,57 @@
 #endif
 #ifndef GL_TEXTURE_COORD_ARRAY_POINTER
 #define GL_TEXTURE_COORD_ARRAY_POINTER 0x8092
+#endif
+#ifndef GL_CLIENT_ACTIVE_TEXTURE
+#define GL_CLIENT_ACTIVE_TEXTURE 0x84E1
+#endif
+#ifndef GL_VERTEX_ARRAY
+#define GL_VERTEX_ARRAY 0x8074
+#endif
+#ifndef GL_VERTEX_ARRAY_POINTER
+#define GL_VERTEX_ARRAY_POINTER 0x808E
+#endif
+#ifndef GL_COLOR_ARRAY_POINTER
+#define GL_COLOR_ARRAY_POINTER 0x8090
+#endif
+#ifndef GL_EDGE_FLAG_ARRAY
+#define GL_EDGE_FLAG_ARRAY 0x8079
+#endif
+#ifndef GL_EDGE_FLAG_ARRAY_POINTER
+#define GL_EDGE_FLAG_ARRAY_POINTER 0x8093
+#endif
+#ifndef GL_INDEX_ARRAY
+#define GL_INDEX_ARRAY 0x8077
+#endif
+#ifndef GL_INDEX_ARRAY_POINTER
+#define GL_INDEX_ARRAY_POINTER 0x8091
+#endif
+#ifndef GL_NORMAL_ARRAY
+#define GL_NORMAL_ARRAY 0x8075
+#endif
+#ifndef GL_NORMAL_ARRAY_POINTER
+#define GL_NORMAL_ARRAY_POINTER 0x808F
+#endif
+#ifndef GL_FOG_COORD_ARRAY
+#define GL_FOG_COORD_ARRAY 0x8457
+#endif
+#ifndef GL_FOG_COORD_ARRAY_POINTER
+#define GL_FOG_COORD_ARRAY_POINTER 0x8456
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_POINTER
+#define GL_SECONDARY_COLOR_ARRAY_POINTER 0x845D
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_SIZE
+#define GL_TEXTURE_COORD_ARRAY_SIZE 0x8088
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_TYPE
+#define GL_TEXTURE_COORD_ARRAY_TYPE 0x8089
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_STRIDE
+#define GL_TEXTURE_COORD_ARRAY_STRIDE 0x808A
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING
+#define GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING 0x889A
 #endif
 #ifndef GL_RENDER
 #define GL_RENDER 0x1C00
@@ -172,6 +225,149 @@ namespace {
 // instead of crashing, since there is no spec-defined error to report).
 appgl::GLContext* immediateContext() {
     return appgl::Runtime::shared().currentContext();
+}
+
+const void* offsetAsPointer(GLintptr offset) {
+    return reinterpret_cast<const void*>(
+        static_cast<std::uintptr_t>(offset));
+}
+
+class ScopedVaoArrayBufferState {
+public:
+    explicit ScopedVaoArrayBufferState(appgl::GLContext* context)
+        : context_(context),
+          vertexArray_(context != nullptr ? context->state().boundVertexArray() : 0u),
+          arrayBuffer_(context != nullptr ? context->state().boundBuffer(GL_ARRAY_BUFFER) : 0u),
+          activeTextureUnit_(context != nullptr ? context->state().activeTextureUnit() : 0u) {}
+
+    ~ScopedVaoArrayBufferState() {
+        if (context_ == nullptr) {
+            return;
+        }
+        (void)context_->bindVertexArray(vertexArray_);
+        (void)context_->activeTexture(GL_TEXTURE0 + activeTextureUnit_);
+        (void)context_->bindBuffer(GL_ARRAY_BUFFER, arrayBuffer_);
+    }
+
+    ScopedVaoArrayBufferState(const ScopedVaoArrayBufferState&) = delete;
+    ScopedVaoArrayBufferState& operator=(const ScopedVaoArrayBufferState&) = delete;
+
+private:
+    appgl::GLContext* context_;
+    GLuint vertexArray_;
+    GLuint arrayBuffer_;
+    GLuint activeTextureUnit_;
+};
+
+bool withExtDsaVertexArray(appgl::GLContext* context, GLuint vaobj) {
+    return context != nullptr && context->bindVertexArray(vaobj);
+}
+
+void setVertexArrayLegacyOffset(GLuint vaobj,
+                                GLuint buffer,
+                                GLenum array,
+                                GLint size,
+                                GLenum type,
+                                GLsizei stride,
+                                GLintptr offset) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (!context->bindBuffer(GL_ARRAY_BUFFER, buffer)) {
+        return;
+    }
+    (void)context->setLegacyClientArrayPointer(
+        array, size, type, stride, offsetAsPointer(offset));
+}
+
+void setVertexArrayEdgeFlagOffset(GLuint vaobj,
+                                  GLuint buffer,
+                                  GLsizei stride,
+                                  GLintptr offset) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (!context->bindBuffer(GL_ARRAY_BUFFER, buffer)) {
+        return;
+    }
+    (void)context->setLegacyEdgeFlagPointer(stride, offsetAsPointer(offset));
+}
+
+void setVertexArrayTexCoordOffset(GLuint vaobj,
+                                  GLuint buffer,
+                                  GLenum texunit,
+                                  GLint size,
+                                  GLenum type,
+                                  GLsizei stride,
+                                  GLintptr offset) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (!context->activeTexture(texunit)) {
+        return;
+    }
+    if (!context->bindBuffer(GL_ARRAY_BUFFER, buffer)) {
+        return;
+    }
+    (void)context->setLegacyClientArrayPointer(
+        GL_TEXTURE_COORD_ARRAY, size, type, stride, offsetAsPointer(offset));
+}
+
+void setVertexArrayAttribOffset(GLuint vaobj,
+                                GLuint buffer,
+                                GLuint index,
+                                GLint size,
+                                GLenum type,
+                                GLboolean normalized,
+                                GLsizei stride,
+                                GLintptr offset,
+                                bool integer) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (!context->bindBuffer(GL_ARRAY_BUFFER, buffer)) {
+        return;
+    }
+    if (integer) {
+        (void)context->vertexAttribIPointer(
+            index, size, type, stride, offsetAsPointer(offset));
+    } else {
+        (void)context->vertexAttribPointer(
+            index, size, type, normalized, stride, offsetAsPointer(offset));
+    }
+}
+
+bool isTextureCoordIntegerPname(GLenum pname) {
+    switch (pname) {
+        case GL_TEXTURE_COORD_ARRAY:
+        case GL_TEXTURE_COORD_ARRAY_SIZE:
+        case GL_TEXTURE_COORD_ARRAY_TYPE:
+        case GL_TEXTURE_COORD_ARRAY_STRIDE:
+        case GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING:
+            return true;
+        default:
+            return false;
+    }
 }
 
 }  // namespace
@@ -622,6 +818,189 @@ extern "C" void APIENTRY glGetPointerIndexedvEXT(GLenum target, GLuint index, vo
 
 extern "C" void APIENTRY glGetPointeri_vEXT(GLenum pname, GLuint index, void** params) {
     getIndexedTextureCoordPointer(pname, index, params, "glGetPointeri_vEXT");
+}
+
+extern "C" void APIENTRY glVertexArrayVertexOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayLegacyOffset(vaobj, buffer, GL_VERTEX_ARRAY, size, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayColorOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayLegacyOffset(vaobj, buffer, GL_COLOR_ARRAY, size, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayEdgeFlagOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLsizei stride, GLintptr offset) {
+    setVertexArrayEdgeFlagOffset(vaobj, buffer, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayIndexOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayLegacyOffset(vaobj, buffer, GL_INDEX_ARRAY, 1, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayNormalOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayLegacyOffset(vaobj, buffer, GL_NORMAL_ARRAY, 3, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayTexCoordOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayTexCoordOffset(
+        vaobj, buffer, GL_TEXTURE0, size, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayMultiTexCoordOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLenum texunit, GLint size, GLenum type,
+    GLsizei stride, GLintptr offset) {
+    setVertexArrayTexCoordOffset(
+        vaobj, buffer, texunit, size, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayFogCoordOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayLegacyOffset(vaobj, buffer, GL_FOG_COORD_ARRAY, 1, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArraySecondaryColorOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset) {
+    setVertexArrayLegacyOffset(
+        vaobj, buffer, GL_SECONDARY_COLOR_ARRAY, size, type, stride, offset);
+}
+
+extern "C" void APIENTRY glVertexArrayVertexAttribOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLuint index, GLint size, GLenum type,
+    GLboolean normalized, GLsizei stride, GLintptr offset) {
+    setVertexArrayAttribOffset(
+        vaobj, buffer, index, size, type, normalized, stride, offset, false);
+}
+
+extern "C" void APIENTRY glVertexArrayVertexAttribIOffsetEXT(
+    GLuint vaobj, GLuint buffer, GLuint index, GLint size, GLenum type,
+    GLsizei stride, GLintptr offset) {
+    setVertexArrayAttribOffset(
+        vaobj, buffer, index, size, type, GL_FALSE, stride, offset, true);
+}
+
+extern "C" void APIENTRY glEnableVertexArrayEXT(GLuint vaobj, GLenum array) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (array >= GL_TEXTURE0) {
+        if (!context->activeTexture(array)) {
+            return;
+        }
+        (void)context->setLegacyClientArrayEnabled(GL_TEXTURE_COORD_ARRAY, true);
+        return;
+    }
+    (void)context->setLegacyClientArrayEnabled(array, true);
+}
+
+extern "C" void APIENTRY glDisableVertexArrayEXT(GLuint vaobj, GLenum array) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (array >= GL_TEXTURE0) {
+        if (!context->activeTexture(array)) {
+            return;
+        }
+        (void)context->setLegacyClientArrayEnabled(GL_TEXTURE_COORD_ARRAY, false);
+        return;
+    }
+    (void)context->setLegacyClientArrayEnabled(array, false);
+}
+
+extern "C" void APIENTRY glEnableVertexArrayAttribEXT(GLuint vaobj, GLuint index) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    (void)context->enableVertexArrayAttrib(vaobj, index);
+}
+
+extern "C" void APIENTRY glDisableVertexArrayAttribEXT(GLuint vaobj, GLuint index) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    (void)context->disableVertexArrayAttrib(vaobj, index);
+}
+
+extern "C" void APIENTRY glGetVertexArrayIntegervEXT(
+    GLuint vaobj, GLenum pname, GLint* param) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    (void)context->queryInteger(pname, param);
+}
+
+extern "C" void APIENTRY glGetVertexArrayIntegeri_vEXT(
+    GLuint vaobj, GLuint index, GLenum pname, GLint* param) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (isTextureCoordIntegerPname(pname)) {
+        if (!context->activeTexture(GL_TEXTURE0 + index)) {
+            return;
+        }
+        (void)context->queryInteger(pname, param);
+        return;
+    }
+    (void)context->getVertexAttribInteger(index, pname, param);
+}
+
+extern "C" void APIENTRY glGetVertexArrayPointervEXT(
+    GLuint vaobj, GLenum pname, void** param) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    (void)context->getPointer(pname, param);
+}
+
+extern "C" void APIENTRY glGetVertexArrayPointeri_vEXT(
+    GLuint vaobj, GLuint index, GLenum pname, void** param) {
+    auto* context = immediateContext();
+    if (context == nullptr) {
+        return;
+    }
+    ScopedVaoArrayBufferState restore(context);
+    if (!withExtDsaVertexArray(context, vaobj)) {
+        return;
+    }
+    if (pname == GL_TEXTURE_COORD_ARRAY_POINTER) {
+        if (!context->activeTexture(GL_TEXTURE0 + index)) {
+            return;
+        }
+        (void)context->getPointer(pname, param);
+        return;
+    }
+    (void)context->getVertexAttribPointer(index, pname, param);
 }
 
 // ── Raster pixel position / copy ─────────────────────────────────────

@@ -35372,6 +35372,75 @@ struct GLContext::Impl {
     // GL_EDGE_FLAG_ARRAY. `size`/`type` stay unused — glEdgeFlagPointer
     // takes neither; the element is always a single GLboolean.
     LegacyClientArray legacyEdgeFlagArray;
+    LegacyClientArray legacyIndexArray;
+    LegacyClientArray legacyNormalArray;
+    LegacyClientArray legacyFogCoordArray;
+
+    static void exportLegacyClientArray(const LegacyClientArray& src,
+                                        GLCompatClientArrayState& dst) {
+        dst.enabled = src.enabled;
+        dst.size = src.size;
+        dst.type = src.type;
+        dst.stride = src.stride;
+        dst.pointer = reinterpret_cast<std::uintptr_t>(src.pointer);
+        dst.bufferName = src.bufferName;
+    }
+
+    static void importLegacyClientArray(const GLCompatClientArrayState& src,
+                                        LegacyClientArray& dst) {
+        dst.enabled = src.enabled;
+        dst.size = src.size;
+        dst.type = src.type;
+        dst.stride = src.stride;
+        dst.pointer = reinterpret_cast<const void*>(src.pointer);
+        dst.bufferName = src.bufferName;
+    }
+
+    void syncCompatClientArraysToVertexArray(GLVertexArrayObject& vao) {
+        exportLegacyClientArray(legacyVertexArray, vao.compatVertexArray);
+        exportLegacyClientArray(legacyColorArray, vao.compatColorArray);
+        exportLegacyClientArray(legacySecondaryColorArray, vao.compatSecondaryColorArray);
+        exportLegacyClientArray(legacyEdgeFlagArray, vao.compatEdgeFlagArray);
+        exportLegacyClientArray(legacyIndexArray, vao.compatIndexArray);
+        exportLegacyClientArray(legacyNormalArray, vao.compatNormalArray);
+        exportLegacyClientArray(legacyFogCoordArray, vao.compatFogCoordArray);
+        exportLegacyClientArray(legacyTexCoordArray, vao.compatTexCoordArray);
+        const std::size_t count = std::min<std::size_t>(
+            vao.compatTexCoordArrays.size(), legacyTexCoordArrays.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            exportLegacyClientArray(legacyTexCoordArrays[i],
+                                    vao.compatTexCoordArrays[i]);
+        }
+    }
+
+    void syncCompatClientArraysToBoundVertexArray() {
+        if (GLVertexArrayObject* vao = currentVertexArray(); vao != nullptr) {
+            syncCompatClientArraysToVertexArray(*vao);
+        } else if (defaultVertexArrayReady) {
+            syncCompatClientArraysToVertexArray(defaultVertexArray);
+        }
+    }
+
+    void syncCompatClientArraysFromVertexArray(const GLVertexArrayObject& vao) {
+        importLegacyClientArray(vao.compatVertexArray, legacyVertexArray);
+        importLegacyClientArray(vao.compatColorArray, legacyColorArray);
+        importLegacyClientArray(vao.compatSecondaryColorArray, legacySecondaryColorArray);
+        importLegacyClientArray(vao.compatEdgeFlagArray, legacyEdgeFlagArray);
+        importLegacyClientArray(vao.compatIndexArray, legacyIndexArray);
+        importLegacyClientArray(vao.compatNormalArray, legacyNormalArray);
+        importLegacyClientArray(vao.compatFogCoordArray, legacyFogCoordArray);
+        importLegacyClientArray(vao.compatTexCoordArray, legacyTexCoordArray);
+        const std::size_t count = std::min<std::size_t>(
+            vao.compatTexCoordArrays.size(), legacyTexCoordArrays.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            importLegacyClientArray(vao.compatTexCoordArrays[i],
+                                    legacyTexCoordArrays[i]);
+        }
+        const GLuint activeUnit = state->activeTextureUnit();
+        if (activeUnit < legacyTexCoordArrays.size()) {
+            legacyTexCoordArray = legacyTexCoordArrays[activeUnit];
+        }
+    }
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // capture state.

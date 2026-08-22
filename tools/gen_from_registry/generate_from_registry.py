@@ -137,6 +137,41 @@ MANUAL_EXTENSION_COMMANDS = [
     ("glDisableClientStateiEXT", "void", "GLenum array, GLuint index"),
     ("glGetPointerIndexedvEXT", "void", "GLenum target, GLuint index, void **data"),
     ("glGetPointeri_vEXT", "void", "GLenum pname, GLuint index, void **params"),
+    # GL_EXT_direct_state_access VAO compatibility entry points. These
+    # target a named VAO but otherwise mirror legacy client-array,
+    # generic-attrib, and pointer-query state. Hand-written definitions
+    # live in src/runtime/AppGLImmediateMode.cpp with the compat client
+    # array commands they reuse.
+    ("glVertexArrayVertexOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayColorOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayEdgeFlagOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayIndexOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayNormalOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayTexCoordOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayMultiTexCoordOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLenum texunit, GLint size, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayFogCoordOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArraySecondaryColorOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayVertexAttribOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, GLintptr offset"),
+    ("glVertexArrayVertexAttribIOffsetEXT", "void",
+     "GLuint vaobj, GLuint buffer, GLuint index, GLint size, GLenum type, GLsizei stride, GLintptr offset"),
+    ("glEnableVertexArrayEXT", "void", "GLuint vaobj, GLenum array"),
+    ("glDisableVertexArrayEXT", "void", "GLuint vaobj, GLenum array"),
+    ("glEnableVertexArrayAttribEXT", "void", "GLuint vaobj, GLuint index"),
+    ("glDisableVertexArrayAttribEXT", "void", "GLuint vaobj, GLuint index"),
+    ("glGetVertexArrayIntegervEXT", "void", "GLuint vaobj, GLenum pname, GLint *param"),
+    ("glGetVertexArrayIntegeri_vEXT", "void", "GLuint vaobj, GLuint index, GLenum pname, GLint *param"),
+    ("glGetVertexArrayPointervEXT", "void", "GLuint vaobj, GLenum pname, void **param"),
+    ("glGetVertexArrayPointeri_vEXT", "void", "GLuint vaobj, GLuint index, GLenum pname, void **param"),
     # GL_EXT_direct_state_access matrix commands. These are not aliases:
     # the first argument names the matrix stack to update, and GL_TEXTUREi
     # selectors must temporarily redirect the active texture unit while

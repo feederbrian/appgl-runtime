@@ -4283,6 +4283,24 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
             maxSize = 3;
             label = "glSecondaryColorPointer";
             break;
+        case GL_INDEX_ARRAY:
+            state = &impl_->legacyIndexArray;
+            minSize = 1;
+            maxSize = 1;
+            label = "glIndexPointer";
+            break;
+        case GL_NORMAL_ARRAY:
+            state = &impl_->legacyNormalArray;
+            minSize = 3;
+            maxSize = 3;
+            label = "glNormalPointer";
+            break;
+        case GL_FOG_COORD_ARRAY:
+            state = &impl_->legacyFogCoordArray;
+            minSize = 1;
+            maxSize = 1;
+            label = "glFogCoordPointer";
+            break;
         case GL_TEXTURE_COORD_ARRAY:
             state = &impl_->legacyTexCoordArrays[
                 legacyTexCoordClientArrayUnit(impl_->state->activeTextureUnit())];
@@ -4292,7 +4310,7 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
             break;
         default:
             pushError(GL_INVALID_ENUM, "glClientArrayPointer",
-                      "array is not GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_SECONDARY_COLOR_ARRAY, or GL_TEXTURE_COORD_ARRAY");
+                      "array is not a supported legacy client array");
             return false;
     }
     if (size < minSize || size > maxSize) {
@@ -4311,6 +4329,7 @@ bool GLContext::setLegacyClientArrayPointer(GLenum array,
     if (array == GL_TEXTURE_COORD_ARRAY) {
         impl_->legacyTexCoordArray = *state;
     }
+    impl_->syncCompatClientArraysToBoundVertexArray();
     return true;
 }
 
@@ -4326,6 +4345,7 @@ bool GLContext::setLegacyEdgeFlagPointer(GLsizei stride, const void* pointer) {
     state.stride = stride;
     state.pointer = pointer;
     state.bufferName = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
+    impl_->syncCompatClientArraysToBoundVertexArray();
     return true;
 }
 
@@ -4333,30 +4353,43 @@ bool GLContext::setLegacyClientArrayEnabled(GLenum array, bool enabled) {
     switch (array) {
         case GL_EDGE_FLAG_ARRAY:
             impl_->legacyEdgeFlagArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
             return true;
         case GL_VERTEX_ARRAY:
             impl_->legacyVertexArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
             return true;
         case GL_COLOR_ARRAY:
             impl_->legacyColorArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
             return true;
         case GL_SECONDARY_COLOR_ARRAY:
             impl_->legacySecondaryColorArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
+            return true;
+        case GL_INDEX_ARRAY:
+            impl_->legacyIndexArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
+            return true;
+        case GL_NORMAL_ARRAY:
+            impl_->legacyNormalArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
+            return true;
+        case GL_FOG_COORD_ARRAY:
+            impl_->legacyFogCoordArray.enabled = enabled;
+            impl_->syncCompatClientArraysToBoundVertexArray();
             return true;
         case GL_TEXTURE_COORD_ARRAY: {
             auto& state = impl_->legacyTexCoordArrays[
                 legacyTexCoordClientArrayUnit(impl_->state->activeTextureUnit())];
             state.enabled = enabled;
             impl_->legacyTexCoordArray = state;
+            impl_->syncCompatClientArraysToBoundVertexArray();
             return true;
         }
-        case GL_NORMAL_ARRAY:
-            // Accepted as a no-op for legacy fixed-function tests that
-            // deliberately bind an unused normal array.
-            return true;
         default:
             pushError(GL_INVALID_ENUM, enabled ? "glEnableClientState" : "glDisableClientState",
-                      "array is not GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_SECONDARY_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY, or GL_NORMAL_ARRAY");
+                      "array is not a supported legacy client array");
             return false;
     }
 }
@@ -4371,6 +4404,12 @@ bool GLContext::isLegacyClientArrayEnabled(GLenum array) const {
             return impl_->legacyColorArray.enabled;
         case GL_SECONDARY_COLOR_ARRAY:
             return impl_->legacySecondaryColorArray.enabled;
+        case GL_INDEX_ARRAY:
+            return impl_->legacyIndexArray.enabled;
+        case GL_NORMAL_ARRAY:
+            return impl_->legacyNormalArray.enabled;
+        case GL_FOG_COORD_ARRAY:
+            return impl_->legacyFogCoordArray.enabled;
         case GL_TEXTURE_COORD_ARRAY:
             return impl_->legacyTexCoordArrays[
                 legacyTexCoordClientArrayUnit(impl_->state->activeTextureUnit())].enabled;
@@ -4389,6 +4428,7 @@ bool GLContext::setLegacyTextureCoordArrayEnabledIndexed(GLuint index, bool enab
     if (index == 0u) {
         impl_->legacyTexCoordArray = state;
     }
+    impl_->syncCompatClientArraysToBoundVertexArray();
     return true;
 }
 
@@ -8624,10 +8664,57 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         vertexArray.size < 2 || vertexArray.size > 4) {
         return false;
     }
-    if (indexType != 0 && indices == nullptr) {
-        pushError(GL_INVALID_OPERATION, debugLabel ? debugLabel : "glDrawElements",
-                  "client element indices are null");
-        return false;
+    const std::uint8_t* indexBase = nullptr;
+    std::size_t indexAvailableBytes = 0;
+    std::size_t indexSize = 0;
+    if (indexType != 0) {
+        switch (indexType) {
+            case GL_UNSIGNED_BYTE:
+                indexSize = sizeof(GLubyte);
+                break;
+            case GL_UNSIGNED_SHORT:
+                indexSize = sizeof(GLushort);
+                break;
+            case GL_UNSIGNED_INT:
+                indexSize = sizeof(GLuint);
+                break;
+            default:
+                return false;
+        }
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        const GLVertexArrayObject* vao = vaoName != 0
+            ? impl_->objects->vertexArrays().get(vaoName)
+            : nullptr;
+        const GLuint elementBufferName =
+            vao != nullptr ? vao->elementArrayBuffer : 0;
+        if (elementBufferName != 0) {
+            const GLBufferObject* elementBuffer =
+                impl_->objects->buffers().get(elementBufferName);
+            if (elementBuffer == nullptr ||
+                elementBuffer->shadowBytes.empty()) {
+                return false;
+            }
+            const std::uintptr_t offset =
+                reinterpret_cast<std::uintptr_t>(indices);
+            if (offset > elementBuffer->shadowBytes.size()) {
+                pushError(GL_INVALID_OPERATION,
+                          debugLabel ? debugLabel : "glDrawElements",
+                          "element array buffer offset is outside buffer storage");
+                return false;
+            }
+            indexBase = elementBuffer->shadowBytes.data() +
+                static_cast<std::size_t>(offset);
+            indexAvailableBytes =
+                elementBuffer->shadowBytes.size() -
+                static_cast<std::size_t>(offset);
+        } else if (indices != nullptr) {
+            indexBase = static_cast<const std::uint8_t*>(indices);
+            indexAvailableBytes = static_cast<std::size_t>(-1);
+        } else {
+            pushError(GL_INVALID_OPERATION, debugLabel ? debugLabel : "glDrawElements",
+                      "client element indices are null");
+            return false;
+        }
     }
 
     void* fixedFunctionSamplerState = nullptr;
@@ -8778,15 +8865,22 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             out = static_cast<GLuint>(logical);
             return true;
         }
+        const std::size_t indexOffset =
+            static_cast<std::size_t>(i) * indexSize;
+        if (indexOffset > indexAvailableBytes ||
+            indexSize > indexAvailableBytes - indexOffset) {
+            return false;
+        }
+        const auto* indexPtr = indexBase + indexOffset;
         switch (indexType) {
             case GL_UNSIGNED_BYTE:
-                out = static_cast<const GLubyte*>(indices)[i];
+                out = *reinterpret_cast<const GLubyte*>(indexPtr);
                 return true;
             case GL_UNSIGNED_SHORT:
-                out = static_cast<const GLushort*>(indices)[i];
+                out = *reinterpret_cast<const GLushort*>(indexPtr);
                 return true;
             case GL_UNSIGNED_INT:
-                out = static_cast<const GLuint*>(indices)[i];
+                out = *reinterpret_cast<const GLuint*>(indexPtr);
                 return true;
             default:
                 return false;

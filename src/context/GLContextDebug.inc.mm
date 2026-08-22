@@ -240,6 +240,18 @@ bool GLContext::getPointer(GLenum pname, void** params) {
 #ifndef GL_SECONDARY_COLOR_ARRAY_POINTER
 #define GL_SECONDARY_COLOR_ARRAY_POINTER 0x845D
 #endif
+#ifndef GL_INDEX_ARRAY_POINTER
+#define GL_INDEX_ARRAY_POINTER 0x8091
+#endif
+#ifndef GL_NORMAL_ARRAY_POINTER
+#define GL_NORMAL_ARRAY_POINTER 0x808F
+#endif
+#ifndef GL_EDGE_FLAG_ARRAY_POINTER
+#define GL_EDGE_FLAG_ARRAY_POINTER 0x8093
+#endif
+#ifndef GL_FOG_COORD_ARRAY_POINTER
+#define GL_FOG_COORD_ARRAY_POINTER 0x8456
+#endif
     switch (pname) {
         case GL_DEBUG_CALLBACK_FUNCTION:
             *params = reinterpret_cast<void*>(impl_->debugCallback);
@@ -258,6 +270,18 @@ bool GLContext::getPointer(GLenum pname, void** params) {
                 impl_->state->activeTextureUnit(), params);
         case GL_SECONDARY_COLOR_ARRAY_POINTER:
             *params = const_cast<void*>(impl_->legacySecondaryColorArray.pointer);
+            return true;
+        case GL_INDEX_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacyIndexArray.pointer);
+            return true;
+        case GL_NORMAL_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacyNormalArray.pointer);
+            return true;
+        case GL_EDGE_FLAG_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacyEdgeFlagArray.pointer);
+            return true;
+        case GL_FOG_COORD_ARRAY_POINTER:
+            *params = const_cast<void*>(impl_->legacyFogCoordArray.pointer);
             return true;
         default:
             pushError(GL_INVALID_ENUM);

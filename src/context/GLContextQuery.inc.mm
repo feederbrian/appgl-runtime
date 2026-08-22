@@ -35,6 +35,126 @@
 #ifndef GL_TEXTURE_COORD_ARRAY
 #define GL_TEXTURE_COORD_ARRAY 0x8078
 #endif
+#ifndef GL_CLIENT_ACTIVE_TEXTURE
+#define GL_CLIENT_ACTIVE_TEXTURE 0x84E1
+#endif
+#ifndef GL_VERTEX_ARRAY_SIZE
+#define GL_VERTEX_ARRAY_SIZE 0x807A
+#endif
+#ifndef GL_VERTEX_ARRAY_TYPE
+#define GL_VERTEX_ARRAY_TYPE 0x807B
+#endif
+#ifndef GL_VERTEX_ARRAY_STRIDE
+#define GL_VERTEX_ARRAY_STRIDE 0x807C
+#endif
+#ifndef GL_VERTEX_ARRAY_POINTER
+#define GL_VERTEX_ARRAY_POINTER 0x808E
+#endif
+#ifndef GL_VERTEX_ARRAY_BUFFER_BINDING
+#define GL_VERTEX_ARRAY_BUFFER_BINDING 0x8896
+#endif
+#ifndef GL_COLOR_ARRAY_SIZE
+#define GL_COLOR_ARRAY_SIZE 0x8081
+#endif
+#ifndef GL_COLOR_ARRAY_TYPE
+#define GL_COLOR_ARRAY_TYPE 0x8082
+#endif
+#ifndef GL_COLOR_ARRAY_STRIDE
+#define GL_COLOR_ARRAY_STRIDE 0x8083
+#endif
+#ifndef GL_COLOR_ARRAY_POINTER
+#define GL_COLOR_ARRAY_POINTER 0x8090
+#endif
+#ifndef GL_COLOR_ARRAY_BUFFER_BINDING
+#define GL_COLOR_ARRAY_BUFFER_BINDING 0x8898
+#endif
+#ifndef GL_EDGE_FLAG_ARRAY_STRIDE
+#define GL_EDGE_FLAG_ARRAY_STRIDE 0x808C
+#endif
+#ifndef GL_EDGE_FLAG_ARRAY_POINTER
+#define GL_EDGE_FLAG_ARRAY_POINTER 0x8093
+#endif
+#ifndef GL_EDGE_FLAG_ARRAY_BUFFER_BINDING
+#define GL_EDGE_FLAG_ARRAY_BUFFER_BINDING 0x889B
+#endif
+#ifndef GL_INDEX_ARRAY
+#define GL_INDEX_ARRAY 0x8077
+#endif
+#ifndef GL_INDEX_ARRAY_TYPE
+#define GL_INDEX_ARRAY_TYPE 0x8085
+#endif
+#ifndef GL_INDEX_ARRAY_STRIDE
+#define GL_INDEX_ARRAY_STRIDE 0x8086
+#endif
+#ifndef GL_INDEX_ARRAY_POINTER
+#define GL_INDEX_ARRAY_POINTER 0x8091
+#endif
+#ifndef GL_INDEX_ARRAY_BUFFER_BINDING
+#define GL_INDEX_ARRAY_BUFFER_BINDING 0x8899
+#endif
+#ifndef GL_NORMAL_ARRAY
+#define GL_NORMAL_ARRAY 0x8075
+#endif
+#ifndef GL_NORMAL_ARRAY_TYPE
+#define GL_NORMAL_ARRAY_TYPE 0x807E
+#endif
+#ifndef GL_NORMAL_ARRAY_STRIDE
+#define GL_NORMAL_ARRAY_STRIDE 0x807F
+#endif
+#ifndef GL_NORMAL_ARRAY_POINTER
+#define GL_NORMAL_ARRAY_POINTER 0x808F
+#endif
+#ifndef GL_NORMAL_ARRAY_BUFFER_BINDING
+#define GL_NORMAL_ARRAY_BUFFER_BINDING 0x8897
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_SIZE
+#define GL_TEXTURE_COORD_ARRAY_SIZE 0x8088
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_TYPE
+#define GL_TEXTURE_COORD_ARRAY_TYPE 0x8089
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_STRIDE
+#define GL_TEXTURE_COORD_ARRAY_STRIDE 0x808A
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_POINTER
+#define GL_TEXTURE_COORD_ARRAY_POINTER 0x8092
+#endif
+#ifndef GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING
+#define GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING 0x889A
+#endif
+#ifndef GL_FOG_COORD_ARRAY
+#define GL_FOG_COORD_ARRAY 0x8457
+#endif
+#ifndef GL_FOG_COORD_ARRAY_TYPE
+#define GL_FOG_COORD_ARRAY_TYPE 0x8454
+#endif
+#ifndef GL_FOG_COORD_ARRAY_STRIDE
+#define GL_FOG_COORD_ARRAY_STRIDE 0x8455
+#endif
+#ifndef GL_FOG_COORD_ARRAY_POINTER
+#define GL_FOG_COORD_ARRAY_POINTER 0x8456
+#endif
+#ifndef GL_FOG_COORD_ARRAY_BUFFER_BINDING
+#define GL_FOG_COORD_ARRAY_BUFFER_BINDING 0x889D
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY
+#define GL_SECONDARY_COLOR_ARRAY 0x845E
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_SIZE
+#define GL_SECONDARY_COLOR_ARRAY_SIZE 0x845A
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_TYPE
+#define GL_SECONDARY_COLOR_ARRAY_TYPE 0x845B
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_STRIDE
+#define GL_SECONDARY_COLOR_ARRAY_STRIDE 0x845C
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_POINTER
+#define GL_SECONDARY_COLOR_ARRAY_POINTER 0x845D
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY_BUFFER_BINDING
+#define GL_SECONDARY_COLOR_ARRAY_BUFFER_BINDING 0x889C
+#endif
 
 #if defined(APPGL_GLCONTEXT_QUERY_INDEXED)
 namespace {
@@ -295,6 +415,46 @@ bool isLegacySecondaryColorArrayParameter(GLenum pname) {
            pname == GL_SECONDARY_COLOR_ARRAY_STRIDE;
 }
 
+template <typename LegacyClientArray>
+bool queryLegacyClientArrayInteger(
+    const LegacyClientArray& array,
+    GLenum pname,
+    GLenum enableCap,
+    GLenum sizePname,
+    GLenum typePname,
+    GLenum stridePname,
+    GLenum bufferBindingPname,
+    GLenum pointerPname,
+    GLint* data)
+{
+    if (pname == enableCap) {
+        *data = array.enabled ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (pname == sizePname && sizePname != 0) {
+        *data = array.size;
+        return true;
+    }
+    if (pname == typePname && typePname != 0) {
+        *data = static_cast<GLint>(array.type);
+        return true;
+    }
+    if (pname == stridePname && stridePname != 0) {
+        *data = static_cast<GLint>(array.stride);
+        return true;
+    }
+    if (pname == bufferBindingPname && bufferBindingPname != 0) {
+        *data = static_cast<GLint>(array.bufferName);
+        return true;
+    }
+    if (pname == pointerPname && pointerPname != 0) {
+        *data = static_cast<GLint>(
+            reinterpret_cast<std::uintptr_t>(array.pointer));
+        return true;
+    }
+    return false;
+}
+
 Matrix4 transposeLegacyMatrix(const Matrix4& matrix) {
     Matrix4 out;
     for (int column = 0; column < 4; ++column) {
@@ -513,6 +673,71 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
             default:
                 return false;
         }
+        return true;
+    }
+    if (pname == GL_CLIENT_ACTIVE_TEXTURE) {
+        *data = static_cast<GLint>(GL_TEXTURE0 + impl_->state->activeTextureUnit());
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyVertexArray, pname,
+            GL_VERTEX_ARRAY, GL_VERTEX_ARRAY_SIZE, GL_VERTEX_ARRAY_TYPE,
+            GL_VERTEX_ARRAY_STRIDE, GL_VERTEX_ARRAY_BUFFER_BINDING,
+            GL_VERTEX_ARRAY_POINTER, data)) {
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyColorArray, pname,
+            GL_COLOR_ARRAY, GL_COLOR_ARRAY_SIZE, GL_COLOR_ARRAY_TYPE,
+            GL_COLOR_ARRAY_STRIDE, GL_COLOR_ARRAY_BUFFER_BINDING,
+            GL_COLOR_ARRAY_POINTER, data)) {
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyEdgeFlagArray, pname,
+            GL_EDGE_FLAG_ARRAY, 0, 0, GL_EDGE_FLAG_ARRAY_STRIDE,
+            GL_EDGE_FLAG_ARRAY_BUFFER_BINDING, GL_EDGE_FLAG_ARRAY_POINTER,
+            data)) {
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyIndexArray, pname,
+            GL_INDEX_ARRAY, 0, GL_INDEX_ARRAY_TYPE, GL_INDEX_ARRAY_STRIDE,
+            GL_INDEX_ARRAY_BUFFER_BINDING, GL_INDEX_ARRAY_POINTER, data)) {
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyNormalArray, pname,
+            GL_NORMAL_ARRAY, 0, GL_NORMAL_ARRAY_TYPE, GL_NORMAL_ARRAY_STRIDE,
+            GL_NORMAL_ARRAY_BUFFER_BINDING, GL_NORMAL_ARRAY_POINTER, data)) {
+        return true;
+    }
+    const GLuint activeTextureUnit = impl_->state->activeTextureUnit();
+    const GLuint activeTexCoordUnit =
+        activeTextureUnit < impl_->legacyTexCoordArrays.size()
+            ? activeTextureUnit
+            : 0u;
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyTexCoordArrays[activeTexCoordUnit], pname,
+            GL_TEXTURE_COORD_ARRAY, GL_TEXTURE_COORD_ARRAY_SIZE,
+            GL_TEXTURE_COORD_ARRAY_TYPE, GL_TEXTURE_COORD_ARRAY_STRIDE,
+            GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING,
+            GL_TEXTURE_COORD_ARRAY_POINTER, data)) {
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacyFogCoordArray, pname,
+            GL_FOG_COORD_ARRAY, 0, GL_FOG_COORD_ARRAY_TYPE,
+            GL_FOG_COORD_ARRAY_STRIDE, GL_FOG_COORD_ARRAY_BUFFER_BINDING,
+            GL_FOG_COORD_ARRAY_POINTER, data)) {
+        return true;
+    }
+    if (queryLegacyClientArrayInteger(
+            impl_->legacySecondaryColorArray, pname,
+            GL_SECONDARY_COLOR_ARRAY, GL_SECONDARY_COLOR_ARRAY_SIZE,
+            GL_SECONDARY_COLOR_ARRAY_TYPE, GL_SECONDARY_COLOR_ARRAY_STRIDE,
+            GL_SECONDARY_COLOR_ARRAY_BUFFER_BINDING,
+            GL_SECONDARY_COLOR_ARRAY_POINTER, data)) {
         return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH) {

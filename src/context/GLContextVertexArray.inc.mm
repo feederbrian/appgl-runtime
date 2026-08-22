@@ -51,8 +51,10 @@ bool GLContext::bindVertexArray(GLuint array) {
         impl_->state->bindVertexArray(0);
         GLuint elementArrayBuffer = 0;
         if (appglCompatProfileEnabled()) {
-            elementArrayBuffer =
-                impl_->currentVertexArrayOrDefault()->elementArrayBuffer;
+            GLVertexArrayObject* defaultVao =
+                impl_->currentVertexArrayOrDefault();
+            elementArrayBuffer = defaultVao->elementArrayBuffer;
+            impl_->syncCompatClientArraysFromVertexArray(*defaultVao);
         }
         impl_->state->bindBuffer(
             GL_ELEMENT_ARRAY_BUFFER, elementArrayBuffer);
@@ -81,6 +83,7 @@ bool GLContext::bindVertexArray(GLuint array) {
     }
     impl_->state->bindVertexArray(array);
     impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, object->elementArrayBuffer);
+    impl_->syncCompatClientArraysFromVertexArray(*object);
     impl_->touchR5Residency(MetalR5ResidencyTouchKind::VertexArrayBind);
     return true;
 }

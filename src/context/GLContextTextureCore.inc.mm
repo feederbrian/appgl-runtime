@@ -17,6 +17,9 @@ bool GLContext::activeTexture(GLenum texture) {
     const GLuint unit = texture - GL_TEXTURE0;
     impl_->state->setActiveTextureUnit(unit);
     matrixState().setActiveTextureUnit(unit);
+    if (unit < impl_->legacyTexCoordArrays.size()) {
+        impl_->legacyTexCoordArray = impl_->legacyTexCoordArrays[unit];
+    }
     return true;
 }
 

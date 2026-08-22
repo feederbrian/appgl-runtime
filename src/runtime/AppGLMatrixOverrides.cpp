@@ -66,9 +66,7 @@ extern "C" void APIENTRY glClientActiveTexture(GLenum texture) {
                        "texture unit exceeds GL_MAX_TEXTURE_COORDS");
         return;
     }
-    const GLuint unit = texture - GL_TEXTURE0;
-    ctx->state().setActiveTextureUnit(unit);
-    ctx->matrixState().setActiveTextureUnit(unit);
+    (void)ctx->activeTexture(texture);
 }
 
 extern "C" void APIENTRY glMatrixMode(GLenum mode) {

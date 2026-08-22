@@ -1008,6 +1008,25 @@ void APIENTRY glEnableClientStateiEXT(GLenum array, GLuint index);
 void APIENTRY glDisableClientStateiEXT(GLenum array, GLuint index);
 void APIENTRY glGetPointerIndexedvEXT(GLenum target, GLuint index, void **data);
 void APIENTRY glGetPointeri_vEXT(GLenum pname, GLuint index, void **params);
+void APIENTRY glVertexArrayVertexOffsetEXT(GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayColorOffsetEXT(GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayEdgeFlagOffsetEXT(GLuint vaobj, GLuint buffer, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayIndexOffsetEXT(GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayNormalOffsetEXT(GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayTexCoordOffsetEXT(GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayMultiTexCoordOffsetEXT(GLuint vaobj, GLuint buffer, GLenum texunit, GLint size, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayFogCoordOffsetEXT(GLuint vaobj, GLuint buffer, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArraySecondaryColorOffsetEXT(GLuint vaobj, GLuint buffer, GLint size, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayVertexAttribOffsetEXT(GLuint vaobj, GLuint buffer, GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, GLintptr offset);
+void APIENTRY glVertexArrayVertexAttribIOffsetEXT(GLuint vaobj, GLuint buffer, GLuint index, GLint size, GLenum type, GLsizei stride, GLintptr offset);
+void APIENTRY glEnableVertexArrayEXT(GLuint vaobj, GLenum array);
+void APIENTRY glDisableVertexArrayEXT(GLuint vaobj, GLenum array);
+void APIENTRY glEnableVertexArrayAttribEXT(GLuint vaobj, GLuint index);
+void APIENTRY glDisableVertexArrayAttribEXT(GLuint vaobj, GLuint index);
+void APIENTRY glGetVertexArrayIntegervEXT(GLuint vaobj, GLenum pname, GLint *param);
+void APIENTRY glGetVertexArrayIntegeri_vEXT(GLuint vaobj, GLuint index, GLenum pname, GLint *param);
+void APIENTRY glGetVertexArrayPointervEXT(GLuint vaobj, GLenum pname, void **param);
+void APIENTRY glGetVertexArrayPointeri_vEXT(GLuint vaobj, GLuint index, GLenum pname, void **param);
 void APIENTRY glMatrixLoadfEXT(GLenum mode, const GLfloat *m);
 void APIENTRY glMatrixLoaddEXT(GLenum mode, const GLdouble *m);
 void APIENTRY glMatrixMultfEXT(GLenum mode, const GLfloat *m);
@@ -1319,6 +1338,8 @@ const ProcEntry kProcTable[] = {
     {"glDisableClientStateiEXT", reinterpret_cast<AppGLProc>(&::glDisableClientStateiEXT)},
     {"glDisableIndexedEXT", reinterpret_cast<AppGLProc>(&::glDisableIndexedEXT)},
     {"glDisableVertexArrayAttrib", reinterpret_cast<AppGLProc>(&::glDisableVertexArrayAttrib)},
+    {"glDisableVertexArrayAttribEXT", reinterpret_cast<AppGLProc>(&::glDisableVertexArrayAttribEXT)},
+    {"glDisableVertexArrayEXT", reinterpret_cast<AppGLProc>(&::glDisableVertexArrayEXT)},
     {"glDisableVertexAttribArray", reinterpret_cast<AppGLProc>(&::glDisableVertexAttribArray)},
     {"glDisableVertexAttribArrayARB", reinterpret_cast<AppGLProc>(&::glDisableVertexAttribArrayARB)},
     {"glDisablei", reinterpret_cast<AppGLProc>(&::glDisablei)},
@@ -1381,6 +1402,8 @@ const ProcEntry kProcTable[] = {
     {"glEnableClientStateiEXT", reinterpret_cast<AppGLProc>(&::glEnableClientStateiEXT)},
     {"glEnableIndexedEXT", reinterpret_cast<AppGLProc>(&::glEnableIndexedEXT)},
     {"glEnableVertexArrayAttrib", reinterpret_cast<AppGLProc>(&::glEnableVertexArrayAttrib)},
+    {"glEnableVertexArrayAttribEXT", reinterpret_cast<AppGLProc>(&::glEnableVertexArrayAttribEXT)},
+    {"glEnableVertexArrayEXT", reinterpret_cast<AppGLProc>(&::glEnableVertexArrayEXT)},
     {"glEnableVertexAttribArray", reinterpret_cast<AppGLProc>(&::glEnableVertexAttribArray)},
     {"glEnableVertexAttribArrayARB", reinterpret_cast<AppGLProc>(&::glEnableVertexAttribArrayARB)},
     {"glEnablei", reinterpret_cast<AppGLProc>(&::glEnablei)},
@@ -1673,6 +1696,10 @@ const ProcEntry kProcTable[] = {
     {"glGetUniformuivEXT", reinterpret_cast<AppGLProc>(&::glGetUniformuivEXT)},
     {"glGetVertexArrayIndexed64iv", reinterpret_cast<AppGLProc>(&::glGetVertexArrayIndexed64iv)},
     {"glGetVertexArrayIndexediv", reinterpret_cast<AppGLProc>(&::glGetVertexArrayIndexediv)},
+    {"glGetVertexArrayIntegeri_vEXT", reinterpret_cast<AppGLProc>(&::glGetVertexArrayIntegeri_vEXT)},
+    {"glGetVertexArrayIntegervEXT", reinterpret_cast<AppGLProc>(&::glGetVertexArrayIntegervEXT)},
+    {"glGetVertexArrayPointeri_vEXT", reinterpret_cast<AppGLProc>(&::glGetVertexArrayPointeri_vEXT)},
+    {"glGetVertexArrayPointervEXT", reinterpret_cast<AppGLProc>(&::glGetVertexArrayPointervEXT)},
     {"glGetVertexArrayiv", reinterpret_cast<AppGLProc>(&::glGetVertexArrayiv)},
     {"glGetVertexAttribIiv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribIiv)},
     {"glGetVertexAttribIivEXT", reinterpret_cast<AppGLProc>(&::glGetVertexAttribIivEXT)},
@@ -2489,10 +2516,21 @@ const ProcEntry kProcTable[] = {
     {"glVertexArrayAttribIFormat", reinterpret_cast<AppGLProc>(&::glVertexArrayAttribIFormat)},
     {"glVertexArrayAttribLFormat", reinterpret_cast<AppGLProc>(&::glVertexArrayAttribLFormat)},
     {"glVertexArrayBindingDivisor", reinterpret_cast<AppGLProc>(&::glVertexArrayBindingDivisor)},
+    {"glVertexArrayColorOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayColorOffsetEXT)},
+    {"glVertexArrayEdgeFlagOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayEdgeFlagOffsetEXT)},
     {"glVertexArrayElementBuffer", reinterpret_cast<AppGLProc>(&::glVertexArrayElementBuffer)},
+    {"glVertexArrayFogCoordOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayFogCoordOffsetEXT)},
+    {"glVertexArrayIndexOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayIndexOffsetEXT)},
+    {"glVertexArrayMultiTexCoordOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayMultiTexCoordOffsetEXT)},
+    {"glVertexArrayNormalOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayNormalOffsetEXT)},
+    {"glVertexArraySecondaryColorOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArraySecondaryColorOffsetEXT)},
+    {"glVertexArrayTexCoordOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayTexCoordOffsetEXT)},
     {"glVertexArrayVertexAttribDivisorEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexAttribDivisorEXT)},
+    {"glVertexArrayVertexAttribIOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexAttribIOffsetEXT)},
+    {"glVertexArrayVertexAttribOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexAttribOffsetEXT)},
     {"glVertexArrayVertexBuffer", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexBuffer)},
     {"glVertexArrayVertexBuffers", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexBuffers)},
+    {"glVertexArrayVertexOffsetEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexOffsetEXT)},
     {"glVertexAttrib1d", reinterpret_cast<AppGLProc>(&::glVertexAttrib1d)},
     {"glVertexAttrib1dARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dARB)},
     {"glVertexAttrib1dNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dNV)},

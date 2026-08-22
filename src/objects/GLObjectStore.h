@@ -652,6 +652,15 @@ struct GLVertexBindingPoint {
     GLuint divisor = 0;
 };
 
+struct GLCompatClientArrayState {
+    bool enabled = false;
+    GLint size = 0;
+    GLenum type = 0;
+    GLsizei stride = 0;
+    std::uintptr_t pointer = 0;
+    GLuint bufferName = 0;
+};
+
 struct GLVertexArrayBufferBinding {
     GLuint glBuffer = 0;
     std::uint32_t metalSlot = 0;
@@ -695,6 +704,15 @@ struct GLVertexArrayCachedLayout {
 struct GLVertexArrayObject {
     std::vector<GLVertexAttributeState> attributes;
     std::vector<GLVertexBindingPoint> bindingPoints;  // GL 4.3 separated format binding points
+    GLCompatClientArrayState compatVertexArray;
+    GLCompatClientArrayState compatColorArray;
+    GLCompatClientArrayState compatSecondaryColorArray;
+    GLCompatClientArrayState compatEdgeFlagArray;
+    GLCompatClientArrayState compatIndexArray;
+    GLCompatClientArrayState compatNormalArray;
+    GLCompatClientArrayState compatFogCoordArray;
+    GLCompatClientArrayState compatTexCoordArray;
+    std::array<GLCompatClientArrayState, 32> compatTexCoordArrays;
     void* metalVertexDescriptor = nullptr;
     std::string vertexDescriptorHash;
     std::string vertexDescriptorError;
